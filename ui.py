@@ -168,61 +168,63 @@ class JarvisUI:
         palette = PALETTES[emotion]
         rate = palette.pulse_rate
         intensity = palette.intensity
-        pulse = 1 + 0.08 * math.sin(self.t * rate * 2 * math.pi)
+        pulse = 1 + 0.06 * math.sin(self.t * rate * 2 * math.pi)
         radius = base_radius * pulse
 
         W, H = surface.get_width(), surface.get_height()
 
-        # 1) 외곽 후광 (additive blending)
-        halo = pygame.Surface((W, H), pygame.SRCALPHA)
-        for i in range(8, 0, -1):
-            alpha = int(18 * alpha_mult * (i / 8))
-            r = int(radius * (1 + i * 0.16))
-            pygame.draw.circle(halo, (*palette.glow, alpha), (cx, cy), r)
-        surface.blit(halo, (0, 0), special_flags=pygame.BLEND_ADD)
+        # 1) 부드러운 외곽 글로우 — 3개의 미묘한 링
+        glow = pygame.Surface((W, H), pygame.SRCALPHA)
+        for i in range(3, 0, -1):
+            t = i / 3
+            alpha = int(55 * alpha_mult * t)
+            r = int(radius * (1.1 + i * 0.16))
+            thickness = max(1, 5 - i)
+            pygame.draw.circle(glow, (*palette.glow, alpha), (cx, cy), r, thickness)
+        surface.blit(glow, (0, 0), special_flags=pygame.BLEND_ADD)
 
-        # 2) 회전 링 3개 (서로 다른 속도/각도)
+        # 2) 회전 링 4개 — 더 잘 보이게 (자비스의 시그니처)
         ring_specs = [
-            (0.4, 1.9, 0.55, 1, 130),
-            (-0.65, 2.4, 0.7, 1, 100),
-            (1.0, 2.9, 0.4, 1, 80),
+            (0.35, 1.5, 0.45, 2, 220),
+            (-0.55, 1.85, 0.65, 2, 180),
+            (0.85, 2.2, 0.35, 2, 150),
+            (-1.2, 2.6, 0.25, 1, 120),
         ]
         for rot_speed, rx, ry, thick, base_alpha in ring_specs:
-            ring_w = int(radius * rx * 2 + 20)
-            ring_h = int(radius * ry * 2 + 20)
+            ring_w = int(radius * rx * 2 + 24)
+            ring_h = int(radius * ry * 2 + 24)
             ring_surf = pygame.Surface((ring_w, ring_h), pygame.SRCALPHA)
             alpha = int(base_alpha * alpha_mult)
             pygame.draw.ellipse(
                 ring_surf, (*palette.primary, alpha),
-                (10, 10, int(radius * rx * 2), int(radius * ry * 2)), thick,
+                (12, 12, int(radius * rx * 2), int(radius * ry * 2)), thick,
             )
             angle_deg = math.degrees(self.t * rot_speed * intensity)
             rotated = pygame.transform.rotate(ring_surf, angle_deg)
             surface.blit(rotated, rotated.get_rect(center=(cx, cy)))
 
-        # 3) 코어 구체 (방사형 그라데이션)
-        gsize = int(radius * 2.4)
+        # 3) 코어 구체 (방사형 그라데이션, 작고 밝게)
+        gsize = int(radius * 2.2)
         gsurf = pygame.Surface((gsize, gsize), pygame.SRCALPHA)
         gx, gy = gsize // 2, gsize // 2
-        steps = max(10, int(radius // 3))
+        steps = max(12, int(radius // 2))
         for s in range(steps, 0, -1):
-            tn = s / steps  # 1.0 = edge, 0.0 = center
-            # edge → primary, center → glow (밝게)
+            tn = s / steps
             color = (
                 int(palette.primary[0] * tn + palette.glow[0] * (1 - tn)),
                 int(palette.primary[1] * tn + palette.glow[1] * (1 - tn)),
                 int(palette.primary[2] * tn + palette.glow[2] * (1 - tn)),
                 int(255 * alpha_mult),
             )
-            pygame.draw.circle(gsurf, color, (gx, gy), int(radius * tn))
+            pygame.draw.circle(gsurf, color, (gx, gy), int(radius * 0.9 * tn))
         surface.blit(gsurf, (cx - gx, cy - gy))
 
         # 4) 광택 하이라이트 (좌상단)
-        hl_off = int(radius * 0.35)
-        hl_r = max(4, int(radius * 0.18))
+        hl_off = int(radius * 0.3)
+        hl_r = max(4, int(radius * 0.16))
         hl = pygame.Surface((hl_r * 4, hl_r * 4), pygame.SRCALPHA)
         for s in range(hl_r, 0, -1):
-            a = int(90 * alpha_mult * (1 - s / hl_r))
+            a = int(110 * alpha_mult * (1 - s / hl_r))
             pygame.draw.circle(hl, (255, 255, 255, a), (hl_r * 2, hl_r * 2), s)
         surface.blit(hl, (cx - hl_off - hl_r * 2, cy - hl_off - hl_r * 2))
 
@@ -231,11 +233,11 @@ class JarvisUI:
             angle = p["angle"] + self.t * p["speed"] * intensity
             orbit = radius * p["radius_mult"] * (1 + 0.08 * math.sin(self.t * 2 + p["phase"]))
             px = cx + orbit * math.cos(angle)
-            py = cy + orbit * math.sin(angle) * 0.5  # 타원 궤도
-            sz = p["size"] * (1 + 0.4 * math.sin(self.t * 3 + p["phase"]))
+            py = cy + orbit * math.sin(angle) * 0.45  # 타원 궤도
+            sz = p["size"] * 0.8 * (1 + 0.4 * math.sin(self.t * 3 + p["phase"]))
             ps = pygame.Surface((int(sz * 4), int(sz * 4)), pygame.SRCALPHA)
             pygame.draw.circle(
-                ps, (*palette.primary, int(180 * alpha_mult)),
+                ps, (*palette.primary, int(200 * alpha_mult)),
                 (int(sz * 2), int(sz * 2)), int(sz),
             )
             surface.blit(ps, (px - sz * 2, py - sz * 2), special_flags=pygame.BLEND_ADD)
@@ -403,7 +405,7 @@ class JarvisUI:
         # ===== 메인 오브 =====
         orb_cx = orb_w // 2
         orb_cy = 50 + (self.HEIGHT - 50) // 2 - 50
-        orb_radius = min(orb_w // 5, (self.HEIGHT - 50) // 5)
+        orb_radius = min(orb_w // 7, (self.HEIGHT - 50) // 6)
         self._draw_orb(self.screen, orb_cx, orb_cy, orb_radius, emotion)
 
         # 오브 아래 라벨
