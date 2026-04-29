@@ -5,12 +5,11 @@ Microsoft JARVIS의 4단계 패턴을 Claude tool_use로 구현:
 """
 import base64
 import json
-import re
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import cv2
 
@@ -110,6 +109,25 @@ TOOL_DEFINITIONS = [
             "required": ["seconds"],
         },
     },
+    {
+        "name": "observe_action",
+        "description": (
+            "Analyze the user's recent action/behavior visible on camera. "
+            "Use when the user asks 'what am I doing', 'how do I look right now', "
+            "or when behavior monitoring is enabled and you need to describe an activity. "
+            "Returns a description of the person's current pose, gesture, or activity."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "focus": {
+                    "type": "string",
+                    "description": "Aspect to focus on: 'pose', 'gesture', 'activity', or a Korean phrase",
+                }
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -135,7 +153,7 @@ class ToolExecutor:
     def definitions(self) -> List[dict]:
         return TOOL_DEFINITIONS
 
-    def execute(self, name: str, args: dict) -> str:
+    def execute(self, name: str, args: Dict[str, Any]) -> str:
         """LLM이 결정한 도구 실행"""
         if self.on_event:
             self.on_event(name, "start")
@@ -169,7 +187,7 @@ class ToolExecutor:
 
         try:
             msg = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",  # 비전은 Haiku로 빠르게
+                model=cfg.vision_model,  # 비전은 Haiku로 빠르게
                 max_tokens=300,
                 messages=[
                     {
@@ -274,6 +292,50 @@ class ToolExecutor:
         if not matches:
             return f"'{query}'와 관련된 기억 없음"
         return "\n".join(f"{k}: {v}" for k, v in matches[:5])
+
+    def _t_observe_action(self, focus: str = "activity") -> str:
+        """카메라에서 사람의 행동/자세/제스처를 인식 (Claude Vision)."""
+        frame = self.vision.read()
+        if frame is None:
+            return "카메라에 사람이 보이지 않거나 프레임을 가져올 수 없습니다."
+
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            return "이미지 인코딩 실패"
+        b64 = base64.standard_b64encode(buf.tobytes()).decode("utf-8")
+
+        try:
+            msg = self.client.messages.create(
+                model=cfg.vision_model,
+                max_tokens=200,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    "이 이미지는 사용자의 카메라 화면이야. "
+                                    f"사람의 {focus}(행동/자세/제스처)을 한국어로 1-2문장으로 묘사해. "
+                                    "사람이 명확히 보이지 않으면 '사람이 보이지 않음'이라고만 답해. "
+                                    "객관적 사실만, 추측은 하지 마."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            return f"행동 인식 실패: {e}"
 
     def _t_set_timer(self, seconds: int, label: str = "타이머") -> str:
         if seconds <= 0:

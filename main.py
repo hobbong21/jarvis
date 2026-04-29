@@ -33,18 +33,12 @@ class JarvisCore:
         print(f"      백엔드: {cfg.llm_backend}")
 
         print("[3/6] 도구 시스템 (agent tools) ...")
+        self.tools: Optional[ToolExecutor] = None
         # Claude 백엔드일 때만 도구 활성화
         if cfg.llm_backend == "claude":
-            self.tools = ToolExecutor(
-                vision_system=self.vision,
-                anthropic_client=self.brain.get_client(),
-                on_event=self._on_tool_event,
-                on_timer=self._on_timer_expired,
-            )
-            self.brain.tools = self.tools
+            self._attach_tools()
             print(f"      등록된 도구: {len(self.tools.definitions())}개")
         else:
-            self.tools = None
             print("      Ollama 백엔드 — 도구 사용 불가")
 
         print("[4/6] STT (Whisper) ...")
@@ -68,6 +62,25 @@ class JarvisCore:
         print("=" * 60)
         print(f"  '{logged_in_user}'님으로 로그인. 'Jarvis' 라고 호출하세요.")
         print("=" * 60)
+
+    def _attach_tools(self):
+        """ToolExecutor 생성 및 brain에 연결 (Claude 백엔드 진입 시)"""
+        if self.tools is None:
+            self.tools = ToolExecutor(
+                vision_system=self.vision,
+                anthropic_client=self.brain.get_client(),
+                on_event=self._on_tool_event,
+                on_timer=self._on_timer_expired,
+            )
+        self.brain.tools = self.tools
+
+    def detach_tools(self):
+        """도구 비활성화 (Ollama 전환 시)"""
+        self.brain.tools = None
+
+    def reconnect_tools(self):
+        """백엔드 전환 후 도구 재연결"""
+        self._attach_tools()
 
     # -------- 라이프사이클 --------
     def start(self):
@@ -237,22 +250,14 @@ def main():
                     elif event.key == pygame.K_1:
                         try:
                             core.brain.switch_backend("claude")
-                            # Claude 전환 시 도구 다시 연결
-                            if core.tools is None:
-                                core.tools = ToolExecutor(
-                                    vision_system=core.vision,
-                                    anthropic_client=core.brain.get_client(),
-                                    on_event=core._on_tool_event,
-                                    on_timer=core._on_timer_expired,
-                                )
-                            core.brain.tools = core.tools
+                            core.reconnect_tools()
                             print("→ Claude 백엔드로 전환 (도구 활성화)")
                         except Exception as e:
                             print(f"전환 실패: {e}")
                     elif event.key == pygame.K_2:
                         try:
                             core.brain.switch_backend("ollama")
-                            core.brain.tools = None  # Ollama는 도구 미지원
+                            core.detach_tools()
                             print("→ Ollama 백엔드로 전환 (도구 비활성화)")
                         except Exception as e:
                             print(f"전환 실패: {e}")

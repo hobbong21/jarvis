@@ -1,5 +1,10 @@
-"""비전 시스템 — 카메라 캡처 + 얼굴 인식. 렌더링은 ui.py에서 처리."""
+"""비전 시스템 — 카메라 캡처 + 얼굴 인식. 렌더링은 ui.py에서 처리.
+
+VisionSystem  : 데스크톱(pygame) 모드 — 로컬 cv2 카메라
+WebVision     : 웹 모드 — 브라우저가 보낸 프레임을 보관, 같은 인터페이스 제공
+"""
 import pickle
+import threading
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -112,3 +117,47 @@ class VisionSystem:
 
     def release(self):
         self.cap.release()
+
+
+# ============================================================
+# WebVision — 브라우저에서 보내준 프레임을 보관하는 어댑터
+# tools.py 의 _t_see / _t_observe_action 은 vision.read() 만 호출하므로
+# VisionSystem 과 동일 인터페이스를 제공한다.
+# ============================================================
+class WebVision:
+    """프론트엔드가 보낸 최신 프레임을 메모리에 보관."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._frame: Optional[np.ndarray] = None
+        self._frame_ts: float = 0.0
+        # 데스크톱 비전과 동일 필드 (UI/도구가 참조)
+        self.current_user: Optional[str] = None
+        self.face_boxes: List[Tuple[int, int, int, int]] = []
+
+    def push_jpeg(self, data: bytes):
+        """브라우저가 WebSocket으로 보낸 JPEG 바이트를 디코드해 저장."""
+        arr = np.frombuffer(data, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return
+        with self._lock:
+            self._frame = frame
+            self._frame_ts = time.time()
+
+    def read(self) -> Optional[np.ndarray]:
+        """가장 최근 프레임 반환. 너무 오래된 건 무효 처리."""
+        with self._lock:
+            if self._frame is None:
+                return None
+            if time.time() - self._frame_ts > 5.0:
+                return None
+            return self._frame.copy()
+
+    def release(self):
+        with self._lock:
+            self._frame = None
+
+    def update_face_recognition(self, frame: np.ndarray):
+        """웹 모드에선 얼굴 인식을 사용하지 않음 (no-op)."""
+        return

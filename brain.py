@@ -1,4 +1,5 @@
 """두뇌 — Claude tool_use 루프 / Ollama 단순 채팅. 감정 태그 파싱 포함."""
+import traceback
 from typing import Optional, Tuple
 
 from config import cfg
@@ -60,6 +61,7 @@ class Brain:
             else:
                 return self._think_ollama()
         except Exception as e:
+            traceback.print_exc()
             return Emotion.CONCERNED, f"AI 통신 오류가 발생했어요. {e}"
 
     # ============================================================
@@ -138,12 +140,27 @@ class Brain:
     # Ollama (도구 없음, 단순 채팅)
     # ============================================================
     def _think_ollama(self) -> Tuple[Emotion, str]:
-        # Ollama 히스토리는 단순 텍스트만
-        simple_history = [
-            {"role": h["role"], "content": h["content"] if isinstance(h["content"], str) else "[tool exchange]"}
-            for h in self.history
-            if isinstance(h["content"], str)  # tool_use 메시지는 건너뛰기
-        ]
+        # Ollama 히스토리는 단순 텍스트만 — Claude tool_use 메시지는 텍스트로 평탄화
+        simple_history = []
+        for h in self.history:
+            content = h["content"]
+            if isinstance(content, str):
+                simple_history.append({"role": h["role"], "content": content})
+            elif isinstance(content, list):
+                # tool_use / tool_result 블록을 자연어로 합치기
+                parts = []
+                for b in content:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "text":
+                        parts.append(b.get("text", ""))
+                    elif b.get("type") == "tool_use":
+                        parts.append(f"[도구 호출: {b.get('name')}]")
+                    elif b.get("type") == "tool_result":
+                        parts.append(f"[도구 결과: {b.get('content', '')}]")
+                flat = " ".join(p for p in parts if p).strip()
+                if flat:
+                    simple_history.append({"role": h["role"], "content": flat})
         messages = [{"role": "system", "content": cfg.system_prompt}] + simple_history
         res = self.client.chat(
             model=cfg.ollama_model,

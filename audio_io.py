@@ -3,6 +3,7 @@ import asyncio
 import os
 import tempfile
 import threading
+import time
 from typing import Callable
 
 import numpy as np
@@ -60,7 +61,7 @@ class WakeWordListener:
     def _loop(self):
         while self._running:
             if self._paused:
-                threading.Event().wait(0.1)
+                time.sleep(0.1)
                 continue
             try:
                 pcm = self.recorder.read()
@@ -135,7 +136,8 @@ class WhisperSTT:
             cfg.whisper_model, device=device, compute_type=compute_type
         )
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio) -> str:
+        """numpy 배열 또는 파일 경로(str) 모두 지원 (faster-whisper 가 내부적으로 디코드)."""
         segments, _ = self.model.transcribe(
             audio,
             language=cfg.whisper_language,
@@ -151,7 +153,8 @@ class WhisperSTT:
 class EdgeTTS:
     def __init__(self):
         import pygame
-        pygame.mixer.init(frequency=24000)
+        if not pygame.mixer.get_init():
+            pygame.mixer.init(frequency=24000)
         self._pygame = pygame
 
     def speak(self, text: str):
@@ -182,3 +185,17 @@ class EdgeTTS:
             path = f.name
         await communicate.save(path)
         return path
+
+    def synthesize_bytes(self, text: str) -> bytes:
+        """텍스트 → MP3 바이트 (웹 서버가 클라이언트에 푸시할 때 사용)."""
+        if not text.strip():
+            return b""
+        path = self._synthesize(text)
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass

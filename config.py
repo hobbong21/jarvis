@@ -12,6 +12,8 @@ class Config:
     # Claude API
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     claude_model: str = "claude-sonnet-4-6"
+    # 비전 도구는 빠른 Haiku를 사용 (가격/지연 절감)
+    vision_model: str = "claude-haiku-4-5"
 
     # Ollama (로컬, 도구 사용 비활성화)
     ollama_host: str = "http://localhost:11434"

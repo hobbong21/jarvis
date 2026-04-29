@@ -45,16 +45,23 @@ class AuthSystem:
         return len(self.users) > 0
 
     def create_user(self, username: str, password: str) -> bool:
+        """레거시: 성공 여부만 반환. 사유가 필요하면 create_user_detail 사용."""
+        return self.create_user_detail(username, password) is None
+
+    def create_user_detail(self, username: str, password: str) -> Optional[str]:
+        """성공이면 None, 실패면 사유 메시지(한국어)를 반환."""
         username = username.strip()
-        if not username or not password:
-            return False
+        if not username:
+            return "사용자명을 입력해주세요."
+        if not password:
+            return "비밀번호를 입력해주세요."
         if len(password) < 4:
-            return False
+            return "비밀번호는 4자 이상이어야 합니다."
         if username in self.users:
-            return False
+            return "이미 존재하는 사용자명입니다."
         self.users[username] = {"password": hash_password(password)}
         self.save()
-        return True
+        return None
 
     def verify(self, username: str, password: str) -> bool:
         u = self.users.get(username.strip())

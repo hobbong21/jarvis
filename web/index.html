@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#03070C">
+  <title>J.A.R.V.I.S</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ======================== Login ======================== -->
+<section id="login-screen" class="screen">
+  <div class="grid-bg"></div>
+  <div class="login-card">
+    <canvas id="login-orb" width="200" height="200" aria-hidden="true"></canvas>
+    <h1 class="brand">J.A.R.V.I.S</h1>
+    <p id="login-sub" class="sub">AUTHENTICATION REQUIRED</p>
+
+    <form id="login-form" autocomplete="off">
+      <input id="username" type="text" placeholder="Username" autocomplete="username" required>
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password" required minlength="4">
+      <button id="login-btn" type="submit">AUTHENTICATE</button>
+    </form>
+
+    <p id="login-msg" class="error-msg"></p>
+    <p class="hint">ENTER 제출 · ESC 취소</p>
+  </div>
+</section>
+
+<!-- ======================== Main ======================== -->
+<section id="main-screen" class="screen hidden">
+  <header class="topbar">
+    <div class="brand-sm">J . A . R . V . I . S</div>
+    <div id="state-pill" class="state-pill">STATE · IDLE</div>
+    <div class="meta">
+      <span id="clock"></span>
+      <span class="dot">·</span>
+      <span>USER <strong id="user-label"></strong></span>
+      <span class="dot">·</span>
+      <span>BRAIN <strong id="backend-label">CLAUDE</strong></span>
+      <button id="logout-btn" class="ghost">LOGOUT</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 좌: 오브 + 컨트롤 -->
+    <div class="orb-pane">
+      <canvas id="orb" width="640" height="640"></canvas>
+      <div class="orb-label">
+        <span id="emotion-label">NEUTRAL</span>
+        <span id="hint-label" class="hint">버튼을 누르거나 SPACE 를 눌러 말하세요</span>
+      </div>
+      <div id="tool-badge" class="tool-badge hidden">⚙ <span id="tool-name"></span></div>
+
+      <div class="controls">
+        <button id="mic-btn" class="primary big" aria-label="음성 입력">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2a3 3 0 00-3 3v6a3 3 0 006 0V5a3 3 0 00-3-3z"/>
+            <path d="M19 10a7 7 0 01-14 0"/>
+            <line x1="12" y1="17" x2="12" y2="22"/>
+            <line x1="8" y1="22" x2="16" y2="22"/>
+          </svg>
+          <span id="mic-label">SPEAK</span>
+        </button>
+      </div>
+
+      <form id="text-form" class="text-input">
+        <input id="text-input" type="text" placeholder="텍스트로 입력...">
+        <button type="submit" class="ghost">SEND</button>
+      </form>
+
+      <div class="quick-keys">
+        <button data-key="claude" class="ghost">1·CLAUDE</button>
+        <button data-key="ollama" class="ghost">2·OLLAMA</button>
+        <button data-key="reset" class="ghost">R·RESET</button>
+      </div>
+    </div>
+
+    <!-- 우: 카메라 + 로그 -->
+    <aside class="side-pane">
+      <div class="cam-wrap">
+        <video id="cam" autoplay muted playsinline></video>
+        <canvas id="cam-canvas" class="hidden"></canvas>
+        <div class="cam-overlay">
+          <span class="cam-label">VISUAL FEED · WHAT JARVIS SEES</span>
+          <span id="cam-status" class="cam-status">OFF</span>
+        </div>
+      </div>
+
+      <div class="cam-controls">
+        <select id="cam-select" class="ghost"><option>Loading...</option></select>
+        <button id="cam-toggle" class="ghost">START</button>
+        <label class="toggle">
+          <input id="observe-toggle" type="checkbox" disabled>
+          <span>행동 인식</span>
+        </label>
+      </div>
+
+      <div id="observation-card" class="observation hidden">
+        <div class="obs-title">OBSERVATION</div>
+        <div id="observation-text"></div>
+      </div>
+
+      <div class="log-pane">
+        <div class="log-header">COMMUNICATION LOG</div>
+        <div id="log" class="log-body" role="log" aria-live="polite"></div>
+      </div>
+    </aside>
+  </main>
+</section>
+
+<audio id="tts-audio" preload="auto"></audio>
+
+<script src="/static/orb.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

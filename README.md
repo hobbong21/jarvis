@@ -1,6 +1,7 @@
 # J.A.R.V.I.S — Personal AI Assistant
 
-웹캠으로 사용자를 알아보고, "Jarvis" 호출어로 깨어나 한국어로 대화하는 데스크톱 자비스.
+웹캠으로 사용자를 알아보고, 호출어 또는 푸시투토크로 깨어나 한국어로 대화하는 자비스.
+**데스크톱(pygame)** 모드와 **웹(FastAPI)** 모드 모두 지원.
 **Microsoft JARVIS의 4단계 agent 패턴**(Task Planning → Model Selection → Task Execution → Response Generation)을 Claude의 native tool_use로 구현.
 
 ## 핵심 기능
@@ -26,6 +27,7 @@
 | `remember` | 장기 기억 저장 | "내 차 비밀번호는 1234야" |
 | `recall` | 장기 기억 검색 | "내 차 비밀번호 뭐였지?" |
 | `set_timer` | 타이머 (음성 알림) | "10분 뒤에 알려줘" |
+| `observe_action` | 카메라에서 사람 행동/자세 인식 (웹 모드) | "내가 뭐 하고 있어?" |
 
 ### 동작 예시
 
@@ -69,6 +71,8 @@ python face_setup.py
 
 ## 4. 실행
 
+### 4-A. 데스크톱 모드 (pygame)
+
 ```bash
 python main.py
 ```
@@ -76,7 +80,7 @@ python main.py
 - 첫 실행 — 계정 생성 (사용자명 + 비밀번호 4자 이상)
 - 이후 — 로그인 → 자동 환영 → "Jarvis" 호출 대기
 
-### 단축키
+#### 단축키
 
 | 키 | 동작 |
 |---|---|
@@ -85,20 +89,49 @@ python main.py
 | 2 | Ollama 백엔드 (도구 비활성화) |
 | R | 대화 히스토리 초기화 |
 
+### 4-B. 웹 모드 (반응형 브라우저 UI)
+
+```bash
+python server.py
+# 또는: uvicorn server:app --host 0.0.0.0 --port 8000
+```
+
+브라우저에서 `http://localhost:8000` 접속.
+
+특징:
+- 푸시투토크 (`SPACE` 또는 마이크 버튼) — 1.5초 무음 시 자동 종료
+- 카메라 선택 + 라이브 피드 → 매 1초 프레임을 서버로 전송
+- **행동 인식 토글** — 활성화하면 6초마다 자비스가 사람의 행동/자세를 자동 묘사
+- 모바일/태블릿/데스크톱 모두 반응형
+
+#### 단축키 (웹)
+
+| 키 | 동작 |
+|---|---|
+| SPACE | 음성 입력 시작/종료 |
+| 1 / 2 | Claude / Ollama 전환 |
+| R | 대화 히스토리 초기화 |
+
 ## 프로젝트 구조
 
 ```
 jarvis/
-├── main.py          # 엔트리: 로그인 → 코어 → UI 루프
+├── main.py          # 데스크톱 엔트리: 로그인 → 코어 → pygame UI 루프
+├── server.py        # 웹 엔트리: FastAPI + WebSocket
 ├── config.py        # 설정 + 시스템 프롬프트
 ├── auth.py          # PBKDF2 인증
 ├── ui.py            # Pygame UI (로그인 + 메인 + 오브)
 ├── emotion.py       # 감정 enum + 색상 팔레트 + 태그 파서
 ├── brain.py         # LLM + tool_use 루프 (4단계 agent)
-├── tools.py         # NEW — 도구 정의 + 실행기
+├── tools.py         # 도구 정의 + 실행기 (see, observe_action, ...)
 ├── audio_io.py      # 호출어 + STT + TTS
-├── vision.py        # 카메라 + 얼굴 인식
+├── vision.py        # 카메라 + 얼굴 인식 + WebVision 어댑터
 ├── face_setup.py    # 얼굴 등록 스크립트
+├── web/             # 웹 모드 정적 자산
+│   ├── index.html
+│   ├── style.css
+│   ├── orb.js       # Canvas 감정 오브
+│   └── app.js       # WebSocket 클라이언트 + 마이크/카메라
 ├── requirements.txt
 ├── LICENSE          # MIT
 ├── README.md

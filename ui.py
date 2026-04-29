@@ -297,13 +297,15 @@ class JarvisUI:
             nonlocal message
             u, p = username_input.text, password_input.text
             if is_first:
-                if auth.create_user(u, p):
+                err = auth.create_user_detail(u, p)
+                if err is None:
                     return u
-                message = "사용자명/비밀번호 확인 (4자 이상)"
+                message = err
+                password_input.text = ""
             else:
                 if auth.verify(u, p):
                     return u
-                message = "인증 실패"
+                message = "인증 실패 — 사용자명 또는 비밀번호가 잘못되었습니다."
                 password_input.text = ""
             return None
 
