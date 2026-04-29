@@ -40,7 +40,11 @@ print("=" * 60)
 WEB_DIR = Path(__file__).parent / "web"
 
 print("[1/3] STT (Whisper) ...")
-STT = WhisperSTT()
+try:
+    STT = WhisperSTT()
+except Exception as e:
+    print(f"      STT 초기화 실패: {e}")
+    STT = None
 
 print("[2/3] TTS (Edge-TTS) ...")
 TTS = EdgeTTS()
@@ -52,7 +56,7 @@ AUTH = AuthSystem(cfg.users_file)
 SESSIONS: Dict[str, str] = {}
 
 print("=" * 60)
-print(f"  준비 완료. http://localhost:8000")
+print(f"  준비 완료. http://localhost:5000")
 print("=" * 60)
 
 
@@ -71,11 +75,10 @@ class UserSession:
         self._observe_thread: Optional[threading.Thread] = None
         self._observe_stop = threading.Event()
         self._last_observation = ""
-        # 외부에서 등록할 콜백 (WebSocket으로 push)
-        self.on_event = None  # async (msg: dict) -> None
+        self.on_event = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
 
-        if cfg.llm_backend == "claude":
+        if cfg.llm_backend == "claude" and cfg.anthropic_api_key:
             self._attach_tools()
 
     def _attach_tools(self):
@@ -386,6 +389,11 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
     try:
         await emit(type="state", state="thinking")
         await emit(type="emotion", emotion="thinking")
+        if STT is None:
+            await emit(type="error", message="STT 모듈이 초기화되지 않았습니다.")
+            await emit(type="state", state="idle")
+            await emit(type="emotion", emotion="neutral")
+            return
         text = await asyncio.to_thread(STT.transcribe, path)
         text = (text or "").strip()
         if not text or len(text) < 2:
@@ -427,4 +435,4 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("server:app", host="0.0.0.0", port=5000, reload=False)

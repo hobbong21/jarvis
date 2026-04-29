@@ -7,7 +7,10 @@ import time
 from typing import Callable
 
 import numpy as np
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except Exception:
+    sd = None
 
 from config import cfg
 
@@ -152,14 +155,19 @@ class WhisperSTT:
 # ============================================================
 class EdgeTTS:
     def __init__(self):
-        import pygame
-        if not pygame.mixer.get_init():
-            pygame.mixer.init(frequency=24000)
-        self._pygame = pygame
+        try:
+            import pygame
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=24000)
+            self._pygame = pygame
+        except Exception:
+            self._pygame = None
 
     def speak(self, text: str):
         """텍스트를 합성하여 재생 (블로킹)"""
         if not text.strip():
+            return
+        if self._pygame is None:
             return
         path = self._synthesize(text)
         try:

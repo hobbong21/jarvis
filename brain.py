@@ -26,10 +26,12 @@ class Brain:
         if cfg.llm_backend == "claude":
             from anthropic import Anthropic
             if not cfg.anthropic_api_key:
-                raise ValueError(
-                    "ANTHROPIC_API_KEY 환경변수를 설정해주세요.\n"
-                    "또는 Ollama로 전환: JARVIS_BACKEND=ollama"
+                print(
+                    "[Brain] 경고: ANTHROPIC_API_KEY 환경변수가 없습니다. "
+                    "설정 후 재시작하세요."
                 )
+                self.client = None
+                return
             self.client = Anthropic(api_key=cfg.anthropic_api_key)
         elif cfg.llm_backend == "ollama":
             import ollama
@@ -54,6 +56,11 @@ class Brain:
         self.history.append({"role": "user", "content": user_message})
 
         try:
+            if self.client is None:
+                return Emotion.CONCERNED, (
+                    "ANTHROPIC_API_KEY가 설정되지 않았습니다. "
+                    "환경변수에 API 키를 추가하고 서버를 재시작해주세요."
+                )
             if cfg.llm_backend == "claude" and self.tools is not None:
                 return self._think_with_tools()
             elif cfg.llm_backend == "claude":
