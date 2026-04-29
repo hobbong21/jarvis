@@ -1,0 +1,322 @@
+"""자비스 도구 시스템 — LLM이 호출하는 전문 모델/기능들
+
+Microsoft JARVIS의 4단계 패턴을 Claude tool_use로 구현:
+  Task Planning → Model Selection → Task Execution → Response Generation
+"""
+import base64
+import json
+import re
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, List, Optional
+
+import cv2
+
+from config import cfg
+
+
+# ============================================================
+# Anthropic Tool Use 형식의 도구 스펙
+# ============================================================
+TOOL_DEFINITIONS = [
+    {
+        "name": "see",
+        "description": (
+            "Take a snapshot from the camera and describe what's visible. "
+            "Use this when the user asks about their physical surroundings, "
+            "what they're holding, their appearance, or anything visual."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "Specific question about the scene to focus the analysis (in Korean)",
+                }
+            },
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web for current information. Use when the user asks about "
+            "recent news, current facts, or anything beyond your knowledge."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_weather",
+        "description": "Get current weather for a location (free Open-Meteo API).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "City name (e.g., 'Seoul', 'Tokyo')",
+                }
+            },
+            "required": ["location"],
+        },
+    },
+    {
+        "name": "get_time",
+        "description": "Get the current date and time.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "remember",
+        "description": (
+            "Store information in long-term memory. Use when the user asks you to "
+            "remember something, or when you discover important user info."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "Short identifier"},
+                "value": {"type": "string", "description": "Information to store"},
+            },
+            "required": ["key", "value"],
+        },
+    },
+    {
+        "name": "recall",
+        "description": "Search long-term memory for information.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to look for"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "set_timer",
+        "description": "Set a timer that announces when expired.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "seconds": {"type": "integer", "description": "Duration in seconds"},
+                "label": {"type": "string", "description": "What the timer is for"},
+            },
+            "required": ["seconds"],
+        },
+    },
+]
+
+
+# ============================================================
+# 도구 실행기
+# ============================================================
+class ToolExecutor:
+    def __init__(
+        self,
+        vision_system,
+        anthropic_client,
+        on_event: Optional[Callable[[str, str], None]] = None,
+        on_timer: Optional[Callable[[str], None]] = None,
+    ):
+        self.vision = vision_system
+        self.client = anthropic_client  # Claude Vision 호출용
+        self.on_event = on_event       # callback(tool_name, status: "start"|"end")
+        self.on_timer = on_timer       # callback(label) — 타이머 만료 시 호출
+
+        self.memory_path = Path("memory.json")
+        self.memory: dict = self._load_memory()
+
+    def definitions(self) -> List[dict]:
+        return TOOL_DEFINITIONS
+
+    def execute(self, name: str, args: dict) -> str:
+        """LLM이 결정한 도구 실행"""
+        if self.on_event:
+            self.on_event(name, "start")
+        try:
+            method = getattr(self, f"_t_{name}", None)
+            if method is None:
+                return f"Unknown tool: {name}"
+            result = method(**args)
+        except TypeError as e:
+            result = f"Argument error: {e}"
+        except Exception as e:
+            result = f"Tool '{name}' failed: {e}"
+        finally:
+            if self.on_event:
+                self.on_event(name, "end")
+        return result
+
+    # -------- Tools --------
+
+    def _t_see(self, question: str) -> str:
+        """카메라 프레임 → Claude Vision"""
+        frame = self.vision.read()
+        if frame is None:
+            return "카메라 프레임을 가져올 수 없습니다."
+
+        # JPEG 압축 (속도/대역폭)
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            return "이미지 인코딩 실패"
+        b64 = base64.standard_b64encode(buf.tobytes()).decode("utf-8")
+
+        try:
+            msg = self.client.messages.create(
+                model="claude-haiku-4-5-20251001",  # 비전은 Haiku로 빠르게
+                max_tokens=300,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"사용자의 카메라에서 찍힌 장면이야. "
+                                    f"다음 질문에 한국어로 간결히 답해줘 (1-2문장):\n{question}"
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            return f"비전 분석 실패: {e}"
+
+    def _t_web_search(self, query: str) -> str:
+        try:
+            from duckduckgo_search import DDGS
+            results = list(DDGS().text(query, max_results=4, region="kr-kr"))
+        except Exception as e:
+            return f"검색 실패: {e}"
+
+        if not results:
+            return f"'{query}' 검색 결과 없음"
+        lines = []
+        for r in results[:4]:
+            title = r.get("title", "").strip()
+            body = r.get("body", "").strip()
+            if title and body:
+                lines.append(f"- {title}: {body}")
+        return "\n".join(lines) if lines else "검색 결과 없음"
+
+    def _t_get_weather(self, location: str) -> str:
+        import urllib.parse
+        import urllib.request
+
+        try:
+            # 1) 지오코딩
+            q = urllib.parse.quote(location)
+            geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={q}&count=1&language=ko"
+            with urllib.request.urlopen(geo_url, timeout=5) as r:
+                geo = json.loads(r.read())
+            if not geo.get("results"):
+                return f"'{location}' 위치 정보를 찾을 수 없습니다."
+            place = geo["results"][0]
+            lat, lon = place["latitude"], place["longitude"]
+            name = place.get("name", location)
+            country = place.get("country", "")
+
+            # 2) 날씨
+            w_url = (
+                f"https://api.open-meteo.com/v1/forecast?"
+                f"latitude={lat}&longitude={lon}"
+                f"&current=temperature_2m,weather_code,wind_speed_10m,relative_humidity_2m"
+                f"&timezone=auto"
+            )
+            with urllib.request.urlopen(w_url, timeout=5) as r:
+                w = json.loads(r.read())
+            cur = w["current"]
+            code = cur["weather_code"]
+            desc = _WEATHER_CODES.get(code, f"코드 {code}")
+
+            return (
+                f"{name}{(' (' + country + ')') if country else ''} 현재 {desc}, "
+                f"기온 {cur['temperature_2m']}°C, "
+                f"습도 {cur['relative_humidity_2m']}%, "
+                f"풍속 {cur['wind_speed_10m']}m/s"
+            )
+        except Exception as e:
+            return f"날씨 조회 실패: {e}"
+
+    def _t_get_time(self) -> str:
+        weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+        n = datetime.now()
+        return f"{n.year}년 {n.month}월 {n.day}일 {weekdays[n.weekday()]} {n.hour}시 {n.minute}분"
+
+    def _t_remember(self, key: str, value: str) -> str:
+        self.memory[key] = {"value": value, "ts": time.time()}
+        self._save_memory()
+        return f"기억함: '{key}' = '{value}'"
+
+    def _t_recall(self, query: str) -> str:
+        q = query.lower()
+        matches = [
+            (k, v["value"])
+            for k, v in self.memory.items()
+            if q in k.lower() or q in v["value"].lower()
+        ]
+        if not matches:
+            return f"'{query}'와 관련된 기억 없음"
+        return "\n".join(f"{k}: {v}" for k, v in matches[:5])
+
+    def _t_set_timer(self, seconds: int, label: str = "타이머") -> str:
+        if seconds <= 0:
+            return "타이머는 1초 이상이어야 합니다."
+
+        def trigger():
+            time.sleep(seconds)
+            print(f"\n⏰ 타이머 만료: {label}")
+            if self.on_timer:
+                self.on_timer(label)
+
+        threading.Thread(target=trigger, daemon=True).start()
+        # 사람이 읽기 좋은 형식
+        if seconds >= 60:
+            mins, secs = divmod(seconds, 60)
+            human = f"{mins}분 {secs}초" if secs else f"{mins}분"
+        else:
+            human = f"{seconds}초"
+        return f"{human} 타이머 '{label}' 설정됨"
+
+    # -------- 메모리 입출력 --------
+    def _load_memory(self) -> dict:
+        if self.memory_path.exists():
+            try:
+                return json.loads(self.memory_path.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+        return {}
+
+    def _save_memory(self):
+        self.memory_path.write_text(
+            json.dumps(self.memory, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+
+# WMO weather codes → 한국어
+_WEATHER_CODES = {
+    0: "맑음", 1: "대체로 맑음", 2: "구름 조금", 3: "흐림",
+    45: "안개", 48: "서리 안개",
+    51: "이슬비 약함", 53: "이슬비", 55: "강한 이슬비",
+    61: "비 약함", 63: "비", 65: "강한 비",
+    71: "눈 약함", 73: "눈", 75: "강한 눈",
+    77: "싸락눈", 80: "소나기", 81: "강한 소나기", 82: "매우 강한 소나기",
+    85: "눈 소나기", 86: "강한 눈 소나기",
+    95: "뇌우", 96: "뇌우+우박", 99: "강한 뇌우+우박",
+}

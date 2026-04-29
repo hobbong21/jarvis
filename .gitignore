@@ -1,0 +1,49 @@
+# 사용자 생성 데이터 (민감 정보)
+users.json
+memory.json
+faces/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 환경변수 / API 키
+.env
+.env.local
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 빌드 산출물
+build/
+dist/
+*.egg
+
+# 모델 캐시 (Whisper 등)
+models/
+*.bin
+*.pt
+*.onnx
+
+# 임시 파일
+*.log
+*.tmp
+*.mp3
+*.wav

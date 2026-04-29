@@ -1,0 +1,184 @@
+"""음성 입출력 — 호출어 감지, 음성 녹음/인식, 음성 합성"""
+import asyncio
+import os
+import tempfile
+import threading
+from typing import Callable
+
+import numpy as np
+import sounddevice as sd
+
+from config import cfg
+
+
+# ============================================================
+# 1. 호출어 감지 (Picovoice Porcupine)
+# ============================================================
+class WakeWordListener:
+    """'자비스' 같은 호출어를 항상 듣고 있다가 콜백 실행"""
+
+    def __init__(self, on_wake: Callable[[], None]):
+        import pvporcupine
+        from pvrecorder import PvRecorder
+
+        if not cfg.porcupine_access_key:
+            raise ValueError(
+                "PORCUPINE_ACCESS_KEY 환경변수가 필요합니다.\n"
+                "https://console.picovoice.ai/ 에서 무료로 발급받으세요."
+            )
+        self.porcupine = pvporcupine.create(
+            access_key=cfg.porcupine_access_key,
+            keywords=cfg.wake_keywords,
+        )
+        self.recorder = PvRecorder(frame_length=self.porcupine.frame_length)
+        self.on_wake = on_wake
+        self._running = False
+        self._paused = False
+        self._thread = None
+
+    def start(self):
+        self._running = True
+        self.recorder.start()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def pause(self):
+        """STT나 TTS 중에는 일시 중지"""
+        self._paused = True
+        try:
+            self.recorder.stop()
+        except Exception:
+            pass
+
+    def resume(self):
+        try:
+            self.recorder.start()
+        except Exception:
+            pass
+        self._paused = False
+
+    def _loop(self):
+        while self._running:
+            if self._paused:
+                threading.Event().wait(0.1)
+                continue
+            try:
+                pcm = self.recorder.read()
+                if self.porcupine.process(pcm) >= 0:
+                    self.on_wake()
+            except Exception as e:
+                # 일시 중지 중 발생하는 read 오류 무시
+                if self._running and not self._paused:
+                    print(f"[WakeWord] {e}")
+
+    def stop(self):
+        self._running = False
+        try:
+            self.recorder.stop()
+            self.recorder.delete()
+            self.porcupine.delete()
+        except Exception:
+            pass
+
+
+# ============================================================
+# 2. 음성 녹음 (침묵 감지 기반)
+# ============================================================
+class SpeechRecorder:
+    SAMPLE_RATE = 16000
+
+    def record(self) -> np.ndarray:
+        """말하는 동안 녹음. 일정 시간 침묵하면 종료."""
+        chunks = []
+        silence_count = 0
+        chunk_dur = 0.1
+        chunk_size = int(self.SAMPLE_RATE * chunk_dur)
+        max_chunks = int(cfg.max_recording / chunk_dur)
+        silence_limit = int(cfg.silence_duration / chunk_dur)
+        speaking = False
+
+        with sd.InputStream(
+            samplerate=self.SAMPLE_RATE, channels=1, dtype="float32"
+        ) as stream:
+            for _ in range(max_chunks):
+                data, _ = stream.read(chunk_size)
+                chunks.append(data.copy())
+                vol = float(np.sqrt(np.mean(data ** 2)))
+                if vol > cfg.silence_threshold:
+                    speaking = True
+                    silence_count = 0
+                elif speaking:
+                    silence_count += 1
+                    if silence_count >= silence_limit:
+                        break
+
+        return np.concatenate(chunks).flatten().astype(np.float32)
+
+
+# ============================================================
+# 3. STT (Faster-Whisper)
+# ============================================================
+class WhisperSTT:
+    def __init__(self):
+        from faster_whisper import WhisperModel
+
+        device = cfg.whisper_device
+        if device == "auto":
+            try:
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                device = "cpu"
+        compute_type = "float16" if device == "cuda" else "int8"
+        print(f"      Whisper 로딩: {cfg.whisper_model} ({device}/{compute_type})")
+        self.model = WhisperModel(
+            cfg.whisper_model, device=device, compute_type=compute_type
+        )
+
+    def transcribe(self, audio: np.ndarray) -> str:
+        segments, _ = self.model.transcribe(
+            audio,
+            language=cfg.whisper_language,
+            beam_size=5,
+            vad_filter=True,
+        )
+        return " ".join(s.text for s in segments).strip()
+
+
+# ============================================================
+# 4. TTS (Edge-TTS + pygame 재생)
+# ============================================================
+class EdgeTTS:
+    def __init__(self):
+        import pygame
+        pygame.mixer.init(frequency=24000)
+        self._pygame = pygame
+
+    def speak(self, text: str):
+        """텍스트를 합성하여 재생 (블로킹)"""
+        if not text.strip():
+            return
+        path = self._synthesize(text)
+        try:
+            self._pygame.mixer.music.load(path)
+            self._pygame.mixer.music.play()
+            while self._pygame.mixer.music.get_busy():
+                self._pygame.time.Clock().tick(20)
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+    def _synthesize(self, text: str) -> str:
+        return asyncio.run(self._synthesize_async(text))
+
+    async def _synthesize_async(self, text: str) -> str:
+        import edge_tts
+        communicate = edge_tts.Communicate(
+            text, voice=cfg.tts_voice, rate=cfg.tts_rate, pitch=cfg.tts_pitch
+        )
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            path = f.name
+        await communicate.save(path)
+        return path
