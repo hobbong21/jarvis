@@ -7,7 +7,7 @@ from typing import List
 @dataclass
 class Config:
     # ============ LLM 백엔드 ============
-    llm_backend: str = os.getenv("JARVIS_BACKEND", "ollama")  # "claude" | "ollama"
+    llm_backend: str = os.getenv("JARVIS_BACKEND", "claude")  # "claude" | "ollama"
 
     # Claude API
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
