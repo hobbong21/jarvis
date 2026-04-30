@@ -3,21 +3,10 @@
   // ---------- DOM ----------
   const $ = (id) => document.getElementById(id);
 
-  const loginScreen = $('login-screen');
   const mainScreen = $('main-screen');
-  const loginForm = $('login-form');
-  const loginMsg = $('login-msg');
-  const loginSub = $('login-sub');
-  const loginBtn = $('login-btn');
-  const usernameInput = $('username');
-  const passwordInput = $('password');
-
-  const orbCanvas = $('orb');
-  const loginOrbCanvas = $('login-orb');
   const emotionLabel = $('emotion-label');
   const hintLabel = $('hint-label');
   const statePill = $('state-pill');
-  const userLabel = $('user-label');
   const backendLabel = $('backend-label');
   const clockEl = $('clock');
   const toolBadge = $('tool-badge');
@@ -27,8 +16,8 @@
   const micLabel = $('mic-label');
   const textForm = $('text-form');
   const textInput = $('text-input');
-  const logoutBtn = $('logout-btn');
   const logEl = $('log');
+  const orbCanvas = $('orb');
 
   const camVideo = $('cam');
   const camCanvas = $('cam-canvas');
@@ -41,18 +30,12 @@
   const observationText = $('observation-text');
   const ttsAudio = $('tts-audio');
 
-  // Mobile-only elements
-  const fabMic = $('fab-mic'); // 하위 호환 (hidden)
   const mobileMicBtn = $('mobile-mic-btn');
   const mobileTextForm = $('mobile-text-form');
   const mobileTextInput = $('mobile-text-input');
   const orbReply = $('orb-reply');
 
   // ---------- 상태 ----------
-  const TOKEN_KEY = 'jarvis.token';
-  const USER_KEY = 'jarvis.user';
-  let token = localStorage.getItem(TOKEN_KEY);
-  let username = localStorage.getItem(USER_KEY);
   let ws = null;
   let mediaRecorder = null;
   let recordedChunks = [];
@@ -64,110 +47,33 @@
   // ---------- 모바일 감지 ----------
   const isMobile = () => window.innerWidth <= 640;
 
-  // ---------- 부팅 ----------
-  init();
-
-  async function init() {
-    setupClock();
-    setupHotkeys();
-    setupMobileTabs();
-
-    // 자동 로그인: 로그인 화면 없이 바로 세션 발급
-    try {
-      const r = await fetch('/api/auth/auto');
-      const j = await r.json();
-      token = j.token;
-      username = j.username;
-      localStorage.setItem(TOKEN_KEY, token);
-      localStorage.setItem(USER_KEY, username);
-    } catch (e) {
-      console.error('자동 로그인 실패:', e);
-    }
-
-    enterMain();
-  }
-
-  // ---------- 로그인 ----------
-  loginForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    loginMsg.textContent = '';
-    const u = usernameInput.value.trim();
-    const p = passwordInput.value;
-    if (!u || !p) return;
-
-    const isRegister = loginForm.dataset.mode === 'register';
-    const url = isRegister ? '/api/auth/register' : '/api/auth/login';
-    const body = new FormData();
-    body.append('username', u);
-    body.append('password', p);
-
-    try {
-      const r = await fetch(url, { method: 'POST', body });
-      if (!r.ok) {
-        const j = await r.json().catch(() => ({}));
-        loginMsg.textContent = j.detail || `오류 (${r.status})`;
-        passwordInput.value = '';
-        return;
-      }
-      const j = await r.json();
-      token = j.token;
-      username = j.username;
-      localStorage.setItem(TOKEN_KEY, token);
-      localStorage.setItem(USER_KEY, username);
-      enterMain();
-    } catch (err) {
-      loginMsg.textContent = '네트워크 오류: ' + err.message;
-    }
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if (loginScreen.classList.contains('hidden')) return;
-    if (e.key === 'Escape') {
-      usernameInput.value = '';
-      passwordInput.value = '';
-    }
-  });
-
-  // ---------- 메인 진입 ----------
-  function enterMain() {
-    loginScreen.classList.add('hidden');
-    mainScreen.classList.remove('hidden');
-    userLabel.textContent = username;
-    if (!mainOrb) mainOrb = new EmotionOrb(orbCanvas, { particles: 70 });
-    connectWS();
-    listCameras();
-    // 기본 탭: orb
-    switchTab('orb');
-  }
+  // ---------- 부팅: 바로 메인 화면 ----------
+  mainOrb = new EmotionOrb(orbCanvas, { particles: 70 });
+  setupClock();
+  setupHotkeys();
+  setupMobileTabs();
+  connectWS();
+  listCameras();
+  switchTab('orb');
 
   // ---------- WebSocket ----------
   function connectWS() {
     if (ws) try { ws.close(); } catch {}
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+    ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.binaryType = 'arraybuffer';
 
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {
         try { handleMessage(JSON.parse(ev.data)); } catch (e) { console.error(e); }
       } else {
-        // 바이너리 = TTS MP3
         playTtsBytes(ev.data);
       }
     };
 
-    ws.onclose = (ev) => {
-      if (ev.code === 4001) {
-        // 세션 만료 → 자동으로 새 세션 발급 후 재연결
-        token = null;
-        username = null;
-        localStorage.removeItem(TOKEN_KEY);
-        localStorage.removeItem(USER_KEY);
-        setTimeout(() => init(), 1000);
-        return;
-      }
+    ws.onclose = () => {
       setState('disconnected');
-      setTimeout(() => { if (token) connectWS(); }, 2000);
+      setTimeout(() => connectWS(), 2000);
     };
 
     ws.onerror = () => setState('disconnected');
@@ -199,7 +105,6 @@
         break;
       case 'message':
         addLog(m.role, m.text);
-        // 모바일에서 로그가 오면 side 탭으로 잠깐 배지 표시
         if (isMobile() && m.role === 'assistant') markTabBadge('side');
         break;
       case 'tool_event':
@@ -272,7 +177,6 @@
 
   // ---------- 마이크 / 녹음 ----------
   micBtn.addEventListener('click', toggleRecording);
-  if (fabMic) fabMic.addEventListener('click', toggleRecording);
   if (mobileMicBtn) mobileMicBtn.addEventListener('click', toggleRecording);
 
   async function toggleRecording() {
@@ -306,20 +210,17 @@
       mediaRecorder.start();
       recording = true;
       micBtn.classList.add('recording');
-      if (fabMic) fabMic.classList.add('recording');
       if (mobileMicBtn) mobileMicBtn.classList.add('recording');
       micLabel.textContent = 'STOP';
       setState('listening');
       setEmotion('listening');
 
-      // 마이크 분석기 — VAD + 오브 진폭 공유
       const micCtx = new (window.AudioContext || window.webkitAudioContext)();
       const micSrc = micCtx.createMediaStreamSource(stream);
       const micAnalyser = micCtx.createAnalyser();
       micAnalyser.fftSize = 512;
       micSrc.connect(micAnalyser);
 
-      // 오브에 마이크 진폭 전달
       const micBuf = new Uint8Array(micAnalyser.fftSize);
       const feedOrbMic = () => {
         if (!recording) { if (mainOrb) mainOrb.setAmplitude(0); return; }
@@ -345,7 +246,6 @@
     if (!recording) return;
     recording = false;
     micBtn.classList.remove('recording');
-    if (fabMic) fabMic.classList.remove('recording');
     if (mobileMicBtn) mobileMicBtn.classList.remove('recording');
     micLabel.textContent = 'SPEAK';
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
@@ -417,7 +317,6 @@
   // ---------- 단축키 ----------
   function setupHotkeys() {
     document.addEventListener('keydown', (e) => {
-      if (mainScreen.classList.contains('hidden')) return;
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       if (e.code === 'Space') {
         e.preventDefault();
@@ -450,29 +349,22 @@
   }
 
   function switchTab(tab) {
-    // 탭 버튼 활성 상태
     document.querySelectorAll('.tab-btn').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === tab);
     });
-
-    // 패널 전환
     const orbPane = document.querySelector('.orb-pane');
     const sidePane = document.querySelector('.side-pane');
-
     if (tab === 'orb') {
       orbPane.classList.add('tab-active');
       sidePane.classList.remove('tab-active');
     } else {
       sidePane.classList.add('tab-active');
       orbPane.classList.remove('tab-active');
-      // 로그 스크롤 최하단
       logEl.scrollTop = logEl.scrollHeight;
-      // 배지 제거
       clearTabBadge('side');
     }
   }
 
-  // 탭 배지 (새 메시지 알림)
   function markTabBadge(tabName) {
     const btn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
     if (!btn || btn.classList.contains('active')) return;
@@ -500,15 +392,12 @@
   const camWrap = camVideo.closest('.cam-wrap');
   const camFlipBtn = $('cam-flip-btn');
 
-  // 모바일 터치 기기 감지
   const isTouchDevice = () =>
     navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
 
-  // 현재 facing mode (front = 'user', back = 'environment')
   let facingMode = 'user';
 
   async function listCameras() {
-    // 먼저 권한 요청 (권한 없으면 라벨이 빈값)
     try {
       const tmp = await navigator.mediaDevices.getUserMedia({ video: true });
       tmp.getTracks().forEach((t) => t.stop());
@@ -518,7 +407,6 @@
     }
 
     if (isTouchDevice()) {
-      // 모바일: 전면/후면 옵션으로 표시
       camSelect.innerHTML = '';
       const opts = [
         { value: 'user',        label: '📷 전면 카메라 (Front)' },
@@ -532,7 +420,6 @@
       });
       camSelect.value = facingMode;
     } else {
-      // 데스크톱: 실제 디바이스 목록
       const devices = await navigator.mediaDevices.enumerateDevices();
       const cams = devices.filter((d) => d.kind === 'videoinput');
       camSelect.innerHTML = '';
@@ -560,26 +447,20 @@
 
   camSelect.addEventListener('change', async () => {
     if (camStream) {
-      if (isTouchDevice()) {
-        facingMode = camSelect.value;
-      }
+      if (isTouchDevice()) facingMode = camSelect.value;
       stopCamera();
       await startCamera();
     }
   });
 
-  // 플립 버튼 (모바일 전/후면 전환)
   if (camFlipBtn) {
     camFlipBtn.addEventListener('click', async () => {
       facingMode = facingMode === 'user' ? 'environment' : 'user';
       camSelect.value = facingMode;
-
-      // 회전 애니메이션
       camFlipBtn.classList.add('spinning');
       setTimeout(() => camFlipBtn.classList.remove('spinning'), 400);
-
       if (camStream) {
-        stopCamera(true); // silent — 관찰 유지
+        stopCamera(true);
         await startCamera();
       }
     });
@@ -589,7 +470,6 @@
     try {
       let constraints;
       if (isTouchDevice()) {
-        // 모바일: facingMode 사용
         constraints = {
           video: {
             facingMode: { ideal: facingMode },
@@ -598,13 +478,11 @@
           },
         };
       } else {
-        // 데스크톱: deviceId 사용
         const deviceId = camSelect.value;
         constraints = {
           video: deviceId ? { deviceId: { exact: deviceId } } : true,
         };
       }
-
       camStream = await navigator.mediaDevices.getUserMedia(constraints);
       camVideo.srcObject = camStream;
       await camVideo.play();
@@ -613,18 +491,12 @@
       camStatus.classList.add('on');
       observeToggle.disabled = false;
       frameInterval = setInterval(sendFrame, 1000);
-
-      // 후면 카메라는 미러 해제
       if (facingMode === 'environment') {
         camWrap.classList.add('rear-cam');
       } else {
         camWrap.classList.remove('rear-cam');
       }
-
-      // 모바일에서 카메라 활성 시 플립 버튼 표시
-      if (isTouchDevice() && camFlipBtn) {
-        camFlipBtn.classList.remove('hidden');
-      }
+      if (isTouchDevice() && camFlipBtn) camFlipBtn.classList.remove('hidden');
     } catch (err) {
       flash(`카메라 오류: ${err.message}`, 'error');
     }
@@ -670,7 +542,7 @@
     );
   }
 
-  // ---------- 행동 인식 토글 ----------
+  // ---------- 행동 인식 ----------
   observeToggle.addEventListener('change', () => {
     if (!camStream && observeToggle.checked) {
       observeToggle.checked = false;
@@ -682,8 +554,8 @@
   });
 
   // ---------- 스트리밍 버블 ----------
-  let _streamEl = null; // 현재 스트리밍 중인 텍스트 요소
-  let _orbStreamBuf = ''; // ORB 탭 응답 누적 버퍼
+  let _streamEl = null;
+  let _orbStreamBuf = '';
 
   function beginStreamBubble() {
     const div = document.createElement('div');
@@ -693,7 +565,6 @@
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
     while (logEl.children.length > 100) logEl.removeChild(logEl.firstChild);
-    // ORB 탭에 스트리밍 시작 표시
     _orbStreamBuf = '';
     if (orbReply) {
       orbReply.textContent = '';
@@ -705,7 +576,6 @@
     if (!_streamEl) return;
     _streamEl.textContent += text;
     logEl.scrollTop = logEl.scrollHeight;
-    // ORB 탭 실시간 업데이트
     _orbStreamBuf += text;
     if (orbReply) {
       orbReply.textContent = _orbStreamBuf;
@@ -721,7 +591,6 @@
       _streamEl = null;
     }
     logEl.scrollTop = logEl.scrollHeight;
-    // ORB 탭 최종 텍스트 확정
     if (orbReply) {
       orbReply.textContent = cleanText;
       orbReply.classList.add('visible');
@@ -731,15 +600,11 @@
     _orbStreamBuf = '';
   }
 
-  // ---------- ORB 탭 응답 표시 (모바일 전용) ----------
-  const isMobile = () => window.innerWidth <= 640;
-
   function updateOrbReply(text, streaming = false) {
     if (!orbReply) return;
     orbReply.textContent = text || '';
     orbReply.classList.toggle('visible', !!text);
     orbReply.classList.toggle('streaming', streaming);
-    if (orbReply.visible) orbReply.scrollTop = orbReply.scrollHeight;
   }
 
   function clearOrbReply() {
@@ -749,7 +614,7 @@
   }
 
   // ---------- 로그 ----------
-  let _typeQueue = Promise.resolve(); // 타이핑 직렬화 큐
+  let _typeQueue = Promise.resolve();
 
   function addLog(role, text) {
     const div = document.createElement('div');
@@ -759,11 +624,8 @@
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
     while (logEl.children.length > 100) logEl.removeChild(logEl.firstChild);
-
     if (role === 'assistant') {
-      // 타이핑 효과 — 큐에 직렬화하여 중복 방지
       _typeQueue = _typeQueue.then(() => typeWriter(textEl, text));
-      // 모바일 ORB 탭에도 표시
       updateOrbReply(text, false);
     } else {
       textEl.textContent = text;
@@ -774,7 +636,7 @@
   function typeWriter(el, text) {
     return new Promise((resolve) => {
       let i = 0;
-      const speed = Math.max(12, Math.min(40, Math.round(6000 / text.length))); // 길이에 따라 속도 조정
+      const speed = Math.max(12, Math.min(40, Math.round(6000 / text.length)));
       const tick = () => {
         if (i < text.length) {
           el.textContent = text.slice(0, ++i);
@@ -829,7 +691,7 @@
         sum += v * v;
       }
       const rms = Math.sqrt(sum / buf.length);
-      if (mainOrb) mainOrb.setAmplitude(rms * 4); // 0~1 범위로 스케일
+      if (mainOrb) mainOrb.setAmplitude(rms * 4);
       _ampRaf = requestAnimationFrame(tick);
     };
     tick();
@@ -867,32 +729,23 @@
     const ctx = faceOverlay.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-
     if (!boxes.length || !fw || !fh) return;
-
-    // 박스 좌표는 JPEG 픽셀값 → 화면 비율로 변환
     const scaleX = W / fw;
     const scaleY = H / fh;
-
     ctx.lineWidth = 2;
     ctx.font = '11px monospace';
     ctx.textBaseline = 'bottom';
-
     boxes.forEach((box, idx) => {
       const [top, right, bottom, left, name] = box;
       const x = left * scaleX;
       const y = top * scaleY;
       const bw = (right - left) * scaleX;
       const bh = (bottom - top) * scaleY;
-
-      // 스캔라인 애니메이션용 그라데이션
       const grad = ctx.createLinearGradient(x, y, x, y + bh);
       grad.addColorStop(0, 'rgba(0,217,255,0.9)');
       grad.addColorStop(1, 'rgba(0,217,255,0.3)');
       ctx.strokeStyle = grad;
       ctx.strokeRect(x, y, bw, bh);
-
-      // 코너 마커
       const cs = Math.min(bw, bh) * 0.18;
       ctx.strokeStyle = '#00d9ff';
       ctx.lineWidth = 2.5;
@@ -907,16 +760,12 @@
         ctx.lineTo(sx, sy + (sy < y + bh / 2 ? cs : -cs));
         ctx.stroke();
       });
-
-      // 이름 라벨
       const label = name || `FACE ${idx + 1}`;
       ctx.fillStyle = 'rgba(0,217,255,0.85)';
       ctx.fillRect(x, y - 16, ctx.measureText(label).width + 8, 16);
       ctx.fillStyle = '#03070c';
       ctx.fillText(label, x + 4, y);
     });
-
-    // 3초 후 박스 자동 클리어
     if (_faceBoxTimeout) clearTimeout(_faceBoxTimeout);
     _faceBoxTimeout = setTimeout(() => {
       const c2 = faceOverlay.getContext('2d');
@@ -933,27 +782,5 @@
     };
     tick();
     setInterval(tick, 1000);
-  }
-
-  // ---------- 로그아웃 ----------
-  logoutBtn.addEventListener('click', () => logout(false));
-
-  async function logout(silent) {
-    const tk = token;
-    token = null;
-    username = null;
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(USER_KEY);
-    if (ws) try { ws.close(); } catch {}
-    stopCamera();
-    if (!silent && tk) {
-      const fd = new FormData();
-      fd.append('token', tk);
-      try { await fetch('/api/auth/logout', { method: 'POST', body: fd }); } catch {}
-    }
-    mainScreen.classList.add('hidden');
-    loginScreen.classList.remove('hidden');
-    passwordInput.value = '';
-    clearLog();
   }
 })();

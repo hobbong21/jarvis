@@ -11,39 +11,15 @@
 </head>
 <body>
 
-<!-- ======================== Login ======================== -->
-<section id="login-screen" class="screen">
-  <div class="grid-bg"></div>
-  <div class="login-card">
-    <canvas id="login-orb" width="160" height="160" aria-hidden="true"></canvas>
-    <h1 class="brand">J.A.R.V.I.S</h1>
-    <p id="login-sub" class="sub">AUTHENTICATION REQUIRED</p>
-
-    <form id="login-form" autocomplete="off">
-      <input id="username" type="text" placeholder="Username" autocomplete="username"
-             autocapitalize="none" autocorrect="off" spellcheck="false" required>
-      <input id="password" type="password" placeholder="Password"
-             autocomplete="current-password" required minlength="4">
-      <button id="login-btn" type="submit">AUTHENTICATE</button>
-    </form>
-
-    <p id="login-msg" class="error-msg"></p>
-    <p class="hint">ENTER 제출 · ESC 취소</p>
-  </div>
-</section>
-
 <!-- ======================== Main ======================== -->
-<section id="main-screen" class="screen hidden">
+<section id="main-screen" class="screen">
   <header class="topbar">
     <div class="brand-sm">J . A . R . V . I . S</div>
     <div id="state-pill" class="state-pill">STATE · IDLE</div>
     <div class="meta">
       <span id="clock"></span>
       <span class="dot">·</span>
-      <span>USER <strong id="user-label"></strong></span>
-      <span class="dot">·</span>
       <span>BRAIN <strong id="backend-label">CLAUDE</strong></span>
-      <button id="logout-btn" class="ghost">LOGOUT</button>
     </div>
   </header>
 

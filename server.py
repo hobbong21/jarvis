@@ -18,12 +18,11 @@ import traceback
 from pathlib import Path
 from typing import Dict, Optional
 
-from fastapi import FastAPI, Form, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from audio_io import EdgeTTS, WhisperSTT
-from auth import AuthSystem
 from brain import Brain
 from config import cfg
 from emotion import Emotion
@@ -56,29 +55,7 @@ threading.Thread(target=_load_stt, daemon=True, name="stt-loader").start()
 print("[2/3] TTS (Edge-TTS) ...")
 TTS = EdgeTTS()
 
-print("[3/3] Auth ...")
-AUTH = AuthSystem(cfg.users_file)
-
-# 세션 토큰 → 사용자명 (파일에 저장해 서버 재시작 후에도 유지)
-_SESSIONS_FILE = Path(__file__).parent / "sessions.json"
-
-def _load_sessions() -> Dict[str, str]:
-    try:
-        if _SESSIONS_FILE.exists():
-            return json.loads(_SESSIONS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
-
-def _save_sessions(sessions: Dict[str, str]):
-    try:
-        _SESSIONS_FILE.write_text(
-            json.dumps(sessions, ensure_ascii=False), encoding="utf-8"
-        )
-    except Exception as e:
-        print(f"[Session] 저장 실패: {e}")
-
-SESSIONS: Dict[str, str] = _load_sessions()
+print("[3/3] 설정 완료.")
 
 print("=" * 60)
 print("  서버 시작 중 (STT 는 백그라운드에서 로딩). http://localhost:5000")
@@ -177,72 +154,16 @@ async def index():
     return FileResponse(str(WEB_DIR / "index.html"))
 
 
-@app.post("/api/auth/status")
-async def auth_status():
-    return {"has_users": AUTH.has_users()}
-
-
-@app.get("/api/auth/auto")
-async def auto_login():
-    """로그인 화면 없이 자동으로 세션 생성 (개인용 앱)."""
-    # 등록된 첫 번째 사용자를 자동으로 사용
-    if AUTH.users:
-        primary_user = next(iter(AUTH.users))
-    else:
-        primary_user = "admin"
-    token = secrets.token_urlsafe(32)
-    SESSIONS[token] = primary_user
-    _save_sessions(SESSIONS)
-    return {"token": token, "username": primary_user}
-
-
-@app.post("/api/auth/register")
-async def register(username: str = Form(...), password: str = Form(...)):
-    err = AUTH.create_user_detail(username, password)
-    if err is not None:
-        raise HTTPException(status_code=400, detail=err)
-    token = secrets.token_urlsafe(32)
-    SESSIONS[token] = username.strip()
-    _save_sessions(SESSIONS)
-    return {"token": token, "username": username.strip()}
-
-
-@app.post("/api/auth/login")
-async def login(username: str = Form(...), password: str = Form(...)):
-    if not AUTH.verify(username, password):
-        raise HTTPException(status_code=401, detail="인증 실패")
-    token = secrets.token_urlsafe(32)
-    SESSIONS[token] = username.strip()
-    _save_sessions(SESSIONS)
-    return {"token": token, "username": username.strip()}
-
-
-@app.post("/api/auth/logout")
-async def logout(token: str = Form(...)):
-    SESSIONS.pop(token, None)
-    _save_sessions(SESSIONS)
-    sess = ACTIVE.pop(token, None)
-    if sess:
-        sess.stop_observing()
-    return {"ok": True}
-
-
 # ============================================================
-# WebSocket — 메인 대화 채널
+# WebSocket — 메인 대화 채널 (인증 없음)
 # ============================================================
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, token: str = ""):
-    if token not in SESSIONS:
-        await ws.close(code=4001, reason="invalid token")
-        return
-
-    username = SESSIONS[token]
+async def websocket_endpoint(ws: WebSocket):
+    conn_id = secrets.token_hex(8)  # 연결별 내부 ID
     await ws.accept()
 
-    session = ACTIVE.get(token)
-    if session is None:
-        session = UserSession(username)
-        ACTIVE[token] = session
+    session = UserSession("J.A.R.V.I.S")
+    ACTIVE[conn_id] = session
 
     session.loop = asyncio.get_event_loop()
     session.on_event = lambda msg: ws.send_json(msg)
@@ -263,7 +184,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
 
     await emit(
         type="ready",
-        username=username,
+        username=session.username,
         backend=cfg.llm_backend,
         tools_enabled=session.tools is not None,
     )
@@ -273,8 +194,8 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
         await asyncio.sleep(0.5)
         async with busy:
             await respond_internal(
-                f"방금 사용자 '{username}'가 시스템에 로그인했어. "
-                "짧고 따뜻하게 환영 인사를 해. 도구는 호출하지 마.",
+                "자비스 시스템이 온라인 상태야. "
+                "짧고 자신감 있게 준비 완료 인사를 해. 도구는 호출하지 마.",
                 log_user=False,
             )
 
@@ -335,7 +256,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
             await emit(type="emotion", emotion="neutral")
 
     def build_context() -> str:
-        parts = [f"로그인 사용자: {username}"]
+        parts = []
         if session.observing:
             parts.append("행동 모니터링 활성")
         if session._last_observation:
@@ -435,15 +356,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
         traceback.print_exc()
     finally:
         session.stop_observing()
-        # 로그아웃된(SESSIONS에서 제거된) 고아 세션 정리
-        if token not in SESSIONS:
-            ACTIVE.pop(token, None)
-        # 세션 수가 너무 많으면 고아 정리
-        orphans = [t for t in list(ACTIVE.keys()) if t not in SESSIONS]
-        for t in orphans:
-            s = ACTIVE.pop(t, None)
-            if s:
-                s.stop_observing()
+        ACTIVE.pop(conn_id, None)
 
 
 async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, build_context):
@@ -504,7 +417,7 @@ async def health():
         "ok": True,
         "backend": cfg.llm_backend,
         "stt_ready": STT is not None,
-        "users": len(SESSIONS),
+        "connections": len(ACTIVE),
     }
 
 
