@@ -347,6 +347,22 @@ input, select { outline: none; }
 
 .quick-keys { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; justify-content: center; }
 
+.orb-style-picker {
+  display: flex; gap: 6px; margin-top: 12px;
+  flex-wrap: wrap; justify-content: center; align-items: center;
+}
+.orb-style-picker .picker-label {
+  font-size: 10px; letter-spacing: 0.18em;
+  color: var(--accent-d); margin-right: 4px;
+  font-family: 'Share Tech Mono', monospace;
+}
+.orb-style-picker .ghost { padding: 5px 10px; font-size: 11px; letter-spacing: 0.12em; }
+.orb-style-picker .ghost.active {
+  color: var(--accent); border-color: var(--accent);
+  background: rgba(0,217,255,0.12);
+  box-shadow: 0 0 8px rgba(0,217,255,0.25);
+}
+
 /* ===== Side pane (우/데스크톱) ===== */
 .side-pane {
   position: relative; z-index: 1;

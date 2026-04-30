@@ -39,5 +39,5 @@ The workflow runs `python server.py` on port 5000. The app auto-loads the Whispe
 - **Agentic Tools**: web_search, get_weather, get_time, remember/recall, set_timer, see (vision)
 - **Voice I/O**: Browser microphone → Whisper STT → Claude → Edge-TTS → browser audio
 - **Camera**: Browser webcam → JPEG frames → Claude Vision analysis
-- **Emotion Orb**: Canvas animation reflecting assistant's emotional state
+- **Emotion Orb**: Canvas animation reflecting assistant's emotional state — selectable visual styles (ORBITAL / PULSE / REACTOR / NEURAL), all preserving the 7 emotion palettes. Choice persists in `localStorage('orbStyle')` and applies to both orbs in compare mode.
 - **Auth**: Local username/password with session tokens

@@ -59,10 +59,14 @@
   const isMobile = () => window.innerWidth <= 640;
 
   // ---------- 부팅: 바로 메인 화면 ----------
-  mainOrb = new EmotionOrb(orbCanvas, { particles: 70 });
+  const validStyles = window.ORB_STYLES || ['orbital'];
+  const stored = localStorage.getItem('orbStyle');
+  const savedStyle = validStyles.includes(stored) ? stored : 'orbital';
+  mainOrb = new EmotionOrb(orbCanvas, { particles: 70, style: savedStyle });
   if (orbCanvas2) {
-    secondOrb = new EmotionOrb(orbCanvas2, { particles: 70 });
+    secondOrb = new EmotionOrb(orbCanvas2, { particles: 70, style: savedStyle });
   }
+  setupOrbStylePicker(savedStyle);
   setupClock();
   setupHotkeys();
   setupMobileTabs();
@@ -420,6 +424,22 @@
         if (k === 'reset') send({ type: 'reset' });
         else send({ type: 'switch_backend', backend: k });
       });
+    });
+  }
+
+  // ---------- 오브 스타일 선택 ----------
+  function setupOrbStylePicker(initialStyle) {
+    const buttons = document.querySelectorAll('.orb-style-picker [data-orb-style]');
+    if (!buttons.length) return;
+    const apply = (name) => {
+      buttons.forEach((b) => b.classList.toggle('active', b.dataset.orbStyle === name));
+      if (mainOrb) mainOrb.setStyle(name);
+      if (secondOrb) secondOrb.setStyle(name);
+      localStorage.setItem('orbStyle', name);
+    };
+    apply(initialStyle);
+    buttons.forEach((b) => {
+      b.addEventListener('click', () => apply(b.dataset.orbStyle));
     });
   }
 
