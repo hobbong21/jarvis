@@ -455,7 +455,18 @@
   }
 
   // ---------- 카메라 ----------
+  const camWrap = camVideo.closest('.cam-wrap');
+  const camFlipBtn = $('cam-flip-btn');
+
+  // 모바일 터치 기기 감지
+  const isTouchDevice = () =>
+    navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+
+  // 현재 facing mode (front = 'user', back = 'environment')
+  let facingMode = 'user';
+
   async function listCameras() {
+    // 먼저 권한 요청 (권한 없으면 라벨이 빈값)
     try {
       const tmp = await navigator.mediaDevices.getUserMedia({ video: true });
       tmp.getTracks().forEach((t) => t.stop());
@@ -463,19 +474,37 @@
       camStatus.textContent = 'PERMISSION DENIED';
       return;
     }
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const cams = devices.filter((d) => d.kind === 'videoinput');
-    camSelect.innerHTML = '';
-    cams.forEach((c, i) => {
-      const opt = document.createElement('option');
-      opt.value = c.deviceId;
-      opt.textContent = c.label || `Camera ${i + 1}`;
-      camSelect.appendChild(opt);
-    });
-    if (!cams.length) {
-      const o = document.createElement('option');
-      o.textContent = 'No camera';
-      camSelect.appendChild(o);
+
+    if (isTouchDevice()) {
+      // 모바일: 전면/후면 옵션으로 표시
+      camSelect.innerHTML = '';
+      const opts = [
+        { value: 'user',        label: '📷 전면 카메라 (Front)' },
+        { value: 'environment', label: '📸 후면 카메라 (Back)' },
+      ];
+      opts.forEach(({ value, label }) => {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = label;
+        camSelect.appendChild(opt);
+      });
+      camSelect.value = facingMode;
+    } else {
+      // 데스크톱: 실제 디바이스 목록
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter((d) => d.kind === 'videoinput');
+      camSelect.innerHTML = '';
+      cams.forEach((c, i) => {
+        const opt = document.createElement('option');
+        opt.value = c.deviceId;
+        opt.textContent = c.label || `Camera ${i + 1}`;
+        camSelect.appendChild(opt);
+      });
+      if (!cams.length) {
+        const o = document.createElement('option');
+        o.textContent = 'No camera';
+        camSelect.appendChild(o);
+      }
     }
   }
 
@@ -489,17 +518,52 @@
 
   camSelect.addEventListener('change', async () => {
     if (camStream) {
+      if (isTouchDevice()) {
+        facingMode = camSelect.value;
+      }
       stopCamera();
       await startCamera();
     }
   });
 
+  // 플립 버튼 (모바일 전/후면 전환)
+  if (camFlipBtn) {
+    camFlipBtn.addEventListener('click', async () => {
+      facingMode = facingMode === 'user' ? 'environment' : 'user';
+      camSelect.value = facingMode;
+
+      // 회전 애니메이션
+      camFlipBtn.classList.add('spinning');
+      setTimeout(() => camFlipBtn.classList.remove('spinning'), 400);
+
+      if (camStream) {
+        stopCamera(true); // silent — 관찰 유지
+        await startCamera();
+      }
+    });
+  }
+
   async function startCamera() {
     try {
-      const deviceId = camSelect.value;
-      camStream = await navigator.mediaDevices.getUserMedia({
-        video: deviceId ? { deviceId: { exact: deviceId } } : true,
-      });
+      let constraints;
+      if (isTouchDevice()) {
+        // 모바일: facingMode 사용
+        constraints = {
+          video: {
+            facingMode: { ideal: facingMode },
+            width:  { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+        };
+      } else {
+        // 데스크톱: deviceId 사용
+        const deviceId = camSelect.value;
+        constraints = {
+          video: deviceId ? { deviceId: { exact: deviceId } } : true,
+        };
+      }
+
+      camStream = await navigator.mediaDevices.getUserMedia(constraints);
       camVideo.srcObject = camStream;
       await camVideo.play();
       camToggle.textContent = 'STOP';
@@ -507,12 +571,24 @@
       camStatus.classList.add('on');
       observeToggle.disabled = false;
       frameInterval = setInterval(sendFrame, 1000);
+
+      // 후면 카메라는 미러 해제
+      if (facingMode === 'environment') {
+        camWrap.classList.add('rear-cam');
+      } else {
+        camWrap.classList.remove('rear-cam');
+      }
+
+      // 모바일에서 카메라 활성 시 플립 버튼 표시
+      if (isTouchDevice() && camFlipBtn) {
+        camFlipBtn.classList.remove('hidden');
+      }
     } catch (err) {
       flash(`카메라 오류: ${err.message}`, 'error');
     }
   }
 
-  function stopCamera() {
+  function stopCamera(silent = false) {
     if (camStream) camStream.getTracks().forEach((t) => t.stop());
     camStream = null;
     camVideo.srcObject = null;
@@ -521,10 +597,14 @@
     camToggle.textContent = 'START';
     camStatus.textContent = 'OFF';
     camStatus.classList.remove('on');
-    observeToggle.disabled = true;
-    if (observeToggle.checked) {
-      observeToggle.checked = false;
-      send({ type: 'observe', on: false });
+    camWrap.classList.remove('rear-cam');
+    if (camFlipBtn) camFlipBtn.classList.add('hidden');
+    if (!silent) {
+      observeToggle.disabled = true;
+      if (observeToggle.checked) {
+        observeToggle.checked = false;
+        send({ type: 'observe', on: false });
+      }
     }
   }
 

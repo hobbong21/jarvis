@@ -282,6 +282,38 @@ input, select { outline: none; }
 .cam-status { color: var(--text-dim); }
 .cam-status.on { color: var(--green); }
 
+/* 전/후면 전환 버튼 (카메라 위) */
+.cam-flip-btn {
+  position: absolute;
+  bottom: 10px; right: 10px;
+  z-index: 2;
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  background: rgba(8, 17, 28, 0.75);
+  border: 1px solid var(--accent-d);
+  color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  transition: all 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+.cam-flip-btn:active {
+  background: rgba(0, 217, 255, 0.2);
+  transform: rotate(180deg);
+}
+.cam-flip-btn.spinning svg {
+  animation: spin-once 0.4s ease-out;
+}
+@keyframes spin-once {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(180deg); }
+}
+
+/* 후면 카메라는 미러 없음 */
+.cam-wrap.rear-cam video { transform: scaleX(1); }
+.cam-wrap.rear-cam canvas { transform: scaleX(1); }
+
 .cam-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0; }
 .cam-controls select {
   flex: 1; min-width: 100px;
