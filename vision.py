@@ -22,12 +22,23 @@ except (ImportError, Exception):
 
 from config import cfg
 
-try:
-    import face_recognition
-    HAS_FACE_REC = True
-except ImportError:
-    HAS_FACE_REC = False
-    print("[Vision] face_recognition 미설치. pip install face_recognition")
+# face_recognition 은 임포트 시간이 매우 길어 서버 시작을 차단할 수 있으므로
+# 실제 사용 시점에 지연 로드(lazy import)한다.
+HAS_FACE_REC: Optional[bool] = None  # None=미확인, True=사용가능, False=미설치
+_face_recognition_mod = None
+
+def _get_face_recognition():
+    """face_recognition 모듈을 처음 호출 시에만 import."""
+    global HAS_FACE_REC, _face_recognition_mod
+    if HAS_FACE_REC is None:
+        try:
+            import face_recognition as _fr
+            _face_recognition_mod = _fr
+            HAS_FACE_REC = True
+        except ImportError:
+            HAS_FACE_REC = False
+            print("[Vision] face_recognition 미설치. pip install face_recognition")
+    return _face_recognition_mod
 
 if not HAS_CV2:
     print("[Vision] cv2 미설치 또는 로드 실패. 카메라 기능 비활성화.")
@@ -64,9 +75,10 @@ class FaceMemory:
         self.save()
 
     def identify(self, face_encoding) -> Optional[str]:
-        if not self.encodings or not HAS_CV2 or np is None:
+        fr = _get_face_recognition()
+        if not self.encodings or not HAS_CV2 or np is None or fr is None:
             return None
-        distances = face_recognition.face_distance(self.encodings, face_encoding)
+        distances = fr.face_distance(self.encodings, face_encoding)
         best_idx = int(np.argmin(distances))
         if distances[best_idx] < cfg.face_match_tolerance:
             return self.names[best_idx]
@@ -86,7 +98,7 @@ class VisionSystem:
         if not self.cap.isOpened():
             raise RuntimeError(f"카메라를 열 수 없습니다 (index={cfg.camera_index})")
 
-        self.face_memory = FaceMemory() if HAS_FACE_REC else None
+        self.face_memory = FaceMemory() if _get_face_recognition() else None
         self.current_user: Optional[str] = None
         self.face_boxes: List[Tuple[int, int, int, int]] = []
         self._last_face_check = 0.0
@@ -100,7 +112,8 @@ class VisionSystem:
         return cv2.flip(frame, 1)
 
     def update_face_recognition(self, frame):
-        if not HAS_FACE_REC or not HAS_CV2 or np is None:
+        fr = _get_face_recognition()
+        if not fr or not HAS_CV2 or np is None:
             return
         now = time.time()
         if now - self._last_face_check < cfg.face_check_interval:
@@ -110,13 +123,13 @@ class VisionSystem:
         small = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
         rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
 
-        locations = face_recognition.face_locations(rgb, model="hog")
+        locations = fr.face_locations(rgb, model="hog")
         if not locations:
             self.face_boxes = []
             self.current_user = None
             return
 
-        encodings = face_recognition.face_encodings(rgb, locations)
+        encodings = fr.face_encodings(rgb, locations)
         if not encodings:
             return
 
