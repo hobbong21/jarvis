@@ -26,7 +26,18 @@
   <main class="layout">
     <!-- 좌/탭1: 오브 + 컨트롤 -->
     <div class="orb-pane tab-active">
-      <canvas id="orb" width="640" height="640"></canvas>
+      <div class="orb-stack">
+        <div class="orb-unit primary">
+          <span class="orb-tag">CLAUDE</span>
+          <canvas id="orb" width="640" height="640"></canvas>
+          <span class="orb-sub-emotion" id="emotion-label-1">NEUTRAL</span>
+        </div>
+        <div class="orb-unit secondary" hidden>
+          <span class="orb-tag">OPENAI</span>
+          <canvas id="orb-2" width="640" height="640"></canvas>
+          <span class="orb-sub-emotion" id="emotion-label-2">NEUTRAL</span>
+        </div>
+      </div>
       <div class="orb-label">
         <span id="emotion-label">NEUTRAL</span>
         <span id="hint-label" class="hint">버튼을 누르거나 SPACE 를 눌러 말하세요</span>

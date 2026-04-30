@@ -18,6 +18,10 @@
   const textInput = $('text-input');
   const logEl = $('log');
   const orbCanvas = $('orb');
+  const orbCanvas2 = $('orb-2');
+  const orbPane = document.querySelector('.orb-pane');
+  const emoLabel1 = $('emotion-label-1');
+  const emoLabel2 = $('emotion-label-2');
 
   const camVideo = $('cam');
   const camCanvas = $('cam-canvas');
@@ -48,12 +52,17 @@
   let camStream = null;
   let frameInterval = null;
   let mainOrb = null;
+  let secondOrb = null;
+  let compareMode = false;
 
   // ---------- 모바일 감지 ----------
   const isMobile = () => window.innerWidth <= 640;
 
   // ---------- 부팅: 바로 메인 화면 ----------
   mainOrb = new EmotionOrb(orbCanvas, { particles: 70 });
+  if (orbCanvas2) {
+    secondOrb = new EmotionOrb(orbCanvas2, { particles: 70 });
+  }
   setupClock();
   setupHotkeys();
   setupMobileTabs();
@@ -154,12 +163,21 @@
         break;
       case 'compare_start':
         beginCompareBubbles(m.sources || ['claude', 'openai']);
+        setOrbEmotion('claude', 'thinking');
+        setOrbEmotion('openai', 'thinking');
+        setSubEmotion('claude', 'THINKING');
+        setSubEmotion('openai', 'THINKING');
         break;
       case 'compare_chunk':
         appendCompareChunk(m.source, m.text || '');
+        // 첫 청크부터 speaking 으로 전환
+        setOrbEmotion(m.source, 'speaking');
+        setSubEmotion(m.source, 'SPEAKING');
         break;
       case 'compare_end':
         finalizeCompareBubble(m.source, m.text || '', m.emotion || 'neutral');
+        setOrbEmotion(m.source, m.emotion || 'neutral');
+        setSubEmotion(m.source, (m.emotion || 'NEUTRAL').toUpperCase());
         break;
       case 'compare_done':
         if (isMobile()) markTabBadge('side');
@@ -169,6 +187,7 @@
         break;
       case 'backend_changed':
         backendLabel.textContent = m.backend.toUpperCase();
+        setCompareMode(m.backend === 'compare');
         break;
       case 'reset_ack':
         clearLog();
@@ -203,8 +222,38 @@
 
   function setEmotion(name) {
     if (!mainOrb) return;
+    // 비교 모드에서는 글로벌 emotion 이벤트가 양쪽 오브를 동시에 흔들지 않도록
+    // 무시 — 각 source 별로 compare_* 이벤트가 따로 옴.
+    if (compareMode) return;
     mainOrb.setEmotion(name);
     emotionLabel.textContent = (name || 'neutral').toUpperCase();
+  }
+
+  // 비교 모드용: 특정 source 오브의 감정 설정
+  function setOrbEmotion(source, name) {
+    const orb = source === 'openai' ? secondOrb : mainOrb;
+    if (orb) orb.setEmotion(name);
+  }
+  function setSubEmotion(source, label) {
+    const el = source === 'openai' ? emoLabel2 : emoLabel1;
+    if (el) el.textContent = label;
+  }
+
+  function setCompareMode(on) {
+    compareMode = on;
+    if (orbPane) orbPane.classList.toggle('compare-mode', on);
+    const secondary = document.querySelector('.orb-unit.secondary');
+    if (secondary) {
+      if (on) secondary.removeAttribute('hidden');
+      else secondary.setAttribute('hidden', '');
+    }
+    if (on) {
+      // 진입 시 둘 다 neutral 로 초기화
+      if (mainOrb) mainOrb.setEmotion('neutral');
+      if (secondOrb) secondOrb.setEmotion('neutral');
+      setSubEmotion('claude', 'NEUTRAL');
+      setSubEmotion('openai', 'NEUTRAL');
+    }
   }
 
   // ---------- 마이크 / 녹음 ----------
