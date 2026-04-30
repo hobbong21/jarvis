@@ -17,6 +17,7 @@ class WakeWordListener:
     """'사비스' 같은 호출어를 항상 듣고 있다가 콜백 실행"""
 
     def __init__(self, on_wake: Callable[[], None]):
+        import os as _os
         import pvporcupine
         from pvrecorder import PvRecorder
 
@@ -25,10 +26,32 @@ class WakeWordListener:
                 "PORCUPINE_ACCESS_KEY 환경변수가 필요합니다.\n"
                 "https://console.picovoice.ai/ 에서 무료로 발급받으세요."
             )
-        self.porcupine = pvporcupine.create(
-            access_key=cfg.porcupine_access_key,
-            keywords=cfg.wake_keywords,
-        )
+
+        # 커스텀 .ppn 파일 자동 탐색 ("sarvis"는 Porcupine 내장 키워드가 아님)
+        keyword_path = cfg.wake_keyword_path
+        if not keyword_path:
+            default_paths = [
+                _os.path.join(_os.path.dirname(__file__), "sarvis.ppn"),
+                _os.path.join(_os.path.dirname(__file__), "wake", "sarvis.ppn"),
+            ]
+            for p in default_paths:
+                if _os.path.exists(p):
+                    keyword_path = p
+                    break
+
+        if keyword_path and _os.path.exists(keyword_path):
+            self.porcupine = pvporcupine.create(
+                access_key=cfg.porcupine_access_key,
+                keyword_paths=[keyword_path],
+            )
+            print(f"[WakeWord] 커스텀 키워드 사용: {keyword_path}")
+        else:
+            raise FileNotFoundError(
+                "'Sarvis' 호출어 파일(sarvis.ppn)이 없습니다.\n"
+                "1. https://console.picovoice.ai/ppn 에서 'sarvis' 키워드 학습\n"
+                "2. 다운로드한 .ppn 파일을 프로젝트 루트에 'sarvis.ppn'으로 저장\n"
+                "   또는 SARVIS_KEYWORD_PATH 환경변수에 경로 지정"
+            )
         self.recorder = PvRecorder(frame_length=self.porcupine.frame_length)
         self.on_wake = on_wake
         self._running = False

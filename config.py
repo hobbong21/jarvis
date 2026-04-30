@@ -21,8 +21,10 @@ class Config:
 
     # ============ 호출어 ============
     porcupine_access_key: str = os.getenv("PORCUPINE_ACCESS_KEY", "")
-    # Porcupine 내장 키워드는 "jarvis"만 지원 → 호출어는 "Jarvis"로 유지 (브랜드만 SARVIS)
-    wake_keywords: List[str] = field(default_factory=lambda: ["jarvis"])
+    # 호출어는 "Sarvis" — 커스텀 .ppn 파일이 필요 (Picovoice Console 에서 무료 생성)
+    wake_keywords: List[str] = field(default_factory=lambda: ["sarvis"])
+    # 커스텀 키워드 파일 경로 (미지정 시 ./sarvis.ppn 자동 탐색)
+    wake_keyword_path: str = os.getenv("SARVIS_KEYWORD_PATH", "")
 
     # ============ STT ============
     whisper_model: str = "small"
