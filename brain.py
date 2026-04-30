@@ -243,6 +243,13 @@ class Brain:
                 else:
                     yield chunk, None, None
 
+        # 스트림이 짧게 끝나 prefix_buf 가 아직 비워지지 않은 경우
+        if not prefix_cleared and prefix_buf:
+            m = _EMOTION_PREFIX_RE.match(prefix_buf)
+            to_emit = prefix_buf[m.end():] if m else prefix_buf
+            if to_emit:
+                yield to_emit, None, None
+
         self.history.append({"role": "assistant", "content": full})
         emotion, body = parse_emotion(full)
         self._trim_history()
@@ -282,7 +289,11 @@ class Brain:
             stream=True,
             options={"num_predict": 600, "temperature": 0.7},
         ):
-            text = chunk.get("message", {}).get("content", "")
+            # Ollama 스트리밍은 ChatResponse 객체 반환
+            try:
+                text = chunk.message.content or ""
+            except AttributeError:
+                text = (chunk.get("message") or {}).get("content", "") if isinstance(chunk, dict) else ""
             if not text:
                 continue
             full += text
@@ -298,6 +309,13 @@ class Brain:
                     prefix_cleared = True
             else:
                 yield text, None, None
+
+        # 짧은 응답으로 prefix_buf 가 비워지지 않은 경우
+        if not prefix_cleared and prefix_buf:
+            m = _EMOTION_PREFIX_RE.match(prefix_buf)
+            to_emit = prefix_buf[m.end():] if m else prefix_buf
+            if to_emit:
+                yield to_emit, None, None
 
         self.history.append({"role": "assistant", "content": full})
         emotion, body = parse_emotion(full)

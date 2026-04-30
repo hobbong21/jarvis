@@ -253,8 +253,10 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
                     for item in session.brain.think_stream(prompt, ctx):
                         loop.call_soon_threadsafe(queue.put_nowait, item)
                 except Exception as exc:
+                    traceback.print_exc()
+                    from emotion import Emotion as _E
                     loop.call_soon_threadsafe(
-                        queue.put_nowait, (None, None, str(exc))
+                        queue.put_nowait, (None, _E.CONCERNED, f"오류: {exc}")
                     )
                 finally:
                     loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
