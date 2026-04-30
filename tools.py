@@ -115,6 +115,18 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "identify_person",
+        "description": (
+            "Identify who the person on the camera is by comparing their face "
+            "against the registered people in S.A.R.V.I.S's memory. "
+            "Use when the user asks 'who is this', 'who am I', 'do you recognize me', "
+            "'내가 누구야', '이 사람 누구야', '나 알아?', or whenever knowing the "
+            "person's identity helps personalize the response. Returns the person's "
+            "name from the registry, or '모름' if no match."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "observe_action",
         "description": (
             "Analyze the user's recent action/behavior visible on camera. "
@@ -146,11 +158,13 @@ class ToolExecutor:
         anthropic_client,
         on_event: Optional[Callable[[str, str], None]] = None,
         on_timer: Optional[Callable[[str], None]] = None,
+        face_registry=None,
     ):
         self.vision = vision_system
         self.client = anthropic_client  # Claude Vision 호출용
         self.on_event = on_event       # callback(tool_name, status: "start"|"end")
         self.on_timer = on_timer       # callback(label) — 타이머 만료 시 호출
+        self.face_registry = face_registry  # FaceRegistry (선택)
 
         self.memory_path = Path("memory.json")
         self.memory: dict = self._load_memory()
@@ -345,6 +359,79 @@ class ToolExecutor:
             return msg.content[0].text.strip()
         except Exception as e:
             return f"행동 인식 실패: {e}"
+
+    def _t_identify_person(self) -> str:
+        """현재 카메라 프레임의 얼굴을 등록된 사람들과 비교해 식별 (Claude Vision)."""
+        if self.face_registry is None:
+            return "얼굴 등록 시스템이 활성화되지 않았습니다."
+
+        refs = self.face_registry.get_references()
+        if not refs:
+            return "등록된 얼굴이 없습니다. 먼저 사용자의 얼굴을 등록해야 합니다."
+
+        # 현재 프레임에서 가장 큰 얼굴 잘라내기
+        crop_jpeg = None
+        if hasattr(self.vision, "crop_largest_face_jpeg"):
+            crop_jpeg = self.vision.crop_largest_face_jpeg()
+        if crop_jpeg is None:
+            # 폴백: 전체 프레임
+            frame = self.vision.read()
+            if frame is None or not HAS_CV2 or cv2 is None:
+                return "카메라에 사람이 보이지 않거나 프레임을 가져올 수 없습니다."
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not ok:
+                return "이미지 인코딩 실패"
+            crop_jpeg = buf.tobytes()
+
+        current_b64 = base64.standard_b64encode(crop_jpeg).decode("utf-8")
+
+        # 메시지 구성: 등록된 사진 N장 + 현재 사진 1장 + 지시문
+        content: List[dict] = []
+        names_listed = []
+        for idx, (name, b64) in enumerate(refs, 1):
+            names_listed.append(f"{idx}. {name}")
+            content.append({"type": "text", "text": f"등록된 사람 {idx}: {name}"})
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+            })
+        content.append({"type": "text", "text": "현재 카메라에 찍힌 사람:"})
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": current_b64},
+        })
+        roster = "\n".join(names_listed)
+        content.append({
+            "type": "text",
+            "text": (
+                "위에 등록된 사람들의 얼굴 사진과 현재 카메라 사진을 비교해. "
+                f"현재 사진 속 인물이 다음 중 누구인지 정확히 식별해:\n{roster}\n\n"
+                "응답 형식: 일치하는 사람의 이름만 정확히 한 단어로. "
+                "확신이 없거나 일치하는 사람이 없으면 '모름'이라고만 답해. "
+                "추가 설명 금지, 이름 또는 '모름'만."
+            ),
+        })
+
+        try:
+            msg = self.client.messages.create(
+                model=cfg.vision_model,
+                max_tokens=30,
+                messages=[{"role": "user", "content": content}],
+            )
+            answer = msg.content[0].text.strip()
+            # 정리: 따옴표/마침표 제거
+            answer = answer.strip(" .,'\"\n")
+            if not answer or answer == "모름":
+                return "현재 카메라의 사람은 등록된 사람과 일치하지 않습니다."
+
+            # 등록된 이름 중 하나와 매칭되는지 확인 (보호장치)
+            registered_names = [r[0] for r in refs]
+            for n in registered_names:
+                if n in answer or answer in n:
+                    return f"식별됨: {n}"
+            return f"가장 유사한 후보: {answer} (확실하지 않음)"
+        except Exception as e:
+            return f"얼굴 식별 실패: {e}"
 
     def _t_set_timer(self, seconds: int, label: str = "타이머") -> str:
         if seconds <= 0:

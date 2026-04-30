@@ -27,7 +27,7 @@ from brain import Brain
 from config import cfg
 from emotion import Emotion
 from tools import ToolExecutor
-from vision import WebVision
+from vision import FaceRegistry, WebVision
 
 # ============================================================
 # 전역 — 서버를 즉시 시작하고 Whisper 는 백그라운드에서 로드
@@ -54,6 +54,14 @@ threading.Thread(target=_load_stt, daemon=True, name="stt-loader").start()
 
 print("[2/3] TTS (Edge-TTS) ...")
 TTS = EdgeTTS()
+
+print("[3/3] 얼굴 등록부 ...")
+FACE_REGISTRY = FaceRegistry(cfg.faces_dir)
+_known = FACE_REGISTRY.list_people()
+if _known:
+    print(f"      등록된 얼굴: {', '.join(_known)}")
+else:
+    print("      등록된 얼굴 없음 (웹에서 + 버튼으로 등록)")
 
 print("[3/3] 설정 완료.")
 
@@ -90,6 +98,7 @@ class UserSession:
                 anthropic_client=self.brain.get_client(),
                 on_event=self._on_tool_event,
                 on_timer=self._on_timer,
+                face_registry=FACE_REGISTRY,
             )
         self.brain.tools = self.tools
 
@@ -187,6 +196,7 @@ async def websocket_endpoint(ws: WebSocket):
         username=session.username,
         backend=cfg.llm_backend,
         tools_enabled=session.tools is not None,
+        faces=FACE_REGISTRY.list_people(),
     )
 
     # 환영 인사 (백그라운드)
@@ -345,6 +355,37 @@ async def websocket_endpoint(ws: WebSocket):
                 else:
                     session.stop_observing()
                     await emit(type="observe_state", on=False)
+
+            elif mtype == "register_face":
+                # 현재 카메라 프레임에서 얼굴 잘라 등록
+                name = (data.get("name") or "").strip()
+                if not name:
+                    await emit(type="face_register_result", ok=False,
+                               message="이름을 입력해 주세요.")
+                else:
+                    crop = session.vision.crop_largest_face_jpeg(require_face=True)
+                    if not crop:
+                        await emit(type="face_register_result", ok=False,
+                                   message="얼굴이 명확히 보이지 않습니다. 카메라를 정면으로 보고 다시 시도하세요.")
+                    else:
+                        try:
+                            saved = FACE_REGISTRY.register(name, crop)
+                            await emit(type="face_register_result", ok=True,
+                                       name=saved,
+                                       message=f"'{saved}' 등록 완료",
+                                       faces=FACE_REGISTRY.list_people())
+                        except Exception as e:
+                            await emit(type="face_register_result", ok=False,
+                                       message=f"등록 실패: {e}")
+
+            elif mtype == "delete_face":
+                name = (data.get("name") or "").strip()
+                ok = FACE_REGISTRY.delete(name) if name else False
+                await emit(type="face_delete_result", ok=ok, name=name,
+                           faces=FACE_REGISTRY.list_people())
+
+            elif mtype == "list_faces":
+                await emit(type="face_list", faces=FACE_REGISTRY.list_people())
 
             elif mtype == "ping":
                 await emit(type="pong")

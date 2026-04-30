@@ -28,6 +28,11 @@
   const observeToggle = $('observe-toggle');
   const observationCard = $('observation-card');
   const observationText = $('observation-text');
+  const faceForm = $('face-form');
+  const faceNameInput = $('face-name-input');
+  const faceList = $('face-list');
+  const faceCount = $('face-count');
+  const faceMsg = $('face-msg');
   const ttsAudio = $('tts-audio');
 
   const mobileMicBtn = $('mobile-mic-btn');
@@ -96,6 +101,21 @@
     switch (m.type) {
       case 'ready':
         backendLabel.textContent = (m.backend || 'claude').toUpperCase();
+        renderFaces(m.faces || []);
+        break;
+      case 'face_list':
+        renderFaces(m.faces || []);
+        break;
+      case 'face_register_result':
+        showFaceMsg(m.message || (m.ok ? '등록됨' : '등록 실패'), !m.ok);
+        if (m.ok) {
+          renderFaces(m.faces || []);
+          if (faceNameInput) faceNameInput.value = '';
+        }
+        break;
+      case 'face_delete_result':
+        renderFaces(m.faces || []);
+        if (m.ok) showFaceMsg(`'${m.name}' 삭제됨`, false);
         break;
       case 'state':
         setState(m.state);
@@ -552,6 +572,58 @@
     send({ type: 'observe', on: observeToggle.checked, interval: 6.0 });
     if (!observeToggle.checked) observationCard.classList.add('hidden');
   });
+
+  // ---------- 얼굴 등록 / 식별 ----------
+  let _faceMsgTimer = null;
+  function showFaceMsg(text, isError) {
+    if (!faceMsg) return;
+    faceMsg.textContent = text || '';
+    faceMsg.classList.toggle('error', !!isError);
+    faceMsg.classList.add('show');
+    clearTimeout(_faceMsgTimer);
+    _faceMsgTimer = setTimeout(() => faceMsg.classList.remove('show'), 3500);
+  }
+
+  function renderFaces(names) {
+    if (!faceList) return;
+    faceList.innerHTML = '';
+    if (faceCount) faceCount.textContent = String(names.length);
+    names.forEach((name) => {
+      const chip = document.createElement('span');
+      chip.className = 'face-chip';
+      const label = document.createElement('span');
+      label.textContent = name;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.title = `${name} 삭제`;
+      btn.textContent = '×';
+      btn.addEventListener('click', () => {
+        if (confirm(`'${name}' 등록을 삭제할까요?`)) {
+          send({ type: 'delete_face', name });
+        }
+      });
+      chip.appendChild(label);
+      chip.appendChild(btn);
+      faceList.appendChild(chip);
+    });
+  }
+
+  if (faceForm) {
+    faceForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const name = (faceNameInput?.value || '').trim();
+      if (!name) {
+        showFaceMsg('이름을 입력하세요', true);
+        return;
+      }
+      if (!camStream) {
+        showFaceMsg('먼저 카메라를 시작하세요', true);
+        return;
+      }
+      showFaceMsg('등록 중...', false);
+      send({ type: 'register_face', name });
+    });
+  }
 
   // ---------- 스트리밍 버블 ----------
   let _streamEl = null;

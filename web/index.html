@@ -96,6 +96,21 @@
         <div id="observation-text"></div>
       </div>
 
+      <!-- 얼굴 등록 / 식별 -->
+      <div class="face-panel">
+        <div class="face-header">
+          <span class="face-title">REGISTERED FACES</span>
+          <span id="face-count" class="face-count">0</span>
+        </div>
+        <form id="face-form" class="face-form">
+          <input id="face-name-input" type="text" placeholder="이름을 입력하고 등록"
+                 maxlength="20" autocomplete="off">
+          <button type="submit" class="ghost" title="현재 카메라 프레임으로 등록">+ 등록</button>
+        </form>
+        <div id="face-list" class="face-list"></div>
+        <div id="face-msg" class="face-msg"></div>
+      </div>
+
       <div class="log-pane">
         <div class="log-header">COMMUNICATION LOG</div>
         <div id="log" class="log-body" role="log" aria-live="polite"></div>

@@ -2,14 +2,17 @@
 
 VisionSystem  : 데스크톱(pygame) 모드 — 로컬 cv2 카메라
 WebVision     : 웹 모드 — 브라우저가 보낸 프레임을 보관, 같은 인터페이스 제공
+FaceRegistry  : 웹 등록용 — 사람 이름 ↔ 얼굴 JPEG 저장 (Claude Vision 식별)
 """
 from __future__ import annotations
 
+import base64
 import pickle
+import re
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:
     import cv2
@@ -239,3 +242,151 @@ class WebVision:
     def update_face_recognition(self, frame):
         """no-op — push_jpeg 내부에서 감지 처리."""
         return
+
+    def crop_largest_face_jpeg(
+        self,
+        padding: float = 0.25,
+        quality: int = 85,
+        require_face: bool = False,
+    ) -> Optional[bytes]:
+        """가장 큰 감지된 얼굴을 잘라 JPEG 바이트로 반환.
+
+        require_face=True 면 얼굴이 명확히 감지될 때만 반환 (등록용).
+        require_face=False 면 얼굴이 없을 때 전체 프레임 반환 (식별용 폴백).
+        """
+        if not HAS_CV2 or cv2 is None:
+            return None
+        with self._lock:
+            frame = None if self._frame is None else self._frame.copy()
+        if frame is None:
+            return None
+
+        h, w = frame.shape[:2]
+
+        # 신선한 감지 — 캐시된 face_boxes 가 오래됐을 수 있으므로 즉시 재감지
+        boxes: List[Tuple[int, int, int, int]] = []
+        cascade = self._get_cascade()
+        if cascade is not None:
+            try:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                gray = cv2.equalizeHist(gray)
+                detections = cascade.detectMultiScale(
+                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
+                )
+                for (x, y, bw, bh) in detections:
+                    boxes.append((int(y), int(x + bw), int(y + bh), int(x)))
+            except Exception:
+                boxes = []
+
+        if not boxes:
+            if require_face:
+                return None
+            crop = frame
+        else:
+            def area(b):
+                t, r, bo, l = b
+                return max(0, r - l) * max(0, bo - t)
+            t, r, bo, l = max(boxes, key=area)
+            bw = r - l
+            bh = bo - t
+            pad_x = int(bw * padding)
+            pad_y = int(bh * padding)
+            l2 = max(0, l - pad_x)
+            t2 = max(0, t - pad_y)
+            r2 = min(w, r + pad_x)
+            b2 = min(h, bo + pad_y)
+            crop = frame[t2:b2, l2:r2] if (r2 > l2 and b2 > t2) else frame
+
+        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            return None
+        return buf.tobytes()
+
+
+# ============================================================
+# FaceRegistry — 웹 등록 얼굴 사진 저장 (Claude Vision 식별용)
+# ============================================================
+_NAME_SAFE = re.compile(r"[^0-9A-Za-z\uAC00-\uD7A3_\-]")
+
+
+def _safe_filename(name: str) -> str:
+    """파일명 안전 문자열로 변환 (한글/영숫자/_/- 만 허용)."""
+    s = _NAME_SAFE.sub("_", name.strip())
+    return s[:40] or "unknown"
+
+
+class FaceRegistry:
+    """등록된 사람 ↔ 얼굴 JPEG 저장소.
+
+    저장: faces/{safe_name}.jpg + faces/_index.json (원본 표시 이름 매핑)
+    """
+
+    def __init__(self, faces_dir: str = "faces"):
+        self.dir = Path(faces_dir)
+        self.dir.mkdir(exist_ok=True)
+        self.index_path = self.dir / "_index.json"
+        self._lock = threading.Lock()
+        self._index: Dict[str, str] = {}  # safe_name -> display_name
+        self._load_index()
+
+    def _load_index(self):
+        import json
+        if self.index_path.exists():
+            try:
+                self._index = json.loads(self.index_path.read_text(encoding="utf-8"))
+            except Exception:
+                self._index = {}
+
+    def _save_index(self):
+        import json
+        self.index_path.write_text(
+            json.dumps(self._index, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def register(self, display_name: str, jpeg_bytes: bytes) -> str:
+        """이름으로 얼굴 사진 저장. 같은 이름이면 덮어씀."""
+        if not display_name or not jpeg_bytes:
+            raise ValueError("이름과 사진이 필요합니다.")
+        safe = _safe_filename(display_name)
+        with self._lock:
+            (self.dir / f"{safe}.jpg").write_bytes(jpeg_bytes)
+            self._index[safe] = display_name.strip()
+            self._save_index()
+        return display_name.strip()
+
+    def delete(self, display_name: str) -> bool:
+        safe = _safe_filename(display_name)
+        with self._lock:
+            path = self.dir / f"{safe}.jpg"
+            existed = path.exists()
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            if safe in self._index:
+                del self._index[safe]
+                self._save_index()
+        return existed
+
+    def list_people(self) -> List[str]:
+        with self._lock:
+            return [
+                self._index.get(p.stem, p.stem)
+                for p in sorted(self.dir.glob("*.jpg"))
+            ]
+
+    def get_references(self) -> List[Tuple[str, str]]:
+        """[(display_name, base64_jpeg), ...] — Claude Vision 호출용."""
+        out: List[Tuple[str, str]] = []
+        with self._lock:
+            for p in sorted(self.dir.glob("*.jpg")):
+                try:
+                    b64 = base64.standard_b64encode(p.read_bytes()).decode("utf-8")
+                    out.append((self._index.get(p.stem, p.stem), b64))
+                except Exception:
+                    continue
+        return out
+
+    def is_empty(self) -> bool:
+        with self._lock:
+            return not any(self.dir.glob("*.jpg"))

@@ -388,6 +388,103 @@ input, select { outline: none; }
 .obs-title { font-size: 10px; letter-spacing: 0.18em; color: var(--amber); margin-bottom: 4px; }
 @keyframes fade-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
+/* ============ 얼굴 등록 패널 ============ */
+.face-panel {
+  border: 1px solid rgba(255, 217, 0, 0.18);
+  background: rgba(0, 0, 0, 0.32);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.face-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.face-title {
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: var(--accent);
+  font-weight: 600;
+}
+.face-count {
+  font-size: 11px;
+  color: var(--accent);
+  background: rgba(255, 217, 0, 0.12);
+  padding: 1px 7px;
+  border-radius: 8px;
+  letter-spacing: 0.05em;
+}
+.face-form {
+  display: flex;
+  gap: 6px;
+}
+.face-form input {
+  flex: 1 1 auto;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 217, 0, 0.25);
+  color: var(--text);
+  padding: 6px 9px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+.face-form input:focus { border-color: var(--accent); }
+.face-form button {
+  font-size: 12px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+.face-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 4px;
+}
+.face-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 217, 0, 0.10);
+  border: 1px solid rgba(255, 217, 0, 0.30);
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 4px 3px 9px;
+  border-radius: 12px;
+  animation: fade-in 0.25s ease-out;
+}
+.face-chip button {
+  all: unset;
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--accent);
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.55;
+  transition: opacity 0.15s, background 0.15s;
+}
+.face-chip button:hover {
+  opacity: 1;
+  background: rgba(255, 217, 0, 0.25);
+}
+.face-msg {
+  font-size: 11px;
+  color: var(--accent);
+  min-height: 14px;
+  letter-spacing: 0.02em;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.face-msg.show { opacity: 1; }
+.face-msg.error { color: #ff8080; }
+
 /* 스트리밍 중 버블 커서 */
 .log-msg.streaming .text::after {
   content: "▌";
