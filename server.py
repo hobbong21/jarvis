@@ -182,6 +182,20 @@ async def auth_status():
     return {"has_users": AUTH.has_users()}
 
 
+@app.get("/api/auth/auto")
+async def auto_login():
+    """로그인 화면 없이 자동으로 세션 생성 (개인용 앱)."""
+    # 등록된 첫 번째 사용자를 자동으로 사용
+    if AUTH.users:
+        primary_user = next(iter(AUTH.users))
+    else:
+        primary_user = "admin"
+    token = secrets.token_urlsafe(32)
+    SESSIONS[token] = primary_user
+    _save_sessions(SESSIONS)
+    return {"token": token, "username": primary_user}
+
+
 @app.post("/api/auth/register")
 async def register(username: str = Form(...), password: str = Form(...)):
     err = AUTH.create_user_detail(username, password)

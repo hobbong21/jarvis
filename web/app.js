@@ -68,25 +68,23 @@
   init();
 
   async function init() {
-    // 로그인 오브 (장식)
-    new EmotionOrb(loginOrbCanvas, { particles: 30, alphaMult: 0.85 });
-
-    // 회원가입/로그인 모드 결정
-    try {
-      const r = await fetch('/api/auth/status', { method: 'POST' });
-      const j = await r.json();
-      const isFirst = !j.has_users;
-      loginSub.textContent = isFirst ? 'INITIAL SETUP — CREATE YOUR ACCOUNT' : 'AUTHENTICATION REQUIRED';
-      loginBtn.textContent = isFirst ? 'INITIALIZE SYSTEM' : 'AUTHENTICATE';
-      loginForm.dataset.mode = isFirst ? 'register' : 'login';
-    } catch {}
-
-    // 토큰이 있으면 곧장 메인 시도
-    if (token && username) enterMain();
-
     setupClock();
     setupHotkeys();
     setupMobileTabs();
+
+    // 자동 로그인: 로그인 화면 없이 바로 세션 발급
+    try {
+      const r = await fetch('/api/auth/auto');
+      const j = await r.json();
+      token = j.token;
+      username = j.username;
+      localStorage.setItem(TOKEN_KEY, token);
+      localStorage.setItem(USER_KEY, username);
+    } catch (e) {
+      console.error('자동 로그인 실패:', e);
+    }
+
+    enterMain();
   }
 
   // ---------- 로그인 ----------
@@ -160,7 +158,12 @@
 
     ws.onclose = (ev) => {
       if (ev.code === 4001) {
-        logout(true);
+        // 세션 만료 → 자동으로 새 세션 발급 후 재연결
+        token = null;
+        username = null;
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(USER_KEY);
+        setTimeout(() => init(), 1000);
         return;
       }
       setState('disconnected');
