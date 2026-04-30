@@ -16,7 +16,7 @@ class Config:
     vision_model: str = "claude-haiku-4-5"
 
     # Ollama (로컬, 도구 사용 비활성화)
-    ollama_host: str = "http://localhost:11434"
+    ollama_host: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     ollama_model: str = "claude"
 
     # ============ 호출어 ============
