@@ -32,6 +32,7 @@
 
   const camVideo = $('cam');
   const camCanvas = $('cam-canvas');
+  const faceOverlay = $('face-overlay');
   const camSelect = $('cam-select');
   const camToggle = $('cam-toggle');
   const camStatus = $('cam-status');
@@ -207,6 +208,9 @@
       case 'observation':
         observationCard.classList.remove('hidden');
         observationText.textContent = m.description;
+        break;
+      case 'faces':
+        drawFaceBoxes(m.boxes || [], m.fw, m.fh);
         break;
       case 'observe_state':
         observeToggle.checked = m.on;
@@ -640,16 +644,46 @@
   });
 
   // ---------- 로그 ----------
+  let _typeQueue = Promise.resolve(); // 타이핑 직렬화 큐
+
   function addLog(role, text) {
     const div = document.createElement('div');
     div.className = `log-msg ${role}`;
     div.innerHTML = `<div class="who">▸ ${role === 'user' ? 'YOU' : 'JARVIS'}</div><div class="text"></div>`;
-    div.querySelector('.text').textContent = text;
+    const textEl = div.querySelector('.text');
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
     while (logEl.children.length > 100) logEl.removeChild(logEl.firstChild);
+
+    if (role === 'assistant') {
+      // 타이핑 효과 — 큐에 직렬화하여 중복 방지
+      _typeQueue = _typeQueue.then(() => typeWriter(textEl, text));
+    } else {
+      textEl.textContent = text;
+    }
   }
-  function clearLog() { logEl.innerHTML = ''; }
+
+  function typeWriter(el, text) {
+    return new Promise((resolve) => {
+      let i = 0;
+      const speed = Math.max(12, Math.min(40, Math.round(6000 / text.length))); // 길이에 따라 속도 조정
+      const tick = () => {
+        if (i < text.length) {
+          el.textContent = text.slice(0, ++i);
+          logEl.scrollTop = logEl.scrollHeight;
+          setTimeout(tick, speed);
+        } else {
+          resolve();
+        }
+      };
+      tick();
+    });
+  }
+
+  function clearLog() {
+    logEl.innerHTML = '';
+    _typeQueue = Promise.resolve();
+  }
 
   function flash(text, kind = 'info') {
     const div = document.createElement('div');
@@ -660,13 +694,125 @@
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  // ---------- TTS ----------
+  // ---------- TTS + 진폭 시각화 ----------
+  let _audioCtx = null;
+  let _analyser = null;
+  let _ampRaf = null;
+
+  function _ensureAudioCtx() {
+    if (_audioCtx) return;
+    _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = _audioCtx.createMediaElementSource(ttsAudio);
+    _analyser = _audioCtx.createAnalyser();
+    _analyser.fftSize = 256;
+    src.connect(_analyser);
+    _analyser.connect(_audioCtx.destination);
+  }
+
+  function _startAmpLoop() {
+    if (_ampRaf) return;
+    const buf = new Uint8Array(_analyser.fftSize);
+    const tick = () => {
+      _analyser.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = (buf[i] - 128) / 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / buf.length);
+      if (mainOrb) mainOrb.setAmplitude(rms * 4); // 0~1 범위로 스케일
+      _ampRaf = requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  function _stopAmpLoop() {
+    if (_ampRaf) { cancelAnimationFrame(_ampRaf); _ampRaf = null; }
+    if (mainOrb) mainOrb.setAmplitude(0);
+  }
+
   function playTtsBytes(buf) {
+    try { _ensureAudioCtx(); } catch {}
     const blob = new Blob([buf], { type: 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
     ttsAudio.src = url;
-    ttsAudio.play().catch(() => {});
-    ttsAudio.onended = () => URL.revokeObjectURL(url);
+    ttsAudio.play().then(() => {
+      if (_analyser) _startAmpLoop();
+    }).catch(() => {});
+    ttsAudio.onended = () => {
+      URL.revokeObjectURL(url);
+      _stopAmpLoop();
+    };
+  }
+
+  // ---------- 얼굴 박스 오버레이 ----------
+  let _faceBoxTimeout = null;
+
+  function drawFaceBoxes(boxes, fw, fh) {
+    if (!faceOverlay) return;
+    const dpr = window.devicePixelRatio || 1;
+    const W = faceOverlay.clientWidth;
+    const H = faceOverlay.clientHeight;
+    faceOverlay.width = Math.round(W * dpr);
+    faceOverlay.height = Math.round(H * dpr);
+    const ctx = faceOverlay.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    if (!boxes.length || !fw || !fh) return;
+
+    // 박스 좌표는 JPEG 픽셀값 → 화면 비율로 변환
+    const scaleX = W / fw;
+    const scaleY = H / fh;
+
+    ctx.lineWidth = 2;
+    ctx.font = '11px monospace';
+    ctx.textBaseline = 'bottom';
+
+    boxes.forEach((box, idx) => {
+      const [top, right, bottom, left, name] = box;
+      const x = left * scaleX;
+      const y = top * scaleY;
+      const bw = (right - left) * scaleX;
+      const bh = (bottom - top) * scaleY;
+
+      // 스캔라인 애니메이션용 그라데이션
+      const grad = ctx.createLinearGradient(x, y, x, y + bh);
+      grad.addColorStop(0, 'rgba(0,217,255,0.9)');
+      grad.addColorStop(1, 'rgba(0,217,255,0.3)');
+      ctx.strokeStyle = grad;
+      ctx.strokeRect(x, y, bw, bh);
+
+      // 코너 마커
+      const cs = Math.min(bw, bh) * 0.18;
+      ctx.strokeStyle = '#00d9ff';
+      ctx.lineWidth = 2.5;
+      [ [x, y, cs, 0, cs, 0],
+        [x + bw, y, -cs, 0, -cs, 0],
+        [x, y + bh, cs, 0, cs, 0],
+        [x + bw, y + bh, -cs, 0, -cs, 0],
+      ].forEach(([sx, sy, dx1, dy1, dx2, dy2]) => {
+        ctx.beginPath();
+        ctx.moveTo(sx + dx1, sy);
+        ctx.lineTo(sx, sy);
+        ctx.lineTo(sx, sy + (sy < y + bh / 2 ? cs : -cs));
+        ctx.stroke();
+      });
+
+      // 이름 라벨
+      const label = name || `FACE ${idx + 1}`;
+      ctx.fillStyle = 'rgba(0,217,255,0.85)';
+      ctx.fillRect(x, y - 16, ctx.measureText(label).width + 8, 16);
+      ctx.fillStyle = '#03070c';
+      ctx.fillText(label, x + 4, y);
+    });
+
+    // 3초 후 박스 자동 클리어
+    if (_faceBoxTimeout) clearTimeout(_faceBoxTimeout);
+    _faceBoxTimeout = setTimeout(() => {
+      const c2 = faceOverlay.getContext('2d');
+      c2.clearRect(0, 0, faceOverlay.width, faceOverlay.height);
+    }, 3000);
   }
 
   // ---------- 시계 ----------

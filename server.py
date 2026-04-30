@@ -284,7 +284,11 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
                 kind = data[0]
                 payload = data[1:]
                 if kind == 0x01:
-                    session.vision.push_jpeg(payload)
+                    detected = session.vision.push_jpeg(payload)
+                    if detected:
+                        fw, fh = session.vision.get_frame_size()
+                        boxes = [list(b) for b in session.vision.face_boxes]
+                        await emit(type="faces", boxes=boxes, fw=fw, fh=fh)
                 elif kind == 0x02:
                     if busy.locked():
                         continue

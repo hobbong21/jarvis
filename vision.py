@@ -127,23 +127,72 @@ class VisionSystem:
 class WebVision:
     """프론트엔드가 보낸 최신 프레임을 메모리에 보관."""
 
+    # 클래스 수준 Haar cascade 공유 (한 번만 로딩)
+    _cascade = None
+
+    @classmethod
+    def _get_cascade(cls):
+        if cls._cascade is None:
+            path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            cls._cascade = cv2.CascadeClassifier(path)
+        return cls._cascade
+
     def __init__(self):
         self._lock = threading.Lock()
         self._frame: Optional[np.ndarray] = None
         self._frame_ts: float = 0.0
+        self._frame_w: int = 0
+        self._frame_h: int = 0
         # 데스크톱 비전과 동일 필드 (UI/도구가 참조)
         self.current_user: Optional[str] = None
         self.face_boxes: List[Tuple[int, int, int, int]] = []
+        self._last_face_check: float = 0.0
 
-    def push_jpeg(self, data: bytes):
-        """브라우저가 WebSocket으로 보낸 JPEG 바이트를 디코드해 저장."""
+    def push_jpeg(self, data: bytes) -> bool:
+        """브라우저가 WebSocket으로 보낸 JPEG 바이트를 디코드해 저장.
+        얼굴 감지가 필요한 경우 True 반환."""
         arr = np.frombuffer(data, dtype=np.uint8)
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if frame is None:
-            return
+            return False
+        h, w = frame.shape[:2]
         with self._lock:
             self._frame = frame
             self._frame_ts = time.time()
+            self._frame_w = w
+            self._frame_h = h
+
+        # 얼굴 감지 (1초에 한 번만 실행 — CPU 절약)
+        now = time.time()
+        if now - self._last_face_check >= 1.0:
+            self._last_face_check = now
+            self._detect_faces(frame, w, h)
+            return True
+        return False
+
+    def _detect_faces(self, frame: np.ndarray, fw: int, fh: int):
+        """OpenCV Haar cascade 얼굴 감지 (face_recognition 불필요)."""
+        try:
+            cascade = self._get_cascade()
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray = cv2.equalizeHist(gray)
+            detections = cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30)
+            )
+            if len(detections) == 0:
+                self.face_boxes = []
+            else:
+                boxes = []
+                for (x, y, w, h) in detections:
+                    # (top, right, bottom, left) — face_recognition 포맷과 동일
+                    boxes.append((int(y), int(x + w), int(y + h), int(x)))
+                self.face_boxes = boxes
+        except Exception:
+            self.face_boxes = []
+
+    def get_frame_size(self) -> Tuple[int, int]:
+        with self._lock:
+            return self._frame_w, self._frame_h
 
     def read(self) -> Optional[np.ndarray]:
         """가장 최근 프레임 반환. 너무 오래된 건 무효 처리."""
@@ -157,7 +206,8 @@ class WebVision:
     def release(self):
         with self._lock:
             self._frame = None
+        self.face_boxes = []
 
     def update_face_recognition(self, frame: np.ndarray):
-        """웹 모드에선 얼굴 인식을 사용하지 않음 (no-op)."""
+        """no-op — push_jpeg 내부에서 감지 처리."""
         return
