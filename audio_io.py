@@ -159,18 +159,28 @@ class WhisperSTT:
 # ============================================================
 class EdgeTTS:
     def __init__(self):
-        try:
-            import pygame
-            if not pygame.mixer.get_init():
-                pygame.mixer.init(frequency=24000)
-            self._pygame = pygame
-        except Exception:
-            self._pygame = None
+        # pygame 은 웹 서버 모드에서 사용하지 않으므로 __init__ 에서 임포트하지 않는다.
+        # speak() (로컬 재생) 에서만 지연 임포트한다.
+        self._pygame = None
+        self._pygame_checked = False
+
+    def _ensure_pygame(self):
+        """pygame 을 처음 speak() 호출 시에만 임포트 (웹 모드에서는 호출되지 않음)."""
+        if not self._pygame_checked:
+            self._pygame_checked = True
+            try:
+                import pygame
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init(frequency=24000)
+                self._pygame = pygame
+            except Exception:
+                self._pygame = None
 
     def speak(self, text: str):
         """텍스트를 합성하여 재생 (블로킹)"""
         if not text.strip():
             return
+        self._ensure_pygame()
         if self._pygame is None:
             return
         path = self._synthesize(text)
