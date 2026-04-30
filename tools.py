@@ -11,7 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-import cv2
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    cv2 = None  # type: ignore
+    HAS_CV2 = False
 
 from config import cfg
 
@@ -180,6 +185,8 @@ class ToolExecutor:
             return "카메라 프레임을 가져올 수 없습니다."
 
         # JPEG 압축 (속도/대역폭)
+        if not HAS_CV2 or cv2 is None:
+            return "카메라 기능을 사용할 수 없습니다 (cv2 미설치)."
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:
             return "이미지 인코딩 실패"
@@ -299,6 +306,8 @@ class ToolExecutor:
         if frame is None:
             return "카메라에 사람이 보이지 않거나 프레임을 가져올 수 없습니다."
 
+        if not HAS_CV2 or cv2 is None:
+            return "카메라 기능을 사용할 수 없습니다 (cv2 미설치)."
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if not ok:
             return "이미지 인코딩 실패"
