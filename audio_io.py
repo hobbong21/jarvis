@@ -14,7 +14,7 @@ from config import cfg
 # 1. 호출어 감지 (Picovoice Porcupine)
 # ============================================================
 class WakeWordListener:
-    """'자비스' 같은 호출어를 항상 듣고 있다가 콜백 실행"""
+    """'사비스' 같은 호출어를 항상 듣고 있다가 콜백 실행"""
 
     def __init__(self, on_wake: Callable[[], None]):
         import pvporcupine

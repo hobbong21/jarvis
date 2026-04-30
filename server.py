@@ -1,4 +1,4 @@
-"""J.A.R.V.I.S 웹 서버 — FastAPI + WebSocket
+"""S.A.R.V.I.S 웹 서버 — FastAPI + WebSocket
 
 브라우저에서 마이크/카메라를 사용하고, 같은 Brain/Tools 파이프라인을 재사용한다.
 
@@ -33,7 +33,7 @@ from vision import WebVision
 # 전역 — 서버를 즉시 시작하고 Whisper 는 백그라운드에서 로드
 # ============================================================
 print("=" * 60)
-print("  J . A . R . V . I . S   웹 서버 초기화")
+print("  S . A . R . V . I . S   웹 서버 초기화")
 print("=" * 60)
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -143,7 +143,7 @@ ACTIVE: Dict[str, UserSession] = {}
 # ============================================================
 # FastAPI 앱
 # ============================================================
-app = FastAPI(title="JARVIS Web")
+app = FastAPI(title="SARVIS Web")
 
 if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
@@ -162,7 +162,7 @@ async def websocket_endpoint(ws: WebSocket):
     conn_id = secrets.token_hex(8)  # 연결별 내부 ID
     await ws.accept()
 
-    session = UserSession("J.A.R.V.I.S")
+    session = UserSession("S.A.R.V.I.S")
     ACTIVE[conn_id] = session
 
     session.loop = asyncio.get_event_loop()
@@ -194,7 +194,7 @@ async def websocket_endpoint(ws: WebSocket):
         await asyncio.sleep(0.5)
         async with busy:
             await respond_internal(
-                "자비스 시스템이 온라인 상태야. "
+                "사비스 시스템이 온라인 상태야. "
                 "짧고 자신감 있게 준비 완료 인사를 해. 도구는 호출하지 마.",
                 log_user=False,
             )

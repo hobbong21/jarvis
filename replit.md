@@ -1,4 +1,4 @@
-# J.A.R.V.I.S — Personal AI Assistant
+# S.A.R.V.I.S — Personal AI Assistant
 
 A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning → Model Selection → Task Execution → Response Generation). Features face recognition, voice interaction, and tool-augmented intelligence.
 
@@ -26,7 +26,7 @@ A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning �
 ## Environment Variables
 
 - `ANTHROPIC_API_KEY` — Required for Claude backend (set as a secret)
-- `JARVIS_BACKEND` — `"claude"` (default) or `"ollama"`
+- `SARVIS_BACKEND` — `"claude"` (default) or `"ollama"`
 - `PORCUPINE_ACCESS_KEY` — Optional, for desktop wake-word detection
 
 ## Running

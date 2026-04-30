@@ -17,7 +17,7 @@ from vision import FaceMemory
 
 def main():
     print("=" * 50)
-    print("자비스 얼굴 등록")
+    print("사비스 얼굴 등록")
     print("=" * 50)
     name = input("이름을 입력하세요: ").strip()
     if not name:

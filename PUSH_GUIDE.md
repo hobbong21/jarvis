@@ -9,7 +9,7 @@
 unzip jarvis.zip
 cd jarvis
 git status   # 깨끗한 작업 트리, main 브랜치 확인
-git log      # "feat: J.A.R.V.I.S personal AI assistant..." 커밋 확인
+git log      # "feat: S.A.R.V.I.S personal AI assistant..." 커밋 확인
 git remote -v  # origin → https://github.com/hobbong21/jarvis.git
 ```
 
@@ -19,7 +19,7 @@ git remote -v  # origin → https://github.com/hobbong21/jarvis.git
 
 1. https://github.com/settings/tokens 이동
 2. "Generate new token (classic)" 클릭
-3. Note: `jarvis-push`, Expiration: 30일 정도, **scopes: `repo` 체크**
+3. Note: `sarvis-push`, Expiration: 30일 정도, **scopes: `repo` 체크**
 4. Generate token → 토큰 복사 (한 번만 보임)
 5. push 시 username은 GitHub 사용자명 (`hobbong21`), password는 토큰
 
@@ -47,7 +47,7 @@ git config --global credential.helper manager
 
 ## 2. 본인 정보로 커밋 작성자 변경 (선택)
 
-zip 안의 커밋은 "Jarvis Setup <jarvis@local>" 명의로 되어 있어요. 본인 명의로 바꾸려면:
+zip 안의 커밋은 "Sarvis Setup <sarvis@local>" 명의로 되어 있어요. 본인 명의로 바꾸려면:
 
 ```bash
 git config user.email "본인이메일@example.com"

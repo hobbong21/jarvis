@@ -1,4 +1,4 @@
-/* ===== JARVIS Emotion Orb — Canvas2D ===== */
+/* ===== SARVIS Emotion Orb — Canvas2D ===== */
 
 const PALETTES = {
   neutral:   { primary: [40, 140, 220],  glow: [0, 180, 255],   pulseRate: 0.5, intensity: 0.35 },

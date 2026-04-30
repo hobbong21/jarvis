@@ -1,4 +1,4 @@
-"""자비스 감정 시스템 — 색상 팔레트, 감정 태그 파싱"""
+"""사비스 감정 시스템 — 색상 팔레트, 감정 태그 파싱"""
 import re
 from dataclasses import dataclass
 from enum import Enum

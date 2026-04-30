@@ -1,4 +1,4 @@
-"""자비스 메인 — 로그인 → 코어(도구 포함) → Pygame UI 루프"""
+"""사비스 메인 — 로그인 → 코어(도구 포함) → Pygame UI 루프"""
 import threading
 import time
 from typing import List, Optional
@@ -11,16 +11,16 @@ from brain import Brain
 from config import cfg
 from emotion import Emotion
 from tools import ToolExecutor
-from ui import JarvisUI
+from ui import SarvisUI
 from vision import VisionSystem
 
 
-class JarvisCore:
+class SarvisCore:
     """오디오/뇌/비전/도구를 묶는 코어"""
 
     def __init__(self, logged_in_user: str):
         print("=" * 60)
-        print("  J . A . R . V . I . S   초기화")
+        print("  S . A . R . V . I . S   초기화")
         print("=" * 60)
 
         self.logged_in_user = logged_in_user
@@ -60,7 +60,7 @@ class JarvisCore:
         self._first_seen = None
 
         print("=" * 60)
-        print(f"  '{logged_in_user}'님으로 로그인. 'Jarvis' 라고 호출하세요.")
+        print(f"  '{logged_in_user}'님으로 로그인. 'Sarvis' 라고 호출하세요.")
         print("=" * 60)
 
     def _attach_tools(self):
@@ -97,7 +97,7 @@ class JarvisCore:
         self.current_tool = tool_name if status == "start" else None
 
     def _on_timer_expired(self, label: str):
-        """타이머 만료 시 자비스가 음성 알림"""
+        """타이머 만료 시 사비스가 음성 알림"""
         prompt = f"방금 설정해둔 타이머 '{label}'이 만료됐어. 사용자에게 짧게 알려줘."
         threading.Thread(
             target=self._respond, args=(prompt, False), daemon=True
@@ -130,7 +130,7 @@ class JarvisCore:
             emotion, reply = self.brain.think(text, context=ctx)
             self._add_log("assistant", reply)
             self.emotion = emotion
-            print(f"[JARVIS] [{emotion.value}] {reply}\n")
+            print(f"[SARVIS] [{emotion.value}] {reply}\n")
 
             self.state = "speaking"
             self.tts.speak(reply)
@@ -160,7 +160,7 @@ class JarvisCore:
             emotion, reply = self.brain.think(prompt, context=ctx)
             self._add_log("assistant", reply)
             self.emotion = emotion
-            print(f"[JARVIS] [{emotion.value}] {reply}\n")
+            print(f"[SARVIS] [{emotion.value}] {reply}\n")
 
             self.state = "speaking"
             self.tts.speak(reply)
@@ -217,7 +217,7 @@ class JarvisCore:
 # 엔트리 포인트
 # ============================================================
 def main():
-    ui = JarvisUI()
+    ui = SarvisUI()
     auth = AuthSystem(cfg.users_file)
 
     # 로그인
@@ -230,7 +230,7 @@ def main():
     print(f"\n[Auth] '{user}'님 로그인 성공.\n")
 
     try:
-        core = JarvisCore(logged_in_user=user)
+        core = SarvisCore(logged_in_user=user)
     except Exception as e:
         print(f"[초기화 오류] {e}")
         ui.quit()
@@ -285,7 +285,7 @@ def main():
             pygame.display.flip()
             ui.tick(60)
     finally:
-        print("\n자비스 종료 중...")
+        print("\n사비스 종료 중...")
         core.shutdown()
         ui.quit()
 

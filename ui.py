@@ -120,13 +120,13 @@ class Button:
 
 
 # ============ 메인 UI ============
-class JarvisUI:
+class SarvisUI:
     WIDTH = 1280
     HEIGHT = 800
 
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("J.A.R.V.I.S")
+        pygame.display.set_caption("S.A.R.V.I.S")
         self.screen = pygame.display.set_mode((self.WIDTH, self.HEIGHT))
         self.clock = pygame.time.Clock()
 
@@ -163,7 +163,7 @@ class JarvisUI:
         for y in range(0, self.HEIGHT, spacing):
             pygame.draw.line(self.screen, GRID, (0, y), (self.WIDTH, y))
 
-    # ============ 오브 렌더링 (자비스의 얼굴) ============
+    # ============ 오브 렌더링 (사비스의 얼굴) ============
     def _draw_orb(self, surface, cx, cy, base_radius, emotion: Emotion, alpha_mult=1.0):
         palette = PALETTES[emotion]
         rate = palette.pulse_rate
@@ -183,7 +183,7 @@ class JarvisUI:
             pygame.draw.circle(glow, (*palette.glow, alpha), (cx, cy), r, thickness)
         surface.blit(glow, (0, 0), special_flags=pygame.BLEND_ADD)
 
-        # 2) 회전 링 4개 — 더 잘 보이게 (자비스의 시그니처)
+        # 2) 회전 링 4개 — 더 잘 보이게 (사비스의 시그니처)
         ring_specs = [
             (0.35, 1.5, 0.45, 2, 220),
             (-0.55, 1.85, 0.65, 2, 180),
@@ -270,7 +270,7 @@ class JarvisUI:
         label_bg = pygame.Surface((w, 22), pygame.SRCALPHA)
         label_bg.fill((0, 0, 0, 140))
         self.screen.blit(label_bg, (x, y))
-        label = self.font_xs.render("VISUAL FEED · WHAT JARVIS SEES", True, ACCENT)
+        label = self.font_xs.render("VISUAL FEED · WHAT SARVIS SEES", True, ACCENT)
         self.screen.blit(label, (x + 8, y + 5))
 
         # 스캔라인
@@ -339,7 +339,7 @@ class JarvisUI:
             self._draw_orb(self.screen, cx, 200, 70, Emotion.NEUTRAL, alpha_mult=0.7)
 
             # 타이틀
-            title = self.font_xl.render("J.A.R.V.I.S", True, ACCENT)
+            title = self.font_xl.render("S.A.R.V.I.S", True, ACCENT)
             self.screen.blit(title, title.get_rect(center=(cx, 300)))
             sub = "INITIAL SETUP — CREATE YOUR ACCOUNT" if is_first else "AUTHENTICATION REQUIRED"
             sub_surf = self.font_sm.render(sub, True, TEXT_DIM)
@@ -380,7 +380,7 @@ class JarvisUI:
         # ===== 상단 바 =====
         pygame.draw.rect(self.screen, BG_PANEL, (0, 0, self.WIDTH, 50))
         pygame.draw.line(self.screen, ACCENT_DIM, (0, 50), (self.WIDTH, 50))
-        title = self.font_lg.render("J . A . R . V . I . S", True, ACCENT)
+        title = self.font_lg.render("S . A . R . V . I . S", True, ACCENT)
         self.screen.blit(title, (24, 13))
 
         state_color = {
@@ -416,7 +416,7 @@ class JarvisUI:
         self.screen.blit(emo_label, emo_label.get_rect(center=(orb_cx, orb_cy + orb_radius + 90)))
 
         hints = {
-            "idle": "Say 'JARVIS' to wake up",
+            "idle": "Say 'SARVIS' to wake up",
             "listening": "▸ Listening...",
             "thinking": "▸ Processing...",
             "speaking": "▸ Speaking...",
@@ -484,7 +484,7 @@ class JarvisUI:
         for msg in visible:
             if msg_y > max_y - 16:
                 break
-            who = "YOU" if msg["role"] == "user" else "JARVIS"
+            who = "YOU" if msg["role"] == "user" else "SARVIS"
             who_color = AMBER if msg["role"] == "user" else ACCENT
             who_surf = self.font_xs.render(f"▸ {who}", True, who_color)
             self.screen.blit(who_surf, (cam_x + 12, msg_y))

@@ -1,4 +1,4 @@
-"""자비스 설정"""
+"""사비스 설정"""
 import os
 from dataclasses import dataclass, field
 from typing import List
@@ -7,7 +7,7 @@ from typing import List
 @dataclass
 class Config:
     # ============ LLM 백엔드 ============
-    llm_backend: str = os.getenv("JARVIS_BACKEND", "claude")  # "claude" | "ollama"
+    llm_backend: str = os.getenv("SARVIS_BACKEND", "claude")  # "claude" | "ollama"
 
     # Claude API
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
@@ -21,6 +21,7 @@ class Config:
 
     # ============ 호출어 ============
     porcupine_access_key: str = os.getenv("PORCUPINE_ACCESS_KEY", "")
+    # Porcupine 내장 키워드는 "jarvis"만 지원 → 호출어는 "Jarvis"로 유지 (브랜드만 SARVIS)
     wake_keywords: List[str] = field(default_factory=lambda: ["jarvis"])
 
     # ============ STT ============
@@ -50,7 +51,7 @@ class Config:
     users_file: str = "users.json"
 
     # ============ 페르소나 + 도구 사용 가이드 ============
-    system_prompt: str = """너는 자비스(JARVIS). 사용자의 개인 AI 비서이자 친구.
+    system_prompt: str = """너는 사비스(SARVIS). 사용자의 개인 AI 비서이자 친구.
 
 ** 기본 규칙 **
 - 한국어로 자연스럽고 간결하게 대답해.
@@ -60,7 +61,7 @@ class Config:
 - [컨텍스트:...] 정보가 주어지면 자연스럽게 활용해.
 - 마크다운, 이모지, 리스트 금지. 자연스러운 말로만.
 
-** 도구 사용 (Microsoft JARVIS 스타일 4단계) **
+** 도구 사용 (Microsoft SARVIS 스타일 4단계) **
 사용자의 요청을 받으면 다음 순서로 처리해:
   1) 의도 파악
   2) 적절한 도구 선택

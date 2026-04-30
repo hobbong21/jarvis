@@ -10,9 +10,9 @@ _EMOTION_PREFIX_RE = re.compile(r"^\s*\[emotion:\w+\]\s*", re.IGNORECASE)
 
 
 class Brain:
-    """JARVIS의 LLM 컨트롤러.
+    """SARVIS의 LLM 컨트롤러.
 
-    Microsoft JARVIS의 4단계 패턴을 Claude tool_use 한 번의 호출로 구현:
+    Microsoft SARVIS의 4단계 패턴을 Claude tool_use 한 번의 호출로 구현:
       1) Task Planning   → LLM이 사용자 요청 해석
       2) Model Selection → LLM이 적절한 도구 선택
       3) Task Execution  → ToolExecutor가 도구 실행

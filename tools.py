@@ -1,6 +1,6 @@
-"""자비스 도구 시스템 — LLM이 호출하는 전문 모델/기능들
+"""사비스 도구 시스템 — LLM이 호출하는 전문 모델/기능들
 
-Microsoft JARVIS의 4단계 패턴을 Claude tool_use로 구현:
+Microsoft SARVIS의 4단계 패턴을 Claude tool_use로 구현:
   Task Planning → Model Selection → Task Execution → Response Generation
 """
 import base64

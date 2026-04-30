@@ -1,4 +1,4 @@
-/* ===== JARVIS Web Client ===== */
+/* ===== SARVIS Web Client ===== */
 (() => {
   // ---------- DOM ----------
   const $ = (id) => document.getElementById(id);
@@ -560,7 +560,7 @@
   function beginStreamBubble() {
     const div = document.createElement('div');
     div.className = 'log-msg assistant streaming';
-    div.innerHTML = '<div class="who">▸ JARVIS</div><div class="text"></div>';
+    div.innerHTML = '<div class="who">▸ SARVIS</div><div class="text"></div>';
     _streamEl = div.querySelector('.text');
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
@@ -619,7 +619,7 @@
   function addLog(role, text) {
     const div = document.createElement('div');
     div.className = `log-msg ${role}`;
-    div.innerHTML = `<div class="who">▸ ${role === 'user' ? 'YOU' : 'JARVIS'}</div><div class="text"></div>`;
+    div.innerHTML = `<div class="who">▸ ${role === 'user' ? 'YOU' : 'SARVIS'}</div><div class="text"></div>`;
     const textEl = div.querySelector('.text');
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;

@@ -1,22 +1,22 @@
-# J.A.R.V.I.S — Personal AI Assistant
+# S.A.R.V.I.S — Personal AI Assistant
 
-웹캠으로 사용자를 알아보고, 호출어 또는 푸시투토크로 깨어나 한국어로 대화하는 자비스.
+웹캠으로 사용자를 알아보고, 호출어 또는 푸시투토크로 깨어나 한국어로 대화하는 사비스.
 **데스크톱(pygame)** 모드와 **웹(FastAPI)** 모드 모두 지원.
-**Microsoft JARVIS의 4단계 agent 패턴**(Task Planning → Model Selection → Task Execution → Response Generation)을 Claude의 native tool_use로 구현.
+**Microsoft SARVIS의 4단계 agent 패턴**(Task Planning → Model Selection → Task Execution → Response Generation)을 Claude의 native tool_use로 구현.
 
 ## 핵심 기능
 
 - 🔐 **로그인** — PBKDF2 해싱 기반 계정 관리
 - 🎭 **감정 표현 오브** — LLM이 감정 태그로 직접 결정 (7가지)
 - 🎥 **얼굴 인식** — 등록된 사용자 자동 식별 + 자동 인사
-- 🎙️ **호출어 감지** — "Jarvis" 부르면 깨어남
+- 🎙️ **호출어 감지** — "Sarvis" 부르면 깨어남
 - 🛠️ **Agent 도구 시스템** (NEW) — Claude가 7개 도구를 자동 선택/실행
 - 🧠 **듀얼 백엔드** — Claude (도구 지원) ↔ Ollama (단순 채팅)
 - 🗣️ **한국어 음성** — Whisper STT + Edge-TTS
 
 ## Agent 도구
 
-자비스는 사용자 요청을 받으면 적절한 도구를 자동으로 선택해 실행하고, 결과를 종합해 답변합니다.
+사비스는 사용자 요청을 받으면 적절한 도구를 자동으로 선택해 실행하고, 결과를 종합해 답변합니다.
 
 | 도구 | 용도 | 예시 발화 |
 |---|---|---|
@@ -42,7 +42,7 @@
    ↓ 결과: "흰 셔츠에 검은 재킷을 입은 사람이 보임"
 [4. Response Generation] Claude가 자연스럽게 종합
    ↓
-자비스: "[emotion:neutral] 흰 셔츠에 검은 재킷이 잘 어울리시네요."
+사비스: "[emotion:neutral] 흰 셔츠에 검은 재킷이 잘 어울리시네요."
 ```
 
 ## 1. 설치
@@ -78,7 +78,7 @@ python main.py
 ```
 
 - 첫 실행 — 계정 생성 (사용자명 + 비밀번호 4자 이상)
-- 이후 — 로그인 → 자동 환영 → "Jarvis" 호출 대기
+- 이후 — 로그인 → 자동 환영 → "Sarvis" 호출 대기
 
 #### 단축키
 
@@ -101,7 +101,7 @@ python server.py
 특징:
 - 푸시투토크 (`SPACE` 또는 마이크 버튼) — 1.5초 무음 시 자동 종료
 - 카메라 선택 + 라이브 피드 → 매 1초 프레임을 서버로 전송
-- **행동 인식 토글** — 활성화하면 6초마다 자비스가 사람의 행동/자세를 자동 묘사
+- **행동 인식 토글** — 활성화하면 6초마다 사비스가 사람의 행동/자세를 자동 묘사
 - 모바일/태블릿/데스크톱 모두 반응형
 
 #### 단축키 (웹)
@@ -115,7 +115,7 @@ python server.py
 ## 프로젝트 구조
 
 ```
-jarvis/
+sarvis/
 ├── main.py          # 데스크톱 엔트리: 로그인 → 코어 → pygame UI 루프
 ├── server.py        # 웹 엔트리: FastAPI + WebSocket
 ├── config.py        # 설정 + 시스템 프롬프트
@@ -142,7 +142,7 @@ jarvis/
 
 ## 아키텍처 비교
 
-### Microsoft JARVIS (HuggingGPT)
+### Microsoft SARVIS (HuggingGPT)
 ```
 사용자 → ChatGPT (라우터) → HuggingFace 모델들 → ChatGPT (종합) → 응답
                           ├─ image-to-text
@@ -151,7 +151,7 @@ jarvis/
                           └─ ... (수십 개)
 ```
 
-### 우리 자비스 (Claude tool_use)
+### 우리 사비스 (Claude tool_use)
 ```
 사용자 → Claude (라우터+종합) → Tool Executor → 응답
                               ├─ see (Claude Vision)
@@ -193,11 +193,11 @@ class ToolExecutor:
 
 ## 다음 아이디어
 
-- **표정 인식** — DeepFace로 사용자 감정 → 자비스 emotion에 반영
+- **표정 인식** — DeepFace로 사용자 감정 → 사비스 emotion에 반영
 - **MCP 서버 연결** — Claude API의 MCP 통합으로 캘린더, 메일, 슬랙
 - **음성 자동 감지** — 호출어 없이 VAD로 발화 자동 감지
 - **다중 사용자** — 카메라 식별 → 사용자별 메모리 분리
-- **프록시 서버 모드** — Microsoft JARVIS의 `/tasks` `/results` 같은 REST API 노출
+- **프록시 서버 모드** — Microsoft SARVIS의 `/tasks` `/results` 같은 REST API 노출
 
 ## 라이선스
 
