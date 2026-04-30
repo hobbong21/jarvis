@@ -31,7 +31,7 @@ from tools import ToolExecutor
 from vision import WebVision
 
 # ============================================================
-# 전역 — 한 번만 초기화 (Whisper 모델 로딩이 무거움)
+# 전역 — 서버를 즉시 시작하고 Whisper 는 백그라운드에서 로드
 # ============================================================
 print("=" * 60)
 print("  J . A . R . V . I . S   웹 서버 초기화")
@@ -39,12 +39,19 @@ print("=" * 60)
 
 WEB_DIR = Path(__file__).parent / "web"
 
-print("[1/3] STT (Whisper) ...")
-try:
-    STT = WhisperSTT()
-except Exception as e:
-    print(f"      STT 초기화 실패: {e}")
-    STT = None
+# STT: Whisper 는 모델 다운로드가 오래 걸릴 수 있으므로 백그라운드 스레드로 로드
+STT: Optional["WhisperSTT"] = None
+
+def _load_stt():
+    global STT
+    print("[1/3] STT (Whisper) — 백그라운드 로딩 시작 ...")
+    try:
+        STT = WhisperSTT()
+        print("      Whisper 모델 준비 완료.")
+    except Exception as e:
+        print(f"      STT 초기화 실패: {e}")
+
+threading.Thread(target=_load_stt, daemon=True, name="stt-loader").start()
 
 print("[2/3] TTS (Edge-TTS) ...")
 TTS = EdgeTTS()
@@ -56,7 +63,7 @@ AUTH = AuthSystem(cfg.users_file)
 SESSIONS: Dict[str, str] = {}
 
 print("=" * 60)
-print(f"  준비 완료. http://localhost:5000")
+print("  서버 시작 중 (STT 는 백그라운드에서 로딩). http://localhost:5000")
 print("=" * 60)
 
 
@@ -418,7 +425,7 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
         await emit(type="state", state="thinking")
         await emit(type="emotion", emotion="thinking")
         if STT is None:
-            await emit(type="error", message="STT 모듈이 초기화되지 않았습니다.")
+            await emit(type="error", message="음성 인식 모델이 아직 로딩 중입니다. 잠시 후 다시 시도해 주세요.")
             await emit(type="state", state="idle")
             await emit(type="emotion", emotion="neutral")
             return
@@ -458,7 +465,12 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
 # ============================================================
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "backend": cfg.llm_backend, "users": len(SESSIONS)}
+    return {
+        "ok": True,
+        "backend": cfg.llm_backend,
+        "stt_ready": STT is not None,
+        "users": len(SESSIONS),
+    }
 
 
 if __name__ == "__main__":
