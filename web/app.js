@@ -212,6 +212,16 @@
       case 'faces':
         drawFaceBoxes(m.boxes || [], m.fw, m.fh);
         break;
+      case 'stream_start':
+        beginStreamBubble();
+        break;
+      case 'stream_chunk':
+        appendStreamChunk(m.text || '');
+        break;
+      case 'stream_end':
+        finalizeStreamBubble(m.text || '', m.emotion || 'neutral');
+        if (isMobile()) markTabBadge('side');
+        break;
       case 'observe_state':
         observeToggle.checked = m.on;
         break;
@@ -295,7 +305,30 @@
       setState('listening');
       setEmotion('listening');
 
-      vadAutoStop(stream);
+      // 마이크 분석기 — VAD + 오브 진폭 공유
+      const micCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const micSrc = micCtx.createMediaStreamSource(stream);
+      const micAnalyser = micCtx.createAnalyser();
+      micAnalyser.fftSize = 512;
+      micSrc.connect(micAnalyser);
+
+      // 오브에 마이크 진폭 전달
+      const micBuf = new Uint8Array(micAnalyser.fftSize);
+      const feedOrbMic = () => {
+        if (!recording) { if (mainOrb) mainOrb.setAmplitude(0); return; }
+        micAnalyser.getByteTimeDomainData(micBuf);
+        let sum = 0;
+        for (let i = 0; i < micBuf.length; i++) {
+          const v = (micBuf[i] - 128) / 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / micBuf.length);
+        if (mainOrb) mainOrb.setAmplitude(rms * 3.5);
+        requestAnimationFrame(feedOrbMic);
+      };
+      feedOrbMic();
+
+      vadAutoStop(stream, micAnalyser, micCtx);
     } catch (err) {
       flash(`마이크 오류: ${err.message}`, 'error');
     }
@@ -312,12 +345,9 @@
     }
   }
 
-  function vadAutoStop(stream) {
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const src = audioCtx.createMediaStreamSource(stream);
-    const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 512;
-    src.connect(analyser);
+  function vadAutoStop(stream, sharedAnalyser, sharedCtx) {
+    const analyser = sharedAnalyser;
+    const audioCtx = sharedCtx;
     const data = new Uint8Array(analyser.fftSize);
     let speaking = false;
     let silenceStart = 0;
@@ -325,7 +355,7 @@
 
     const tick = () => {
       if (!recording) {
-        audioCtx.close().catch(() => {});
+        if (audioCtx) audioCtx.close().catch(() => {});
         return;
       }
       analyser.getByteTimeDomainData(data);
@@ -642,6 +672,35 @@
     send({ type: 'observe', on: observeToggle.checked, interval: 6.0 });
     if (!observeToggle.checked) observationCard.classList.add('hidden');
   });
+
+  // ---------- 스트리밍 버블 ----------
+  let _streamEl = null; // 현재 스트리밍 중인 텍스트 요소
+
+  function beginStreamBubble() {
+    const div = document.createElement('div');
+    div.className = 'log-msg assistant streaming';
+    div.innerHTML = '<div class="who">▸ JARVIS</div><div class="text"></div>';
+    _streamEl = div.querySelector('.text');
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+    while (logEl.children.length > 100) logEl.removeChild(logEl.firstChild);
+  }
+
+  function appendStreamChunk(text) {
+    if (!_streamEl) return;
+    _streamEl.textContent += text;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function finalizeStreamBubble(cleanText, emotion) {
+    if (_streamEl) {
+      _streamEl.textContent = cleanText;
+      const bubble = _streamEl.closest('.streaming');
+      if (bubble) bubble.classList.remove('streaming');
+      _streamEl = null;
+    }
+    logEl.scrollTop = logEl.scrollHeight;
+  }
 
   // ---------- 로그 ----------
   let _typeQueue = Promise.resolve(); // 타이핑 직렬화 큐

@@ -241,15 +241,46 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
         await emit(type="emotion", emotion="thinking")
         try:
             ctx = build_context()
-            emotion, reply = await asyncio.to_thread(
-                session.brain.think, prompt, ctx
-            )
             if log_user:
                 await emit(type="message", role="user", text=prompt)
-            await emit(type="message", role="assistant", text=reply)
-            await emit(type="emotion", emotion=emotion.value)
+
+            # 스트리밍 브릿지 (sync generator → async WebSocket)
+            queue: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def run_stream():
+                try:
+                    for item in session.brain.think_stream(prompt, ctx):
+                        loop.call_soon_threadsafe(queue.put_nowait, item)
+                except Exception as exc:
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait, (None, None, str(exc))
+                    )
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+            threading.Thread(target=run_stream, daemon=True).start()
+
+            await emit(type="stream_start")
+            final_text = ""
+            final_emotion = "neutral"
+
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                chunk, emo, body = item
+                if emo is not None:
+                    # 스트림 종료 신호
+                    final_text = body or ""
+                    final_emotion = emo.value
+                    await emit(type="stream_end", text=final_text, emotion=final_emotion)
+                elif chunk:
+                    await emit(type="stream_chunk", text=chunk)
+
+            await emit(type="emotion", emotion=final_emotion)
             await emit(type="state", state="speaking")
-            audio = await asyncio.to_thread(TTS.synthesize_bytes, reply)
+            audio = await asyncio.to_thread(TTS.synthesize_bytes, final_text)
             if audio:
                 await emit_bytes(audio)
         except Exception as e:
@@ -314,25 +345,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
                     user_text = (data.get("text") or "").strip()
                     if not user_text:
                         continue
-                    await emit(type="message", role="user", text=user_text)
-                    await emit(type="state", state="thinking")
-                    await emit(type="emotion", emotion="thinking")
-                    try:
-                        emotion, reply = await asyncio.to_thread(
-                            session.brain.think, user_text, build_context()
-                        )
-                        await emit(type="message", role="assistant", text=reply)
-                        await emit(type="emotion", emotion=emotion.value)
-                        await emit(type="state", state="speaking")
-                        audio = await asyncio.to_thread(TTS.synthesize_bytes, reply)
-                        if audio:
-                            await emit_bytes(audio)
-                    except Exception as e:
-                        traceback.print_exc()
-                        await emit(type="error", message=str(e))
-                    finally:
-                        await emit(type="state", state="idle")
-                        await emit(type="emotion", emotion="neutral")
+                    await respond_internal(user_text, log_user=True)
 
             elif mtype == "switch_backend":
                 target = data.get("backend", "claude")

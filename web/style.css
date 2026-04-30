@@ -173,6 +173,45 @@ input, select { outline: none; }
   padding: 20px 24px;
   border-right: 1px solid var(--accent-d);
   min-width: 0;
+  overflow: hidden;
+}
+
+/* HUD 스캔라인 — 주기적으로 오브 위를 훑어 내려감 */
+.orb-pane::before {
+  content: "";
+  position: absolute;
+  left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(
+    transparent 0%,
+    rgba(0, 217, 255, 0.35) 40%,
+    rgba(0, 217, 255, 0.55) 50%,
+    rgba(0, 217, 255, 0.35) 60%,
+    transparent 100%
+  );
+  animation: hud-scan 4s linear infinite;
+  pointer-events: none;
+  z-index: 10;
+}
+@keyframes hud-scan {
+  0%   { top: -4px;  opacity: 0; }
+  5%   { opacity: 1; }
+  95%  { opacity: 1; }
+  100% { top: 100%;  opacity: 0; }
+}
+
+/* HUD 코너 데코 */
+.orb-pane::after {
+  content: "";
+  position: absolute; inset: 0;
+  border: 1px solid transparent;
+  border-image: linear-gradient(
+    to bottom right,
+    rgba(0,217,255,0.3) 0%, transparent 30%,
+    transparent 70%, rgba(0,217,255,0.2) 100%
+  ) 1;
+  pointer-events: none;
+  z-index: 10;
 }
 #orb {
   width: min(520px, 78%);
@@ -347,6 +386,19 @@ input, select { outline: none; }
 }
 .obs-title { font-size: 10px; letter-spacing: 0.18em; color: var(--amber); margin-bottom: 4px; }
 @keyframes fade-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+/* 스트리밍 중 버블 커서 */
+.log-msg.streaming .text::after {
+  content: "▌";
+  display: inline-block;
+  color: var(--accent);
+  animation: blink-cursor 0.7s step-end infinite;
+  margin-left: 1px;
+}
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
 
 .log-pane {
   flex: 1;

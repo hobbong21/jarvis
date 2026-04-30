@@ -1,9 +1,12 @@
 """두뇌 — Claude tool_use 루프 / Ollama 단순 채팅. 감정 태그 파싱 포함."""
+import re
 import traceback
-from typing import Optional, Tuple
+from typing import Generator, Iterator, Optional, Tuple
 
 from config import cfg
 from emotion import Emotion, parse_emotion
+
+_EMOTION_PREFIX_RE = re.compile(r"^\s*\[emotion:\w+\]\s*", re.IGNORECASE)
 
 
 class Brain:
@@ -179,6 +182,127 @@ class Brain:
         emotion, body = parse_emotion(raw)
         self._trim_history()
         return emotion, body
+
+    # ============================================================
+    # 스트리밍 (Claude simple / Ollama)
+    # ============================================================
+    def think_stream(
+        self, user_message: str, context: Optional[str] = None
+    ) -> Iterator[Tuple[Optional[str], Optional[Emotion], Optional[str]]]:
+        """동기 제너레이터 — 청크마다 (chunk, None, None) yield.
+        완료 시 (None, emotion, clean_body) yield.
+        tool_use 모드는 비스트리밍 폴백."""
+        if context:
+            user_message = f"[컨텍스트: {context}]\n\n{user_message}"
+        self.history.append({"role": "user", "content": user_message})
+
+        if self.client is None:
+            yield None, Emotion.CONCERNED, (
+                "ANTHROPIC_API_KEY가 설정되지 않았습니다. "
+                "환경변수에 키를 추가하고 재시작해주세요."
+            )
+            return
+
+        try:
+            if cfg.llm_backend == "claude" and self.tools is not None:
+                emotion, body = self._think_with_tools()
+                yield None, emotion, body
+            elif cfg.llm_backend == "claude":
+                yield from self._stream_claude()
+            else:
+                yield from self._stream_ollama()
+        except Exception as e:
+            traceback.print_exc()
+            yield None, Emotion.CONCERNED, f"AI 통신 오류: {e}"
+
+    def _stream_claude(self):
+        full = ""
+        prefix_buf = ""
+        prefix_cleared = False
+        MAX_PREFIX = 30  # [emotion:concerned] ≈ 20자
+
+        with self.client.messages.stream(
+            model=cfg.claude_model,
+            max_tokens=600,
+            system=cfg.system_prompt,
+            messages=self.history,
+        ) as stream:
+            for chunk in stream.text_stream:
+                full += chunk
+                if not prefix_cleared:
+                    prefix_buf += chunk
+                    # 감정 태그가 완전히 들어왔는지 확인
+                    if len(prefix_buf) >= MAX_PREFIX or "\n" in prefix_buf or (
+                        "]" in prefix_buf and "[" in prefix_buf
+                    ):
+                        m = _EMOTION_PREFIX_RE.match(prefix_buf)
+                        to_emit = prefix_buf[m.end():] if m else prefix_buf
+                        if to_emit:
+                            yield to_emit, None, None
+                        prefix_cleared = True
+                else:
+                    yield chunk, None, None
+
+        self.history.append({"role": "assistant", "content": full})
+        emotion, body = parse_emotion(full)
+        self._trim_history()
+        yield None, emotion, body
+
+    def _stream_ollama(self):
+        simple_history = []
+        for h in self.history:
+            content = h["content"]
+            if isinstance(content, str):
+                simple_history.append({"role": h["role"], "content": content})
+            elif isinstance(content, list):
+                parts = []
+                for b in content:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "text":
+                        parts.append(b.get("text", ""))
+                    elif b.get("type") == "tool_use":
+                        parts.append(f"[도구: {b.get('name')}]")
+                    elif b.get("type") == "tool_result":
+                        parts.append(f"[결과: {b.get('content', '')}]")
+                flat = " ".join(p for p in parts if p).strip()
+                if flat:
+                    simple_history.append({"role": h["role"], "content": flat})
+
+        messages = [{"role": "system", "content": cfg.system_prompt}] + simple_history
+
+        full = ""
+        prefix_buf = ""
+        prefix_cleared = False
+        MAX_PREFIX = 30
+
+        for chunk in self.client.chat(
+            model=cfg.ollama_model,
+            messages=messages,
+            stream=True,
+            options={"num_predict": 600, "temperature": 0.7},
+        ):
+            text = chunk.get("message", {}).get("content", "")
+            if not text:
+                continue
+            full += text
+            if not prefix_cleared:
+                prefix_buf += text
+                if len(prefix_buf) >= MAX_PREFIX or "\n" in prefix_buf or (
+                    "]" in prefix_buf and "[" in prefix_buf
+                ):
+                    m = _EMOTION_PREFIX_RE.match(prefix_buf)
+                    to_emit = prefix_buf[m.end():] if m else prefix_buf
+                    if to_emit:
+                        yield to_emit, None, None
+                    prefix_cleared = True
+            else:
+                yield text, None, None
+
+        self.history.append({"role": "assistant", "content": full})
+        emotion, body = parse_emotion(full)
+        self._trim_history()
+        yield None, emotion, body
 
     # ============================================================
     # 유틸
