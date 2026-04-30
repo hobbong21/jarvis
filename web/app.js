@@ -40,6 +40,11 @@
   const observationText = $('observation-text');
   const ttsAudio = $('tts-audio');
 
+  // Mobile-only elements
+  const fabMic = $('fab-mic');
+  const mobileTextForm = $('mobile-text-form');
+  const mobileTextInput = $('mobile-text-input');
+
   // ---------- 상태 ----------
   const TOKEN_KEY = 'jarvis.token';
   const USER_KEY = 'jarvis.user';
@@ -52,6 +57,9 @@
   let camStream = null;
   let frameInterval = null;
   let mainOrb = null;
+
+  // ---------- 모바일 감지 ----------
+  const isMobile = () => window.innerWidth <= 640;
 
   // ---------- 부팅 ----------
   init();
@@ -75,6 +83,7 @@
 
     setupClock();
     setupHotkeys();
+    setupMobileTabs();
   }
 
   // ---------- 로그인 ----------
@@ -126,6 +135,8 @@
     if (!mainOrb) mainOrb = new EmotionOrb(orbCanvas, { particles: 70 });
     connectWS();
     listCameras();
+    // 기본 탭: orb
+    switchTab('orb');
   }
 
   // ---------- WebSocket ----------
@@ -146,12 +157,10 @@
 
     ws.onclose = (ev) => {
       if (ev.code === 4001) {
-        // 토큰 만료 → 로그아웃
         logout(true);
         return;
       }
       setState('disconnected');
-      // 자동 재연결 (서버가 살아있으면)
       setTimeout(() => { if (token) connectWS(); }, 2000);
     };
 
@@ -184,6 +193,8 @@
         break;
       case 'message':
         addLog(m.role, m.text);
+        // 모바일에서 로그가 오면 side 탭으로 잠깐 배지 표시
+        if (isMobile() && m.role === 'assistant') markTabBadge('side');
         break;
       case 'tool_event':
         if (m.status === 'start') {
@@ -242,6 +253,7 @@
 
   // ---------- 마이크 / 녹음 ----------
   micBtn.addEventListener('click', toggleRecording);
+  if (fabMic) fabMic.addEventListener('click', toggleRecording);
 
   async function toggleRecording() {
     if (recording) {
@@ -267,18 +279,18 @@
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
         const blob = new Blob(recordedChunks, { type: mime });
-        if (blob.size < 800) return; // 너무 짧으면 무시
+        if (blob.size < 800) return;
         const buf = await blob.arrayBuffer();
         sendBinary(0x02, buf);
       };
       mediaRecorder.start();
       recording = true;
       micBtn.classList.add('recording');
+      if (fabMic) fabMic.classList.add('recording');
       micLabel.textContent = 'STOP';
       setState('listening');
       setEmotion('listening');
 
-      // VAD: 1.5초 무음 감지 시 자동 종료
       vadAutoStop(stream);
     } catch (err) {
       flash(`마이크 오류: ${err.message}`, 'error');
@@ -289,6 +301,7 @@
     if (!recording) return;
     recording = false;
     micBtn.classList.remove('recording');
+    if (fabMic) fabMic.classList.remove('recording');
     micLabel.textContent = 'SPEAK';
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
       mediaRecorder.stop();
@@ -329,7 +342,6 @@
           return;
         }
       }
-      // 안전: 15초 최대
       if (now - startedAt > 15000) {
         stopRecording();
         return;
@@ -339,7 +351,7 @@
     tick();
   }
 
-  // ---------- 텍스트 입력 ----------
+  // ---------- 텍스트 입력 (데스크톱) ----------
   textForm.addEventListener('submit', (e) => {
     e.preventDefault();
     const t = textInput.value.trim();
@@ -347,6 +359,18 @@
     send({ type: 'text_input', text: t });
     textInput.value = '';
   });
+
+  // ---------- 텍스트 입력 (모바일) ----------
+  if (mobileTextForm) {
+    mobileTextForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const t = mobileTextInput.value.trim();
+      if (!t) return;
+      send({ type: 'text_input', text: t });
+      mobileTextInput.value = '';
+      mobileTextInput.blur();
+    });
+  }
 
   // ---------- 단축키 ----------
   function setupHotkeys() {
@@ -373,10 +397,66 @@
     });
   }
 
+  // ---------- 모바일 탭 ----------
+  function setupMobileTabs() {
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const tab = btn.dataset.tab;
+        switchTab(tab);
+      });
+    });
+  }
+
+  function switchTab(tab) {
+    // 탭 버튼 활성 상태
+    document.querySelectorAll('.tab-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.tab === tab);
+    });
+
+    // 패널 전환
+    const orbPane = document.querySelector('.orb-pane');
+    const sidePane = document.querySelector('.side-pane');
+
+    if (tab === 'orb') {
+      orbPane.classList.add('tab-active');
+      sidePane.classList.remove('tab-active');
+    } else {
+      sidePane.classList.add('tab-active');
+      orbPane.classList.remove('tab-active');
+      // 로그 스크롤 최하단
+      logEl.scrollTop = logEl.scrollHeight;
+      // 배지 제거
+      clearTabBadge('side');
+    }
+  }
+
+  // 탭 배지 (새 메시지 알림)
+  function markTabBadge(tabName) {
+    const btn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
+    if (!btn || btn.classList.contains('active')) return;
+    if (!btn.querySelector('.tab-badge')) {
+      const dot = document.createElement('span');
+      dot.className = 'tab-badge';
+      dot.style.cssText = `
+        position:absolute; top:6px; right:calc(50% - 14px);
+        width:8px; height:8px; border-radius:50%;
+        background:var(--accent); box-shadow:0 0 6px rgba(0,217,255,0.8);
+      `;
+      btn.style.position = 'relative';
+      btn.appendChild(dot);
+    }
+  }
+
+  function clearTabBadge(tabName) {
+    const btn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
+    if (!btn) return;
+    const dot = btn.querySelector('.tab-badge');
+    if (dot) dot.remove();
+  }
+
   // ---------- 카메라 ----------
   async function listCameras() {
     try {
-      // 권한 트리거 (한 번 호출해야 라벨이 나옴)
       const tmp = await navigator.mediaDevices.getUserMedia({ video: true });
       tmp.getTracks().forEach((t) => t.stop());
     } catch {
@@ -426,7 +506,6 @@
       camStatus.textContent = 'LIVE';
       camStatus.classList.add('on');
       observeToggle.disabled = false;
-      // 매 1초마다 프레임 전송
       frameInterval = setInterval(sendFrame, 1000);
     } catch (err) {
       flash(`카메라 오류: ${err.message}`, 'error');
@@ -488,7 +567,6 @@
     div.querySelector('.text').textContent = text;
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
-    // 100개 초과 시 오래된 것부터 제거
     while (logEl.children.length > 100) logEl.removeChild(logEl.firstChild);
   }
   function clearLog() { logEl.innerHTML = ''; }
@@ -507,7 +585,7 @@
     const blob = new Blob([buf], { type: 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
     ttsAudio.src = url;
-    ttsAudio.play().catch(() => {/* 자동재생 정책 */});
+    ttsAudio.play().catch(() => {});
     ttsAudio.onended = () => URL.revokeObjectURL(url);
   }
 

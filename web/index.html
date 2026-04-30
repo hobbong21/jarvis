@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#03070C">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>J.A.R.V.I.S</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -13,13 +15,15 @@
 <section id="login-screen" class="screen">
   <div class="grid-bg"></div>
   <div class="login-card">
-    <canvas id="login-orb" width="200" height="200" aria-hidden="true"></canvas>
+    <canvas id="login-orb" width="160" height="160" aria-hidden="true"></canvas>
     <h1 class="brand">J.A.R.V.I.S</h1>
     <p id="login-sub" class="sub">AUTHENTICATION REQUIRED</p>
 
     <form id="login-form" autocomplete="off">
-      <input id="username" type="text" placeholder="Username" autocomplete="username" required>
-      <input id="password" type="password" placeholder="Password" autocomplete="current-password" required minlength="4">
+      <input id="username" type="text" placeholder="Username" autocomplete="username"
+             autocapitalize="none" autocorrect="off" spellcheck="false" required>
+      <input id="password" type="password" placeholder="Password"
+             autocomplete="current-password" required minlength="4">
       <button id="login-btn" type="submit">AUTHENTICATE</button>
     </form>
 
@@ -44,8 +48,8 @@
   </header>
 
   <main class="layout">
-    <!-- 좌: 오브 + 컨트롤 -->
-    <div class="orb-pane">
+    <!-- 좌/탭1: 오브 + 컨트롤 -->
+    <div class="orb-pane tab-active">
       <canvas id="orb" width="640" height="640"></canvas>
       <div class="orb-label">
         <span id="emotion-label">NEUTRAL</span>
@@ -55,7 +59,7 @@
 
       <div class="controls">
         <button id="mic-btn" class="primary big" aria-label="음성 입력">
-          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 2a3 3 0 00-3 3v6a3 3 0 006 0V5a3 3 0 00-3-3z"/>
             <path d="M19 10a7 7 0 01-14 0"/>
             <line x1="12" y1="17" x2="12" y2="22"/>
@@ -66,7 +70,8 @@
       </div>
 
       <form id="text-form" class="text-input">
-        <input id="text-input" type="text" placeholder="텍스트로 입력...">
+        <input id="text-input" type="text" placeholder="텍스트로 입력..."
+               autocomplete="off" autocorrect="off" spellcheck="false">
         <button type="submit" class="ghost">SEND</button>
       </form>
 
@@ -77,7 +82,7 @@
       </div>
     </div>
 
-    <!-- 우: 카메라 + 로그 -->
+    <!-- 우/탭2: 카메라 + 로그 -->
     <aside class="side-pane">
       <div class="cam-wrap">
         <video id="cam" autoplay muted playsinline></video>
@@ -108,6 +113,42 @@
       </div>
     </aside>
   </main>
+
+  <!-- Mobile: 플로팅 마이크 버튼 -->
+  <button id="fab-mic" class="fab-mic" aria-label="음성 입력">
+    <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M12 2a3 3 0 00-3 3v6a3 3 0 006 0V5a3 3 0 00-3-3z"/>
+      <path d="M19 10a7 7 0 01-14 0"/>
+      <line x1="12" y1="17" x2="12" y2="22"/>
+      <line x1="8" y1="22" x2="16" y2="22"/>
+    </svg>
+  </button>
+
+  <!-- Mobile: 하단 텍스트 입력바 -->
+  <form id="mobile-text-form" class="mobile-input-bar">
+    <input id="mobile-text-input" type="text" placeholder="메시지 입력..."
+           autocomplete="off" autocorrect="off" spellcheck="false">
+    <button type="submit">SEND</button>
+  </form>
+
+  <!-- Mobile: 하단 탭바 -->
+  <div class="mobile-tabs">
+    <nav>
+      <button class="tab-btn active" data-tab="orb">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="12" cy="12" r="5"/>
+          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+        </svg>
+        ORB
+      </button>
+      <button class="tab-btn" data-tab="side">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+        </svg>
+        LOG
+      </button>
+    </nav>
+  </div>
 </section>
 
 <audio id="tts-audio" preload="auto"></audio>
