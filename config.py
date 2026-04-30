@@ -7,7 +7,7 @@ from typing import List
 @dataclass
 class Config:
     # ============ LLM 백엔드 ============
-    llm_backend: str = os.getenv("JARVIS_BACKEND", "claude")  # "claude" | "ollama"
+    llm_backend: str = os.getenv("JARVIS_BACKEND", "ollama")  # "claude" | "ollama"
 
     # Claude API
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
@@ -17,7 +17,7 @@ class Config:
 
     # Ollama (로컬, 도구 사용 비활성화)
     ollama_host: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "claude"
 
     # ============ 호출어 ============
     porcupine_access_key: str = os.getenv("PORCUPINE_ACCESS_KEY", "")
