@@ -80,6 +80,9 @@
         <button data-key="ollama" class="ghost">2·OLLAMA</button>
         <button data-key="reset" class="ghost">R·RESET</button>
       </div>
+
+      <!-- 모바일 전용: ORB 탭에서 자비스 응답 표시 -->
+      <div id="orb-reply" class="orb-reply" role="status" aria-live="assertive" aria-label="자비스 응답"></div>
     </div>
 
     <!-- 우/탭2: 카메라 + 로그 -->
@@ -124,21 +127,19 @@
     </aside>
   </main>
 
-  <!-- Mobile: 플로팅 마이크 버튼 -->
-  <button id="fab-mic" class="fab-mic" aria-label="음성 입력">
-    <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2">
-      <path d="M12 2a3 3 0 00-3 3v6a3 3 0 006 0V5a3 3 0 00-3-3z"/>
-      <path d="M19 10a7 7 0 01-14 0"/>
-      <line x1="12" y1="17" x2="12" y2="22"/>
-      <line x1="8" y1="22" x2="16" y2="22"/>
-    </svg>
-  </button>
-
-  <!-- Mobile: 하단 텍스트 입력바 -->
+  <!-- Mobile: 하단 통합 입력바 (마이크 + 텍스트 + 전송) -->
   <form id="mobile-text-form" class="mobile-input-bar">
+    <button id="mobile-mic-btn" type="button" class="mobile-mic-btn" aria-label="음성 입력">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2a3 3 0 00-3 3v6a3 3 0 006 0V5a3 3 0 00-3-3z"/>
+        <path d="M19 10a7 7 0 01-14 0"/>
+        <line x1="12" y1="17" x2="12" y2="22"/>
+        <line x1="8" y1="22" x2="16" y2="22"/>
+      </svg>
+    </button>
     <input id="mobile-text-input" type="text" placeholder="메시지 입력..."
            autocomplete="off" autocorrect="off" spellcheck="false">
-    <button type="submit">SEND</button>
+    <button type="submit" class="mobile-send-btn">↑</button>
   </form>
 
   <!-- Mobile: 하단 탭바 -->

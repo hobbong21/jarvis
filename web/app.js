@@ -42,9 +42,11 @@
   const ttsAudio = $('tts-audio');
 
   // Mobile-only elements
-  const fabMic = $('fab-mic');
+  const fabMic = $('fab-mic'); // 하위 호환 (hidden)
+  const mobileMicBtn = $('mobile-mic-btn');
   const mobileTextForm = $('mobile-text-form');
   const mobileTextInput = $('mobile-text-input');
+  const orbReply = $('orb-reply');
 
   // ---------- 상태 ----------
   const TOKEN_KEY = 'jarvis.token';
@@ -268,6 +270,7 @@
   // ---------- 마이크 / 녹음 ----------
   micBtn.addEventListener('click', toggleRecording);
   if (fabMic) fabMic.addEventListener('click', toggleRecording);
+  if (mobileMicBtn) mobileMicBtn.addEventListener('click', toggleRecording);
 
   async function toggleRecording() {
     if (recording) {
@@ -301,6 +304,7 @@
       recording = true;
       micBtn.classList.add('recording');
       if (fabMic) fabMic.classList.add('recording');
+      if (mobileMicBtn) mobileMicBtn.classList.add('recording');
       micLabel.textContent = 'STOP';
       setState('listening');
       setEmotion('listening');
@@ -339,6 +343,7 @@
     recording = false;
     micBtn.classList.remove('recording');
     if (fabMic) fabMic.classList.remove('recording');
+    if (mobileMicBtn) mobileMicBtn.classList.remove('recording');
     micLabel.textContent = 'SPEAK';
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
       mediaRecorder.stop();
@@ -675,6 +680,7 @@
 
   // ---------- 스트리밍 버블 ----------
   let _streamEl = null; // 현재 스트리밍 중인 텍스트 요소
+  let _orbStreamBuf = ''; // ORB 탭 응답 누적 버퍼
 
   function beginStreamBubble() {
     const div = document.createElement('div');
@@ -684,12 +690,24 @@
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
     while (logEl.children.length > 100) logEl.removeChild(logEl.firstChild);
+    // ORB 탭에 스트리밍 시작 표시
+    _orbStreamBuf = '';
+    if (orbReply) {
+      orbReply.textContent = '';
+      orbReply.classList.add('visible', 'streaming');
+    }
   }
 
   function appendStreamChunk(text) {
     if (!_streamEl) return;
     _streamEl.textContent += text;
     logEl.scrollTop = logEl.scrollHeight;
+    // ORB 탭 실시간 업데이트
+    _orbStreamBuf += text;
+    if (orbReply) {
+      orbReply.textContent = _orbStreamBuf;
+      orbReply.scrollTop = orbReply.scrollHeight;
+    }
   }
 
   function finalizeStreamBubble(cleanText, emotion) {
@@ -700,6 +718,31 @@
       _streamEl = null;
     }
     logEl.scrollTop = logEl.scrollHeight;
+    // ORB 탭 최종 텍스트 확정
+    if (orbReply) {
+      orbReply.textContent = cleanText;
+      orbReply.classList.add('visible');
+      orbReply.classList.remove('streaming');
+      orbReply.scrollTop = orbReply.scrollHeight;
+    }
+    _orbStreamBuf = '';
+  }
+
+  // ---------- ORB 탭 응답 표시 (모바일 전용) ----------
+  const isMobile = () => window.innerWidth <= 640;
+
+  function updateOrbReply(text, streaming = false) {
+    if (!orbReply) return;
+    orbReply.textContent = text || '';
+    orbReply.classList.toggle('visible', !!text);
+    orbReply.classList.toggle('streaming', streaming);
+    if (orbReply.visible) orbReply.scrollTop = orbReply.scrollHeight;
+  }
+
+  function clearOrbReply() {
+    if (!orbReply) return;
+    orbReply.textContent = '';
+    orbReply.classList.remove('visible', 'streaming');
   }
 
   // ---------- 로그 ----------
@@ -717,9 +760,12 @@
     if (role === 'assistant') {
       // 타이핑 효과 — 큐에 직렬화하여 중복 방지
       _typeQueue = _typeQueue.then(() => typeWriter(textEl, text));
+      // 모바일 ORB 탭에도 표시
+      updateOrbReply(text, false);
     } else {
       textEl.textContent = text;
     }
+    markTabBadge('side');
   }
 
   function typeWriter(el, text) {
@@ -742,6 +788,7 @@
   function clearLog() {
     logEl.innerHTML = '';
     _typeQueue = Promise.resolve();
+    clearOrbReply();
   }
 
   function flash(text, kind = 'info') {

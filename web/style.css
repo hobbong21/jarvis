@@ -473,75 +473,79 @@ input, select { outline: none; }
 .tab-btn.active { color: var(--accent); }
 .tab-btn.active svg { filter: drop-shadow(0 0 6px rgba(0,217,255,0.6)); }
 
-/* ===== Floating mic button (mobile) ===== */
-.fab-mic {
-  display: none;
-  position: fixed;
-  bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 20px);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 99;
-  width: 72px; height: 72px;
-  border-radius: 50%;
-  background: rgba(0, 60, 90, 0.85);
-  border: 2px solid var(--accent);
-  color: var(--accent);
-  display: none;
-  align-items: center; justify-content: center;
-  cursor: pointer;
-  box-shadow: 0 0 24px rgba(0,217,255,0.3);
-  transition: all 0.15s;
-  -webkit-tap-highlight-color: transparent;
-  backdrop-filter: blur(6px);
-}
-.fab-mic:active { transform: translateX(-50%) scale(0.93); }
-.fab-mic.recording {
-  background: rgba(255, 80, 100, 0.25);
-  border-color: var(--red);
-  color: var(--red);
-  box-shadow: 0 0 24px rgba(255,80,100,0.4);
-  animation: pulse-red 1s infinite;
-}
-
-/* ===== Mobile input bar ===== */
+/* ===== Mobile input bar (통합: 마이크 + 텍스트 + 전송) ===== */
 .mobile-input-bar {
   display: none;
   position: fixed;
   bottom: calc(var(--tabbar-h) + var(--safe-bottom));
   left: 0; right: 0;
-  padding: 10px 12px;
-  background: rgba(8, 17, 28, 0.96);
+  padding: 8px 10px;
+  background: rgba(8, 17, 28, 0.97);
   border-top: 1px solid var(--accent-d);
   z-index: 98;
   gap: 8px;
-  backdrop-filter: blur(6px);
+  align-items: center;
+  backdrop-filter: blur(10px);
 }
 .mobile-input-bar input {
   flex: 1;
   background: rgba(8, 17, 28, 0.9);
   border: 1px solid var(--accent-d);
   color: var(--text);
-  padding: 12px 14px;
+  padding: 0 14px;
   font-size: 16px;
   border-radius: 24px;
   -webkit-appearance: none;
-  min-height: 48px;
+  height: 46px;
+  min-width: 0;
 }
 .mobile-input-bar input:focus { border-color: var(--accent); outline: none; }
-.mobile-input-bar button {
-  background: rgba(0, 90, 130, 0.3);
-  border: 1px solid var(--accent);
+
+/* 마이크 버튼 (입력바 내) */
+.mobile-mic-btn {
+  width: 46px; height: 46px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent-d);
+  background: rgba(0, 60, 90, 0.5);
   color: var(--accent);
-  border-radius: 24px;
-  padding: 0 18px;
-  font-size: 12px;
-  letter-spacing: 0.1em;
-  cursor: pointer;
-  min-height: 48px;
+  display: flex; align-items: center; justify-content: center;
   flex-shrink: 0;
-  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s;
+  -webkit-tap-highlight-color: transparent;
 }
-.mobile-input-bar button:active { background: rgba(0,217,255,0.2); }
+.mobile-mic-btn:active { transform: scale(0.92); }
+.mobile-mic-btn.recording {
+  border-color: var(--red);
+  color: var(--red);
+  background: rgba(255, 80, 100, 0.15);
+  box-shadow: 0 0 12px rgba(255,80,100,0.4);
+  animation: pulse-red 1s infinite;
+}
+
+/* 전송 버튼 */
+.mobile-send-btn {
+  width: 46px; height: 46px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  background: rgba(0, 90, 130, 0.4);
+  color: var(--accent);
+  font-size: 20px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: all 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.mobile-send-btn:active { background: rgba(0,217,255,0.25); transform: scale(0.92); }
+
+/* ===== ORB 탭 응답 표시 (모바일 전용) ===== */
+.orb-reply {
+  display: none; /* @media 640 에서 활성화 */
+}
+
+/* fab-mic 는 더 이상 사용하지 않음 */
+.fab-mic { display: none !important; }
 
 /* ===== Tablet (≤ 960px) ===== */
 @media (max-width: 960px) {
@@ -581,12 +585,12 @@ input, select { outline: none; }
     position: relative;
   }
 
-  /* Tab panels */
+  /* Tab panels — bottom 은 탭바(56) + 입력바(62) = 118px */
   .orb-pane,
   .side-pane {
     position: absolute;
     inset: 0;
-    bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 60px); /* above input bar + mic */
+    bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 62px);
     border: none;
     padding: 12px 14px;
     overflow-y: auto;
@@ -644,8 +648,46 @@ input, select { outline: none; }
 
   /* Show mobile UI */
   .mobile-tabs { display: flex; flex-direction: column; }
-  .fab-mic { display: flex; }
   .mobile-input-bar { display: flex; }
+
+  /* ORB 탭 응답 표시 영역 */
+  .orb-reply {
+    display: block;
+    width: 100%;
+    max-height: 0;
+    overflow: hidden;
+    background: rgba(0, 217, 255, 0.04);
+    border: 0px solid rgba(0, 217, 255, 0.18);
+    border-radius: 8px;
+    padding: 0 14px;
+    margin-top: 0;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text);
+    word-break: break-word;
+    flex-shrink: 0;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s, max-height 0.3s ease, padding 0.25s, margin-top 0.25s, border-width 0.25s;
+    -webkit-overflow-scrolling: touch;
+  }
+  .orb-reply.visible {
+    max-height: 110px;
+    overflow-y: auto;
+    opacity: 1;
+    pointer-events: auto;
+    padding: 10px 14px;
+    margin-top: 10px;
+    border-width: 1px;
+  }
+  .orb-reply.streaming {
+    border-color: rgba(0, 217, 255, 0.45);
+  }
+  .orb-reply.streaming::after {
+    content: " ▌";
+    color: var(--accent);
+    animation: blink-cursor 0.7s step-end infinite;
+  }
 
   /* Scrollbar minimal on mobile */
   .log-body::-webkit-scrollbar { width: 0; }
