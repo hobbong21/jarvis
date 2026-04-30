@@ -6,12 +6,7 @@ import threading
 import time
 from typing import Callable
 
-import numpy as np
-try:
-    import sounddevice as sd
-except Exception:
-    sd = None
-
+# numpy / sounddevice 는 사용하는 함수 안에서만 임포트 (배포 cold start 지연 방지)
 from config import cfg
 
 
@@ -91,8 +86,14 @@ class WakeWordListener:
 class SpeechRecorder:
     SAMPLE_RATE = 16000
 
-    def record(self) -> np.ndarray:
+    def record(self):
         """말하는 동안 녹음. 일정 시간 침묵하면 종료."""
+        import numpy as np
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            raise RuntimeError(f"sounddevice 미설치: {e}")
+
         chunks = []
         silence_count = 0
         chunk_dur = 0.1

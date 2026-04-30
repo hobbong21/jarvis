@@ -59,8 +59,26 @@ TTS = EdgeTTS()
 print("[3/3] Auth ...")
 AUTH = AuthSystem(cfg.users_file)
 
-# 세션 토큰 → 사용자명
-SESSIONS: Dict[str, str] = {}
+# 세션 토큰 → 사용자명 (파일에 저장해 서버 재시작 후에도 유지)
+_SESSIONS_FILE = Path(__file__).parent / "sessions.json"
+
+def _load_sessions() -> Dict[str, str]:
+    try:
+        if _SESSIONS_FILE.exists():
+            return json.loads(_SESSIONS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def _save_sessions(sessions: Dict[str, str]):
+    try:
+        _SESSIONS_FILE.write_text(
+            json.dumps(sessions, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as e:
+        print(f"[Session] 저장 실패: {e}")
+
+SESSIONS: Dict[str, str] = _load_sessions()
 
 print("=" * 60)
 print("  서버 시작 중 (STT 는 백그라운드에서 로딩). http://localhost:5000")
@@ -171,6 +189,7 @@ async def register(username: str = Form(...), password: str = Form(...)):
         raise HTTPException(status_code=400, detail=err)
     token = secrets.token_urlsafe(32)
     SESSIONS[token] = username.strip()
+    _save_sessions(SESSIONS)
     return {"token": token, "username": username.strip()}
 
 
@@ -180,12 +199,14 @@ async def login(username: str = Form(...), password: str = Form(...)):
         raise HTTPException(status_code=401, detail="인증 실패")
     token = secrets.token_urlsafe(32)
     SESSIONS[token] = username.strip()
+    _save_sessions(SESSIONS)
     return {"token": token, "username": username.strip()}
 
 
 @app.post("/api/auth/logout")
 async def logout(token: str = Form(...)):
     SESSIONS.pop(token, None)
+    _save_sessions(SESSIONS)
     sess = ACTIVE.pop(token, None)
     if sess:
         sess.stop_observing()
