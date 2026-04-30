@@ -7,13 +7,18 @@ from typing import List
 @dataclass
 class Config:
     # ============ LLM 백엔드 ============
-    llm_backend: str = os.getenv("SARVIS_BACKEND", "claude")  # "claude" | "ollama"
+    # "claude" | "openai" | "ollama" | "compare" (Claude + OpenAI 병렬 A/B)
+    llm_backend: str = os.getenv("SARVIS_BACKEND", "claude")
 
     # Claude API
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     claude_model: str = "claude-sonnet-4-6"
     # 비전 도구는 빠른 Haiku를 사용 (가격/지연 절감)
     vision_model: str = "claude-haiku-4-5"
+
+    # OpenAI API
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    openai_model: str = "gpt-4o-mini"
 
     # Ollama (로컬, 도구 사용 비활성화)
     ollama_host: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")

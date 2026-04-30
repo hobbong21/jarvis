@@ -536,6 +536,46 @@ input, select { outline: none; }
 .log-msg.assistant .who { color: var(--accent); }
 .log-msg .text { color: var(--text); word-break: break-word; }
 
+/* ===== A/B 비교 모드 ===== */
+.compare-wrap {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.compare-col {
+  border: 1px solid var(--accent-d);
+  border-left-width: 3px;
+  padding: 8px 10px;
+  background: rgba(8, 17, 28, 0.5);
+  border-radius: 2px;
+  min-width: 0;
+}
+.compare-col .who {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.compare-col .text {
+  color: var(--text);
+  word-break: break-word;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.compare-claude { border-left-color: var(--accent); }
+.compare-claude .who { color: var(--accent); }
+.compare-openai { border-left-color: #10a37f; }
+.compare-openai .who { color: #10a37f; }
+.compare-col.streaming .text::after {
+  content: "▌";
+  color: inherit;
+  animation: blink-cursor 0.7s step-end infinite;
+  margin-left: 1px;
+}
+@media (max-width: 700px) {
+  .compare-wrap { grid-template-columns: 1fr; }
+}
+
 /* ===== Mobile Tab bar ===== */
 .mobile-tabs {
   display: none;

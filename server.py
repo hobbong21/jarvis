@@ -210,6 +210,11 @@ async def websocket_endpoint(ws: WebSocket):
             )
 
     async def respond_internal(prompt: str, log_user: bool):
+        # compare 모드: 텍스트 입력일 때만 — Claude + OpenAI 병렬 A/B
+        if cfg.llm_backend == "compare" and log_user:
+            await respond_compare(prompt)
+            return
+
         await emit(type="state", state="thinking")
         await emit(type="emotion", emotion="thinking")
         try:
@@ -264,6 +269,58 @@ async def websocket_endpoint(ws: WebSocket):
         finally:
             await emit(type="state", state="idle")
             await emit(type="emotion", emotion="neutral")
+
+    async def respond_compare(prompt: str):
+        """A/B 비교 모드 — Claude + OpenAI 동시 스트리밍, TTS 자동재생 안 함."""
+        await emit(type="state", state="thinking")
+        await emit(type="emotion", emotion="thinking")
+        await emit(type="message", role="user", text=prompt)
+        try:
+            ctx = build_context()
+            queue: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def run_stream():
+                try:
+                    for item in session.brain.compare_stream(prompt, ctx):
+                        loop.call_soon_threadsafe(queue.put_nowait, item)
+                except Exception as exc:
+                    traceback.print_exc()
+                    from emotion import Emotion as _E
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait, ("system", None, _E.CONCERNED, f"오류: {exc}")
+                    )
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+            threading.Thread(target=run_stream, daemon=True).start()
+
+            await emit(type="compare_start", sources=["claude", "openai"])
+            finals: dict = {}
+
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                source, chunk, emo, body = item
+                if emo is not None:
+                    finals[source] = {"text": body or "", "emotion": emo.value}
+                    await emit(
+                        type="compare_end",
+                        source=source,
+                        text=body or "",
+                        emotion=emo.value,
+                    )
+                elif chunk:
+                    await emit(type="compare_chunk", source=source, text=chunk)
+
+            await emit(type="compare_done")
+            await emit(type="emotion", emotion="neutral")
+        except Exception as e:
+            traceback.print_exc()
+            await emit(type="error", message=str(e))
+        finally:
+            await emit(type="state", state="idle")
 
     def build_context() -> str:
         parts = []
@@ -329,12 +386,30 @@ async def websocket_endpoint(ws: WebSocket):
                     if target == "claude":
                         session._attach_tools()
                     else:
+                        # openai/ollama/compare 모두 도구 비활성화
                         session.detach_tools()
+
+                    # 키 가용성 검증 후 UI 경고
+                    warnings = []
+                    b = session.brain
+                    if target == "claude" and b.anthropic_client is None:
+                        warnings.append("ANTHROPIC_API_KEY 누락")
+                    elif target == "openai" and b.openai_client is None:
+                        warnings.append("OPENAI_API_KEY 누락")
+                    elif target == "compare":
+                        if b.anthropic_client is None:
+                            warnings.append("Claude 키 없음 — Claude 응답 안 나옴")
+                        if b.openai_client is None:
+                            warnings.append("OpenAI 키 없음 — GPT 응답 안 나옴")
+
                     await emit(
                         type="backend_changed",
                         backend=target,
-                        tools_enabled=session.tools is not None and target == "claude",
+                        tools_enabled=session.brain.tools is not None and target == "claude",
+                        warnings=warnings,
                     )
+                    for w in warnings:
+                        await emit(type="error", message=f"⚠ {w}")
                 except Exception as e:
                     await emit(type="error", message=f"전환 실패: {e}")
 

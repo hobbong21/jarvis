@@ -152,6 +152,18 @@
         finalizeStreamBubble(m.text || '', m.emotion || 'neutral');
         if (isMobile()) markTabBadge('side');
         break;
+      case 'compare_start':
+        beginCompareBubbles(m.sources || ['claude', 'openai']);
+        break;
+      case 'compare_chunk':
+        appendCompareChunk(m.source, m.text || '');
+        break;
+      case 'compare_end':
+        finalizeCompareBubble(m.source, m.text || '', m.emotion || 'neutral');
+        break;
+      case 'compare_done':
+        if (isMobile()) markTabBadge('side');
+        break;
       case 'observe_state':
         observeToggle.checked = m.on;
         break;
@@ -344,7 +356,11 @@
       } else if (e.key === '1') {
         send({ type: 'switch_backend', backend: 'claude' });
       } else if (e.key === '2') {
+        send({ type: 'switch_backend', backend: 'openai' });
+      } else if (e.key === '3') {
         send({ type: 'switch_backend', backend: 'ollama' });
+      } else if (e.key === '4') {
+        send({ type: 'switch_backend', backend: 'compare' });
       } else if (e.key === 'r' || e.key === 'R') {
         send({ type: 'reset' });
       }
@@ -670,6 +686,46 @@
       orbReply.scrollTop = orbReply.scrollHeight;
     }
     _orbStreamBuf = '';
+  }
+
+  // ---------- A/B 비교 모드 ----------
+  let _compareEls = {};
+
+  function beginCompareBubbles(sources) {
+    _compareEls = {};
+    const wrap = document.createElement('div');
+    wrap.className = 'log-msg compare-wrap';
+    const labels = { claude: 'CLAUDE', openai: 'OPENAI' };
+    sources.forEach((src) => {
+      const col = document.createElement('div');
+      col.className = `compare-col compare-${src} streaming`;
+      col.innerHTML = `<div class="who">▸ ${labels[src] || src.toUpperCase()}</div>` +
+                      `<div class="text"></div>`;
+      wrap.appendChild(col);
+      _compareEls[src] = col.querySelector('.text');
+    });
+    logEl.appendChild(wrap);
+    logEl.scrollTop = logEl.scrollHeight;
+    while (logEl.children.length > 100) logEl.removeChild(logEl.firstChild);
+  }
+
+  function appendCompareChunk(source, text) {
+    const el = _compareEls[source];
+    if (!el) return;
+    el.textContent += text;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function finalizeCompareBubble(source, cleanText, emotion) {
+    const el = _compareEls[source];
+    if (!el) return;
+    el.textContent = cleanText;
+    const col = el.closest('.compare-col');
+    if (col) {
+      col.classList.remove('streaming');
+      col.dataset.emotion = emotion;
+    }
+    logEl.scrollTop = logEl.scrollHeight;
   }
 
   function updateOrbReply(text, streaming = false) {
