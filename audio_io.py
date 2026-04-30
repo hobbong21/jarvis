@@ -141,13 +141,17 @@ class WhisperSTT:
 
     def transcribe(self, audio) -> str:
         """numpy 배열 또는 파일 경로(str) 모두 지원 (faster-whisper 가 내부적으로 디코드)."""
-        segments, _ = self.model.transcribe(
-            audio,
-            language=cfg.whisper_language,
-            beam_size=5,
-            vad_filter=True,
-        )
-        return " ".join(s.text for s in segments).strip()
+        try:
+            segments, _ = self.model.transcribe(
+                audio,
+                language=cfg.whisper_language,
+                beam_size=5,
+                vad_filter=True,
+            )
+            return " ".join(s.text for s in segments).strip()
+        except Exception as e:
+            print(f"[STT] 트랜스크립션 실패: {type(e).__name__}: {e}")
+            return ""
 
 
 # ============================================================
@@ -196,7 +200,7 @@ class EdgeTTS:
 
     def synthesize_bytes(self, text: str) -> bytes:
         """텍스트 → MP3 바이트 (웹 서버가 클라이언트에 푸시할 때 사용)."""
-        if not text.strip():
+        if not text or not text.strip():
             return b""
         path = self._synthesize(text)
         try:

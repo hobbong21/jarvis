@@ -393,6 +393,15 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
         traceback.print_exc()
     finally:
         session.stop_observing()
+        # 로그아웃된(SESSIONS에서 제거된) 고아 세션 정리
+        if token not in SESSIONS:
+            ACTIVE.pop(token, None)
+        # 세션 수가 너무 많으면 고아 정리
+        orphans = [t for t in list(ACTIVE.keys()) if t not in SESSIONS]
+        for t in orphans:
+            s = ACTIVE.pop(t, None)
+            if s:
+                s.stop_observing()
 
 
 async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, build_context):
