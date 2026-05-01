@@ -26,7 +26,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install system dependencies
         run: |
@@ -39,15 +41,22 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install "unittest-xml-reporting>=3.2.0"
+          pip install -r requirements-dev.txt
 
-      - name: Run unittest suite (JUnit XML)
+      - name: Run tests with coverage (JUnit XML)
         env:
           SARVIS_SKIP_CV2_PRELOAD: "1"
         run: |
           mkdir -p test-results
-          python -m xmlrunner discover -s tests -o test-results -v
+          coverage run -m xmlrunner discover -s tests -o test-results -v
+          coverage report
+          coverage xml
+
+      # 초기 baseline: 28% (branch coverage 포함). 현재 약 30%.
+      # 커버리지 개선에 따라 단계적으로 이 값을 상향 조정할 것.
+      - name: Enforce coverage threshold
+        run: |
+          coverage report --fail-under=28
 
       - name: Upload test results artifact
         if: always()
@@ -69,3 +78,22 @@ jobs:
           report_individual_runs: true
           action_fail: false
           job_summary: true
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            .coverage
+          if-no-files-found: warn
+          retention-days: 14

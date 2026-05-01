@@ -1,0 +1,28 @@
+[run]
+source = .
+branch = True
+omit =
+    tests/*
+    harness/*
+    scripts/*
+    tools_local/*
+    web/*
+    */__pycache__/*
+    face_setup.py
+    main.py
+    ui.py
+    setup.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    \.\.\.
+show_missing = True
+skip_covered = False
+precision = 1
+
+[xml]
+output = coverage.xml

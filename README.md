@@ -1,6 +1,7 @@
 # S.A.R.V.I.S — Personal AI Assistant
 
 [![tests](https://github.com/hobbong21/jarvis/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/hobbong21/jarvis/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/hobbong21/jarvis/branch/main/graph/badge.svg)](https://codecov.io/gh/hobbong21/jarvis)
 
 웹캠으로 사용자를 알아보고, 호출어 또는 푸시투토크로 깨어나 한국어로 대화하는 사비스.
 **데스크톱(pygame)** 모드와 **웹(FastAPI)** 모드 모두 지원.
@@ -51,6 +52,12 @@
 
 ```bash
 pip install -r requirements.txt
+```
+
+개발 / 테스트용 (커버리지 측정 도구 포함):
+
+```bash
+pip install -r requirements-dev.txt
 ```
 
 dlib 설치 문제가 있다면:

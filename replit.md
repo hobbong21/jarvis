@@ -42,10 +42,15 @@ The workflow runs `python server.py` on port 5000. The app auto-loads the Whispe
 
 `.github/workflows/tests.yml` runs the full 137-test unittest suite on every push and PR to `main`.
 
-- Runner: `ubuntu-latest`, Python 3.11, pip cache keyed on `requirements.txt`.
+- Runner: `ubuntu-latest`, Python 3.11, pip cache keyed on `requirements.txt` + `requirements-dev.txt`.
 - System packages: `libsndfile1`, `portaudio19-dev`, `ffmpeg` (for sounddevice / faster-whisper imports).
-- Command: `SARVIS_SKIP_CV2_PRELOAD=1 python -m unittest discover -s tests -v` (the env var prevents `vision._bg_preload_cv2` from importing `cv2` during test collection).
-- Status badge is rendered at the top of `README.md`. Branch protection on `main` should require the `unittest` job to pass before merge.
+- Dev dependencies (`requirements-dev.txt`) layer `coverage>=7.4.0` on top of `requirements.txt`.
+- Command: `coverage run -m unittest discover -s tests -v` (env: `SARVIS_SKIP_CV2_PRELOAD=1` prevents `vision._bg_preload_cv2` from importing `cv2` during test collection), followed by `coverage report` + `coverage xml`.
+- **Coverage threshold**: `coverage report --fail-under=28` enforces a baseline. Current branch coverage ≈ **30.3%** (3406 stmts / 1134 branches). Threshold should be raised in steps as `brain.py` / `server.py` / `vision.py` / `audio_io.py` (the four heavyweights below 25%) gain test coverage.
+- **Coverage upload**: `codecov/codecov-action@v4` posts `coverage.xml` to Codecov so each PR gets a delta comment. `secrets.CODECOV_TOKEN` is optional for public repos but recommended; `fail_ci_if_error: false` keeps upload flakes from breaking CI.
+- **Coverage artifact**: `coverage.xml` + `.coverage` are uploaded as `coverage-report` artifact (14-day retention) for offline inspection.
+- Two badges at the top of `README.md`: `tests` (workflow status) + `codecov` (coverage %). Branch protection on `main` should require the `unittest` job to pass before merge.
+- Local config: `.coveragerc` (branch coverage on, omits `tests/`, `harness/`, `scripts/`, `web/`, `tools_local/`, `face_setup.py`, `main.py`, `ui.py`). Local artifacts (`.coverage`, `coverage.xml`, `htmlcov/`) are gitignored.
 
 ## Development Methodology — Harness
 
