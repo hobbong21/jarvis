@@ -78,6 +78,14 @@
   // ---------- WebSocket ----------
   function connectWS() {
     if (ws) try { ws.close(); } catch {}
+    // 재연결 시 환영 음성 관련 잔존 플래그/큐 초기화 (재연결 후 새 환영 오디오가
+    // 이전 세션의 입력-의도 suppression 으로 부당하게 폐기되는 회귀 차단).
+    // 첫 호출 시점엔 const 들이 아직 TDZ 상태이므로 try/catch 로 안전 보호.
+    try {
+      _expectingWelcomeAudio = false;
+      _suppressNextWelcomeAudio = false;
+      _pendingTtsQueue.length = 0;
+    } catch (_e) { /* TDZ on initial connect — 깨끗한 상태이므로 무시 */ }
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.binaryType = 'arraybuffer';
@@ -166,6 +174,8 @@
       case 'stream_end':
         finalizeStreamBubble(m.text || '', m.emotion || 'neutral');
         if (isMobile()) markTabBadge('chat');
+        // 다음 바이너리 프레임이 환영 인사 오디오임을 표시 (마이크/SEND 즉시 클릭 시 폐기 판단용)
+        _expectingWelcomeAudio = !!m.is_welcome;
         break;
       case 'compare_start':
         beginCompareBubbles(m.sources || ['claude', 'openai']);
@@ -1015,6 +1025,11 @@
   let _audioCtx = null;
   let _analyser = null;
   let _ampRaf = null;
+  let _audioUnlocked = false;          // 첫 사용자 제스처 후 true (브라우저 autoplay 정책)
+  const _pendingTtsQueue = [];         // 잠금 해제 전에 도착한 TTS 오디오 버퍼 FIFO (최대 3)
+  const PENDING_TTS_MAX = 3;
+  let _expectingWelcomeAudio = false;  // 직전 stream_end 가 환영 인사인지 — 다음 바이트 분류 용
+  let _suppressNextWelcomeAudio = false; // 사용자가 즉시 입력 시작 시 환영 음성 폐기
 
   function _ensureAudioCtx() {
     if (_audioCtx) return;
@@ -1024,6 +1039,64 @@
     _analyser.fftSize = 256;
     src.connect(_analyser);
     _analyser.connect(_audioCtx.destination);
+  }
+
+  // 첫 사용자 제스처(아무 클릭/터치/키 입력) 시 오디오를 잠금 해제하고
+  // 대기열에 있던 환영 TTS 가 있으면 그 시점에 재생한다. 단, 사용자가 마이크
+  // 버튼을 눌러 곧바로 발화를 시작하려는 경우엔 환영 음성이 녹음/응답과
+  // 겹치지 않도록 폐기한다.
+  function _isInputIntentTarget(target) {
+    if (!target || !target.closest) return false;
+    return !!(
+      target.closest('#mic-btn') ||
+      target.closest('#text-input') ||
+      target.closest('#text-form') ||
+      target.closest('#send-btn') ||
+      target.closest('#mobile-mic-btn') ||
+      target.closest('#mobile-text-input') ||
+      target.closest('#mobile-text-form')
+    );
+  }
+
+  function _unlockAudioOnGesture(ev) {
+    const target = ev && ev.target;
+    const inputIntent = _isInputIntentTarget(target);
+
+    // 입력 의도는 unlock 여부와 무관하게 환영 음성을 가로채지 않도록 항상 갱신.
+    if (inputIntent) {
+      _pendingTtsQueue.length = 0;
+      _suppressNextWelcomeAudio = true;
+    }
+    if (_audioUnlocked) return;
+
+    _audioUnlocked = true;
+    try {
+      _ensureAudioCtx();
+      if (_audioCtx && _audioCtx.state === 'suspended') {
+        _audioCtx.resume().catch(() => {});
+      }
+    } catch {}
+    if (inputIntent) return;
+    if (_pendingTtsQueue.length) {
+      setTimeout(() => _flushPendingTts(), 80);
+    }
+  }
+  ['pointerdown', 'keydown', 'touchstart'].forEach((evt) => {
+    window.addEventListener(evt, _unlockAudioOnGesture, { capture: true, passive: true });
+  });
+
+  function _flushPendingTts() {
+    // 대기열의 첫 항목만 즉시 재생 — 후속 항목은 onended 시 자연스럽게 이어가도록
+    // playTtsBytes 가 onended 에서 다시 시도하지 않으므로 모두 직렬 재생.
+    while (_pendingTtsQueue.length) {
+      const buf = _pendingTtsQueue.shift();
+      if (_pendingTtsQueue.length === 0) {
+        playTtsBytes(buf, /*forceUnlocked=*/true);
+      } else {
+        // 다중 항목은 마지막만 재생 (가장 최신) — UX 단순화
+        continue;
+      }
+    }
   }
 
   function _startAmpLoop() {
@@ -1048,16 +1121,40 @@
     if (mainOrb) mainOrb.setAmplitude(0);
   }
 
-  function playTtsBytes(buf) {
+  function playTtsBytes(buf, forceUnlocked) {
+    // 환영 음성을 사용자가 의도적으로 폐기한 경우 (마이크 즉시 클릭 등).
+    if (_expectingWelcomeAudio && _suppressNextWelcomeAudio) {
+      _expectingWelcomeAudio = false;
+      _suppressNextWelcomeAudio = false;
+      return;
+    }
+    // 자동재생 잠금: 사용자가 아직 페이지와 상호작용하지 않은 상태에서
+    // 도착한 환영 오디오는 큐에 보관하고, 첫 클릭/키입력 시점에 재생.
+    // 일반 응답 오디오는 사용자가 이미 SEND/마이크를 눌렀으므로 잠금 해제 상태.
+    if (!_audioUnlocked && !forceUnlocked) {
+      _pendingTtsQueue.push(buf);
+      while (_pendingTtsQueue.length > PENDING_TTS_MAX) _pendingTtsQueue.shift();
+      _expectingWelcomeAudio = false;
+      return;
+    }
+    _expectingWelcomeAudio = false;
     try { _ensureAudioCtx(); } catch {}
     const blob = new Blob([buf], { type: 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
+    let revoked = false;
+    const revokeOnce = () => { if (!revoked) { revoked = true; URL.revokeObjectURL(url); } };
     ttsAudio.src = url;
     ttsAudio.play().then(() => {
       if (_analyser) _startAmpLoop();
-    }).catch(() => {});
+    }).catch(() => {
+      // play() 가 거부되면 (autoplay 차단) 큐로 되돌리고 잠금 표시.
+      revokeOnce();
+      _audioUnlocked = false;
+      _pendingTtsQueue.push(buf);
+      while (_pendingTtsQueue.length > PENDING_TTS_MAX) _pendingTtsQueue.shift();
+    });
     ttsAudio.onended = () => {
-      URL.revokeObjectURL(url);
+      revokeOnce();
       _stopAmpLoop();
     };
   }

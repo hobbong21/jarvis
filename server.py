@@ -254,15 +254,45 @@ async def websocket_endpoint(ws: WebSocket):
         faces=FACE_REGISTRY.list_people(),
     )
 
-    # 환영 인사 (백그라운드)
+    # 환영 인사 (백그라운드) — 고정 문구 + 직접 TTS.
+    # ----------------------------------------------------------
+    # LLM 호출을 의도적으로 제거: 첫 페이지 로드 시 백엔드(Claude/OpenAI)가
+    # 일시적으로 응답하지 못하면 사용자에게 "internal server error" / 빨간
+    # 토스트가 보이는 회귀가 있었음. 환영 인사는 가벼운 정적 문자열이면
+    # 충분하므로 외부 호출 의존성을 끊어 항상 성공시킨다. 본문 대화는
+    # 변경 없이 기존 think_stream + fallback 파이프라인을 사용.
+    WELCOME_TEXT = "안녕하세요, 사비스입니다. 무엇을 도와드릴까요?"
+
     async def welcome():
         await asyncio.sleep(0.5)
         async with busy:
-            await respond_internal(
-                "사비스 시스템이 온라인 상태야. "
-                "짧고 자신감 있게 준비 완료 인사를 해. 도구는 호출하지 마.",
-                log_user=False,
-            )
+            try:
+                await emit(type="state", state="speaking")
+                await emit(type="emotion", emotion="neutral")
+                # 화면 + 대화 로그에 메시지 1건 표시 (스트리밍과 동일한 형식)
+                await emit(type="stream_start")
+                await emit(type="stream_chunk", text=WELCOME_TEXT)
+                await emit(
+                    type="stream_end",
+                    text=WELCOME_TEXT,
+                    emotion="neutral",
+                    is_welcome=True,  # 클라이언트가 자동재생 잠금 해제 후 재생할 수 있도록 표시
+                )
+
+                # TTS 합성 (Edge-TTS) — 별도 스레드에서.
+                def _noop_regen(orig: str, reason: str) -> str:  # 안전 검증 폴백 (사용 안 됨)
+                    return orig
+                tts_result = await asyncio.to_thread(
+                    TTS.synthesize_bytes_verified, WELCOME_TEXT, _noop_regen,
+                )
+                if tts_result.get("audio"):
+                    await emit_bytes(tts_result["audio"])
+            except Exception:
+                # 환영 인사는 절대 사용자에게 에러를 노출하지 않는다.
+                traceback.print_exc()
+            finally:
+                await emit(type="state", state="idle")
+                await emit(type="emotion", emotion="neutral")
 
     async def respond_internal(prompt: str, log_user: bool):
         # compare 모드: 텍스트 입력일 때만 — Claude + OpenAI 병렬 A/B
@@ -519,7 +549,21 @@ async def websocket_endpoint(ws: WebSocket):
             parts.append(f"최근 관찰: {session._last_observation}")
         return ", ".join(parts)
 
-    asyncio.create_task(welcome())
+    welcome_task = asyncio.create_task(welcome())
+
+    async def _preempt_welcome():
+        """사용자 입력이 도착하면 진행 중인 환영 인사를 즉시 취소.
+
+        - 환영 인사가 busy lock 을 점유 중이라 사용자 입력이 폐기되는 회귀 차단.
+        - 환영 인사가 본 응답보다 늦게 도착해 대화 순서가 뒤집히는 회귀 차단.
+        """
+        if welcome_task.done():
+            return
+        welcome_task.cancel()
+        try:
+            await welcome_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     try:
         while True:
@@ -542,6 +586,7 @@ async def websocket_endpoint(ws: WebSocket):
                         boxes = [list(b) for b in session.vision.face_boxes]
                         await emit(type="faces", boxes=boxes, fw=fw, fh=fh)
                 elif kind == 0x02:
+                    await _preempt_welcome()
                     if busy.locked():
                         continue
                     async with busy:
@@ -560,6 +605,7 @@ async def websocket_endpoint(ws: WebSocket):
             mtype = data.get("type")
 
             if mtype == "text_input":
+                await _preempt_welcome()
                 if busy.locked():
                     continue
                 async with busy:
@@ -660,6 +706,13 @@ async def websocket_endpoint(ws: WebSocket):
         print(f"[WS] 오류: {e}")
         traceback.print_exc()
     finally:
+        # 환영 인사 task 가 아직 진행 중이면 깨끗이 취소 (연결 종료 후 emit 시도 방지)
+        if not welcome_task.done():
+            welcome_task.cancel()
+            try:
+                await welcome_task
+            except (asyncio.CancelledError, Exception):
+                pass
         session.stop_observing()
         ACTIVE.pop(conn_id, None)
 
