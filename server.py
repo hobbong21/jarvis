@@ -176,7 +176,27 @@ async def _no_cache_static_in_dev(request, call_next):
 
 @app.get("/")
 async def index():
-    return FileResponse(str(WEB_DIR / "index.html"))
+    """index.html 을 읽어서 정적 자산 URL 에 파일 mtime 버전 쿼리를 붙여 반환.
+
+    이렇게 하면 web/app.js 가 변경될 때마다 ?v=<mtime> 가 바뀌어 브라우저/프록시
+    캐시를 강제로 우회한다 (Replit 미리보기 환경에서 옛 JS 가 잡히는 문제 방지).
+    """
+    from fastapi.responses import HTMLResponse
+    html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    for asset in ("style.css", "orb.js", "app.js"):
+        try:
+            v = (WEB_DIR / asset).stat().st_mtime_ns
+        except OSError:
+            v = time.time_ns()
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={v}")
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 # ============================================================
