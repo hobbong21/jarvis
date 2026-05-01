@@ -633,59 +633,6 @@ input, select { outline: none; }
   background: rgba(255, 80, 80, 0.25);
 }
 
-/* iframe 사전 경고 배너 (Replit 미리보기 안에서 마이크/카메라 차단 안내) */
-.iframe-warn-banner {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 9999;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 12px 18px;
-  background: linear-gradient(180deg, rgba(255,180,40,0.18), rgba(255,180,40,0.10));
-  border-bottom: 1px solid var(--amber);
-  color: var(--text);
-  font-size: 13px;
-  line-height: 1.45;
-  backdrop-filter: blur(6px);
-}
-.iframe-warn-text { flex: 1; }
-.iframe-warn-text strong { color: var(--amber); }
-.iframe-warn-btn {
-  flex-shrink: 0;
-  padding: 8px 16px;
-  background: var(--amber);
-  border: none;
-  color: #03070c;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  cursor: pointer;
-  border-radius: 2px;
-  transition: filter 0.15s ease;
-}
-.iframe-warn-btn:hover { filter: brightness(1.15); }
-.iframe-warn-close {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  background: transparent;
-  border: 1px solid rgba(255,180,40,0.4);
-  color: var(--amber);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-  border-radius: 2px;
-}
-.iframe-warn-close:hover { background: rgba(255,180,40,0.15); }
-@media (max-width: 640px) {
-  .iframe-warn-banner { flex-wrap: wrap; font-size: 12px; padding: 10px 12px; }
-  .iframe-warn-text { flex-basis: 100%; }
-}
-
 /* ===== A/B 비교 모드 ===== */
 .compare-wrap {
   display: grid;
