@@ -9,6 +9,62 @@ from emotion import Emotion, parse_emotion
 _EMOTION_PREFIX_RE = re.compile(r"^\s*\[emotion:\w+\]\s*", re.IGNORECASE)
 
 
+_ALT_BUTTONS = {
+    "claude": "[2·OPENAI] 또는 [3·OLLAMA]",
+    "openai": "[1·CLAUDE] 또는 [3·OLLAMA]",
+    "ollama": "[1·CLAUDE] 또는 [2·OPENAI]",
+}
+
+
+def _friendly_error(e: Exception, backend: str) -> str:
+    """백엔드 예외를 사용자 친화적 한글 메시지로 변환.
+    크레딧 부족·인증 실패·네트워크 오류 등 흔한 케이스를 분기하고,
+    대안 백엔드 사용을 안내한다. 원문/스택트레이스/request_id 는 노출하지 않는다."""
+    msg = str(e).lower()
+    label = backend.upper()
+    alt = _ALT_BUTTONS.get(backend, "다른 백엔드")
+
+    # 크레딧 / 결제 부족 — 가장 흔한 케이스
+    if any(k in msg for k in ("credit balance", "insufficient_quota", "exceeded your current quota",
+                              "billing", "plans &amp; billing", "plans & billing", "quota")):
+        if backend == "claude":
+            return ("⚠ Claude API 크레딧이 부족합니다.\n"
+                    f"→ 하단의 {alt} 버튼을 눌러 다른 AI 로 전환하세요.\n"
+                    "(console.anthropic.com 의 Plans & Billing 에서 충전 시 즉시 복구됩니다.)")
+        if backend == "openai":
+            return ("⚠ OpenAI API 크레딧이 부족합니다.\n"
+                    f"→ 하단의 {alt} 버튼을 눌러 다른 AI 로 전환하세요.\n"
+                    "(platform.openai.com 의 Billing 에서 충전 시 즉시 복구됩니다.)")
+        return f"⚠ {label} 크레딧이 부족합니다.\n→ 하단의 {alt} 버튼을 눌러주세요."
+
+    # 인증 실패
+    if any(k in msg for k in ("api key", "authentication", "401", "unauthorized", "invalid_api_key")):
+        return (f"⚠ {label} API 키가 유효하지 않습니다.\n"
+                f"→ 환경변수를 확인하거나 하단의 {alt} 버튼을 눌러주세요.")
+
+    # 모델 미지원 / 권한
+    if "403" in msg or "permission" in msg or "model_not_found" in msg:
+        return (f"⚠ {label} 모델 접근 권한이 없습니다.\n"
+                f"→ 하단의 {alt} 버튼을 눌러주세요.")
+
+    # Rate limit
+    if "rate limit" in msg or "429" in msg:
+        return (f"⚠ {label} 요청 한도 초과 — 잠시 후 다시 시도하거나\n"
+                f"→ 하단의 {alt} 버튼을 눌러주세요.")
+
+    # 연결/네트워크
+    if any(k in msg for k in ("connection", "timeout", "timed out", "network", "unreachable")):
+        if backend == "ollama":
+            return (f"⚠ Ollama 로컬 서버({cfg.ollama_host})에 연결할 수 없습니다.\n"
+                    f"→ ollama serve 가 실행 중인지 확인하거나 하단의 {alt} 버튼을 눌러주세요.")
+        return (f"⚠ {label} 서버 연결 실패. 잠시 후 다시 시도하거나\n"
+                f"→ 하단의 {alt} 버튼을 눌러주세요.")
+
+    # 기타 — 원문/request_id 노출 없이 일반화된 안내만
+    return (f"⚠ {label} 통신 오류가 발생했습니다.\n"
+            f"→ 하단의 {alt} 버튼을 눌러 다른 AI 로 전환해보세요.")
+
+
 class Brain:
     """SARVIS의 LLM 컨트롤러.
 
@@ -280,24 +336,43 @@ class Brain:
 
         backend = cfg.llm_backend
 
+        def _rollback_user():
+            """orphan user 턴 제거 — 다음 호출에서 consecutive-user 에러 방지."""
+            if self.history and self.history[-1].get("role") == "user":
+                self.history.pop()
+
         # compare 모드는 음성 흐름에서 호출되지 않음 — Claude 우선 폴백
         if backend == "compare":
             if self.anthropic_client is not None:
                 self.client = self.anthropic_client
-                if self.tools is not None:
-                    emotion, body = self._think_with_tools()
-                    yield None, emotion, body
+                try:
+                    if self.tools is not None:
+                        emotion, body = self._think_with_tools()
+                        yield None, emotion, body
+                        return
+                    yield from self._stream_claude()
                     return
-                yield from self._stream_claude()
-                return
+                except Exception as e:
+                    traceback.print_exc()
+                    _rollback_user()
+                    yield None, Emotion.CONCERNED, _friendly_error(e, "claude")
+                    return
             if self.openai_client is not None:
                 self.client = self.openai_client
-                yield from self._stream_openai()
-                return
+                try:
+                    yield from self._stream_openai()
+                    return
+                except Exception as e:
+                    traceback.print_exc()
+                    _rollback_user()
+                    yield None, Emotion.CONCERNED, _friendly_error(e, "openai")
+                    return
+            _rollback_user()
             yield None, Emotion.CONCERNED, "비교 모드용 API 키가 없습니다."
             return
 
         if self.client is None:
+            _rollback_user()
             yield None, Emotion.CONCERNED, (
                 f"{backend.upper()} 백엔드의 API 키가 없습니다. "
                 "환경변수를 설정하고 재시작해주세요."
@@ -316,7 +391,8 @@ class Brain:
                 yield from self._stream_ollama()
         except Exception as e:
             traceback.print_exc()
-            yield None, Emotion.CONCERNED, f"AI 통신 오류: {e}"
+            _rollback_user()
+            yield None, Emotion.CONCERNED, _friendly_error(e, backend)
 
     def _stream_openai(self):
         """OpenAI ChatCompletion 스트리밍 — 도구 없이 단순 응답."""
@@ -435,7 +511,7 @@ class Brain:
                 q.put(("claude", None, emo, body))
             except Exception as e:
                 traceback.print_exc()
-                q.put(("claude", None, Emotion.CONCERNED, f"Claude 오류: {e}"))
+                q.put(("claude", None, Emotion.CONCERNED, _friendly_error(e, "claude")))
 
         def run_openai():
             try:
@@ -491,7 +567,7 @@ class Brain:
                 q.put(("openai", None, emo, body))
             except Exception as e:
                 traceback.print_exc()
-                q.put(("openai", None, Emotion.CONCERNED, f"OpenAI 오류: {e}"))
+                q.put(("openai", None, Emotion.CONCERNED, _friendly_error(e, "openai")))
 
         t1 = threading.Thread(target=run_claude, daemon=True)
         t2 = threading.Thread(target=run_openai, daemon=True)

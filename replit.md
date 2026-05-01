@@ -41,3 +41,4 @@ The workflow runs `python server.py` on port 5000. The app auto-loads the Whispe
 - **Camera**: Browser webcam → JPEG frames → Claude Vision analysis
 - **Emotion Orb**: Canvas animation reflecting assistant's emotional state — selectable visual styles (ORBITAL / PULSE / REACTOR / NEURAL), all preserving the 7 emotion palettes. Choice persists in `localStorage('orbStyle')` and applies to both orbs in compare mode.
 - **Auth**: Local username/password with session tokens
+- **Friendly Error Surface**: When an LLM backend fails (credit exhausted, auth failure, rate limit, network error), `_friendly_error()` in `brain.py` converts raw provider exceptions into Korean guidance messages that name the exact alternative-backend buttons to press. Raw stack traces, request IDs, and provider payloads are kept server-side only. `think_stream` rolls back the orphan user history entry on any failure so the next call doesn't hit consecutive-user errors.
