@@ -37,6 +37,15 @@ A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning �
 
 The workflow runs `python server.py` on port 5000. The app auto-loads the Whisper model on startup.
 
+## CI — GitHub Actions
+
+`.github/workflows/tests.yml` runs the full 137-test unittest suite on every push and PR to `main`.
+
+- Runner: `ubuntu-latest`, Python 3.11, pip cache keyed on `requirements.txt`.
+- System packages: `libsndfile1`, `portaudio19-dev`, `ffmpeg` (for sounddevice / faster-whisper imports).
+- Command: `SARVIS_SKIP_CV2_PRELOAD=1 python -m unittest discover -s tests -v` (the env var prevents `vision._bg_preload_cv2` from importing `cv2` during test collection).
+- Status badge is rendered at the top of `README.md`. Branch protection on `main` should require the `unittest` job to pass before merge.
+
 ## Development Methodology — Harness
 
 SARVIS uses **[Harness](harness/README.md)** (a Claude Code Team-Architecture Factory plugin, Apache-2.0) as its **meta development system**. Harness is *not* a runtime feature — it is the architectural rule book that decides how SARVIS evolves.

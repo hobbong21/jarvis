@@ -1,5 +1,7 @@
 # S.A.R.V.I.S — Personal AI Assistant
 
+[![tests](https://github.com/hobbong21/jarvis/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/hobbong21/jarvis/actions/workflows/tests.yml)
+
 웹캠으로 사용자를 알아보고, 호출어 또는 푸시투토크로 깨어나 한국어로 대화하는 사비스.
 **데스크톱(pygame)** 모드와 **웹(FastAPI)** 모드 모두 지원.
 **Microsoft SARVIS의 4단계 agent 패턴**(Task Planning → Model Selection → Task Execution → Response Generation)을 Claude의 native tool_use로 구현.
