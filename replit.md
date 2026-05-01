@@ -36,6 +36,37 @@ A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning �
 
 The workflow runs `python server.py` on port 5000. The app auto-loads the Whisper model on startup.
 
+## Development Methodology — Harness
+
+SARVIS uses **[Harness](harness/README.md)** (a Claude Code Team-Architecture Factory plugin, Apache-2.0) as its **meta development system**. Harness is *not* a runtime feature — it is the architectural rule book that decides how SARVIS evolves.
+
+**Target composition** (per Harness Phase 2): `Supervisor[Pipeline(Fan-out → Expert-Pool → Generate-Verify)]` plus `Hierarchical Delegation` for development.
+
+**Current implementation status**:
+- ✅ **Supervisor + Pipeline + Hierarchical** are operational (`brain.py`, `.claude/agents/`).
+- 🟡 **Expert Pool** — manual backend switching works; automatic cross-provider fallback is not yet implemented (today: `_friendly_error()` shows Korean guidance pointing to alternative-backend buttons).
+- 🟡 **Fan-out / Fan-in** — emotion / face / memory are each callable but a real parallel fan-out scheduler does not exist; calls happen sequentially when needed.
+- ⏳ **Generate-Verify** — `tts-verifier` skill exists as a spec only; `verify_tts_candidate()` is not yet wired into `audio_io.py`.
+
+Open work items are tracked in `harness/sarvis/validation.md`.
+
+Key locations:
+- `harness/` — Original Harness plugin assets (READMEs EN/KO/JA, CHANGELOG, landing page source, banner images, plus `harness/sarvis/` SARVIS-specific Phase outputs). **Repo-internal — not publicly served.**
+- `web/harness/` — Curated public landing assets only (`index.html`, `privacy.html`, 4 banner PNGs). This is what the `/harness/` route serves; markdown / LICENSE / .gitignore / sarvis/* are deliberately kept out of the public mount.
+- `harness/sarvis/{analysis,architecture,validation}.md` — Phase 1/2/6 outputs of applying Harness to SARVIS itself.
+- `.claude/skills/harness/SKILL.md` — Harness meta-skill with triggers (`하네스 구성해줘`, `build a harness`, `ハーネスを構成して`).
+- `.claude/skills/harness/references/agent-design-patterns.md` — The six team patterns and a decision tree.
+- `.claude/skills/tts-verifier/SKILL.md` — Phase 4 generated skill (Generate-Verify gate before TTS).
+- `.claude/agents/_orchestrator.md` — Supervisor policy mirroring `brain.py`.
+- `.claude/agents/{architect,voice-engineer,vision-engineer,backend-engineer,frontend-engineer,qa-engineer,security-reviewer}.md` — Development team roles with explicit input/output/forbidden rules.
+
+Procedure for new SARVIS features:
+1. `architect` agent picks one (or a composition) of the six patterns and updates `harness/sarvis/architecture.md`.
+2. Delegate to leaf engineers per the table above.
+3. `qa-engineer` 7-item checklist must pass.
+4. `security-reviewer` 5-item checklist must pass.
+5. Record the change + rationale in `replit.md` (this file).
+
 ## Features
 
 - **Dual Mode**: Desktop (pygame) or Web (FastAPI + WebSocket)

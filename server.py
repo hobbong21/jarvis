@@ -158,6 +158,21 @@ app = FastAPI(title="SARVIS Web")
 if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
+# Harness 메타-스킬 랜딩페이지 (개발 방법론 문서). SARVIS 의 런타임 기능이 아니라
+# "어떻게 SARVIS 를 발전시킬 것인가" 를 안내하는 보조 시스템.
+#
+# 보안 주의: /harness 는 *큐레이션된 공개 자산만* 노출한다.
+# - web/harness/    : index.html / privacy.html / 배너 PNG (공개 가능)
+# - harness/ (루트) : README*.md / CHANGELOG / CONTRIBUTING / LICENSE / .gitignore /
+#                     sarvis/*.md → **공개 안 함** (저장소 내부 전용)
+HARNESS_PUBLIC_DIR = WEB_DIR / "harness"
+if HARNESS_PUBLIC_DIR.exists():
+    app.mount(
+        "/harness",
+        StaticFiles(directory=str(HARNESS_PUBLIC_DIR), html=True),
+        name="harness",
+    )
+
 
 # 개발 환경에서는 정적 파일 캐시 비활성 (Replit 미리보기에서 옛 JS/CSS 가 잡혀
 # 사용자가 수정 사항을 못 보는 문제 방지). 운영 배포 시에는 캐시 허용.

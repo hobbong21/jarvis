@@ -191,6 +191,66 @@ class ToolExecutor:
         return f"재생 중: {query}"
 ```
 
+## 개발 방법론 — Harness 적용
+
+SARVIS 의 신규 기능 / 굵직한 변경은 **[Harness](harness/README.md) 메타-스킬**을
+사용해 **에이전트 팀 아키텍처**로 분해한 뒤 진행한다. Harness 는 SARVIS 의 런타임
+기능이 아니라 *어떻게 SARVIS 를 발전시킬 것인가* 를 통제하는 보조 시스템이다.
+
+### Harness 적용 결과 (요약)
+
+| 패턴 | 상태 | 적용 위치 |
+|------|------|----------|
+| **Supervisor** | ✅ 구현됨 | `brain.py` — 의도 분류 → 분배 |
+| **Pipeline** | ✅ 구현됨 | STT → 의도 → LLM → TTS |
+| **Hierarchical** | ✅ 구현됨 | 개발 시 `architect` → 도메인 리드 → 엔지니어 위임 트리 (.claude/agents/) |
+| **Expert Pool** | 🟡 부분 | 백엔드 수동 전환은 동작. 자동 폴백은 미구현. |
+| **Fan-out / Fan-in** | 🟡 부분 | 감정·얼굴·메모리는 호출되지만 명시적 병렬 fan-out 스케줄러 없음. |
+| **Generate-Verify** | ⏳ 목표 | `tts-verifier` 스킬 명세만 존재. 실제 코드 미구현. |
+
+상세 차이는 [`harness/sarvis/architecture.md`](harness/sarvis/architecture.md) 와
+[`harness/sarvis/validation.md`](harness/sarvis/validation.md) 의 open items 참조.
+
+### 산출물 위치
+
+| 경로 | 내용 |
+|-----|------|
+| `harness/` | Harness 플러그인 원본 (README EN/KO/JA, CHANGELOG, 랜딩페이지) |
+| `harness/sarvis/analysis.md` | Phase 1 — SARVIS 도메인 분석 |
+| `harness/sarvis/architecture.md` | Phase 2 — 6패턴 합성 결정 |
+| `harness/sarvis/validation.md` | Phase 6 — 트리거 / 산출물 검증 결과 |
+| `.claude/skills/harness/SKILL.md` | Harness 메타-스킬 (트리거 정의) |
+| `.claude/skills/tts-verifier/SKILL.md` | Phase 4 산출 — TTS 품질 게이트 |
+| `.claude/agents/_orchestrator.md` | 런타임 오케스트레이션 정책 |
+| `.claude/agents/{architect,voice,vision,backend,frontend,qa,security}-*.md` | 개발 에이전트 정의 |
+
+### 신규 기능 추가 절차
+
+1. `architect` 에이전트가 영향 분석 + 6패턴 중 적용 패턴 선정 (`harness/sarvis/architecture.md` 의 표 갱신).
+2. 위임 트리에 따라 leaf 엔지니어 (voice / vision / backend / frontend) 에 작업 명세.
+3. `qa-engineer` 7항 체크리스트 통과.
+4. `security-reviewer` 5항 점검.
+5. 변경 사항 + 패턴 선정 근거를 `replit.md` 에 기록.
+
+### 랜딩페이지 (개발 문서)
+
+- `http://<host>:5000/harness/` — Harness 소개 및 6패턴 시각화.
+- `http://<host>:5000/harness/privacy.html` — 개인정보처리방침.
+
+### 트리거 (Claude Code 환경)
+
+```
+하네스 구성해줘
+하네스 적용해줘
+build a harness for <도메인>
+ハーネスを構成して
+```
+
+> Harness 는 [revfactory/harness](https://github.com/revfactory/harness) (Apache-2.0)
+> 의 사양을 따른다. 본 프로젝트에 동봉된 사본은 `harness/LICENSE` 참고.
+
+---
+
 ## 다음 아이디어
 
 - **표정 인식** — DeepFace로 사용자 감정 → 사비스 emotion에 반영
