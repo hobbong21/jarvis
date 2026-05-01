@@ -2,9 +2,11 @@ modules = ["python-3.12", "nodejs-20", "web"]
 [agent]
 expertMode = true
 stack = "BEST_EFFORT_FALLBACK"
+integrations = ["github:1.0.0"]
 
 [nix]
 channel = "stable-25_05"
+packages = ["SDL2", "SDL2_image", "SDL2_mixer", "SDL2_ttf", "fontconfig", "freetype", "libjpeg", "libpng", "pkg-config", "portaudio", "portmidi"]
 
 [workflows]
 runButton = "Project"
