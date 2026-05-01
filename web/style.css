@@ -615,6 +615,23 @@ input, select { outline: none; }
 .log-msg.user .who { color: var(--amber); }
 .log-msg.assistant .who { color: var(--accent); }
 .log-msg .text { color: var(--text); word-break: break-word; white-space: pre-wrap; }
+.inline-action-btn {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 6px 12px;
+  background: rgba(255, 80, 80, 0.12);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background 0.15s ease;
+}
+.inline-action-btn:hover {
+  background: rgba(255, 80, 80, 0.25);
+}
 
 /* ===== A/B 비교 모드 ===== */
 .compare-wrap {

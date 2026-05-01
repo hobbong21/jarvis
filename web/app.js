@@ -274,6 +274,11 @@
 
   async function startRecording() {
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        const e = new Error('INSECURE_CONTEXT');
+        e.name = 'InsecureContextError';
+        throw e;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true },
       });
@@ -323,7 +328,14 @@
 
       vadAutoStop(stream, micAnalyser, micCtx);
     } catch (err) {
-      flash(`마이크 오류: ${err.message}`, 'error');
+      console.error('[mic]', err);
+      flash(friendlyMediaError(err, '마이크'), 'error');
+      recording = false;
+      micBtn.classList.remove('recording');
+      if (mobileMicBtn) mobileMicBtn.classList.remove('recording');
+      micLabel.textContent = 'SPEAK';
+      setState('idle');
+      setEmotion('neutral');
     }
   }
 
@@ -573,6 +585,11 @@
 
   async function startCamera() {
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        const e = new Error('INSECURE_CONTEXT');
+        e.name = 'InsecureContextError';
+        throw e;
+      }
       let constraints;
       if (isTouchDevice()) {
         constraints = {
@@ -603,7 +620,9 @@
       }
       if (isTouchDevice() && camFlipBtn) camFlipBtn.classList.remove('hidden');
     } catch (err) {
-      flash(`카메라 오류: ${err.message}`, 'error');
+      console.error('[cam]', err);
+      flash(friendlyMediaError(err, '카메라'), 'error');
+      camStatus.textContent = 'PERMISSION DENIED';
     }
   }
 
@@ -858,8 +877,62 @@
     div.className = `log-msg assistant`;
     div.innerHTML = `<div class="who" style="color:${kind === 'error' ? 'var(--red)' : 'var(--amber)'}">▸ SYSTEM</div><div class="text"></div>`;
     div.querySelector('.text').textContent = text;
+    if (kind === 'error' && /새 창|HTTPS|보안 컨텍스트/.test(text) && window.top !== window.self) {
+      const btn = document.createElement('button');
+      btn.className = 'inline-action-btn';
+      btn.textContent = '↗ 새 창에서 열기';
+      btn.addEventListener('click', () => {
+        window.open(window.location.href, '_blank', 'noopener,noreferrer');
+      });
+      div.appendChild(btn);
+    }
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // 마이크 / 카메라 오류를 친절한 한국어 안내로 변환
+  function friendlyMediaError(err, kind) {
+    const inIframe = window.top !== window.self;
+    const isSecure = window.isSecureContext;
+
+    if (err && err.name === 'InsecureContextError') {
+      return `${kind} 사용에는 보안 컨텍스트(HTTPS)가 필요합니다.\n` +
+             `→ 주소창의 URL이 https:// 로 시작하는지 확인해주세요.`;
+    }
+    if (err && err.name === 'NotAllowedError') {
+      const lines = [`${kind} 권한이 거부되었습니다.`];
+      if (inIframe) {
+        lines.push('→ Replit 미리보기 안에서는 권한이 차단되어 있습니다.');
+        lines.push('→ 아래 [↗ 새 창에서 열기] 버튼을 누르거나, 미리보기 우측 상단 ⤢ 아이콘으로 새 탭에서 열어주세요.');
+      } else {
+        lines.push('→ 주소창 좌측 자물쇠/카메라 아이콘을 눌러 ' + kind + ' 권한을 "허용"으로 바꿔주세요.');
+        lines.push('→ 권한 변경 후 페이지를 새로고침 해야 적용됩니다.');
+      }
+      return lines.join('\n');
+    }
+    if (err && err.name === 'NotFoundError') {
+      return `${kind}를 찾을 수 없습니다.\n→ ${kind}가 컴퓨터에 연결되어 있는지 확인해주세요.`;
+    }
+    if (err && err.name === 'NotReadableError') {
+      return `${kind}를 다른 앱이 사용 중입니다.\n→ Zoom, 카카오톡 영상통화, 다른 브라우저 탭 등에서 ${kind}를 사용 중인지 확인해주세요.`;
+    }
+    if (err && err.name === 'OverconstrainedError') {
+      return `${kind} 설정 조건을 만족하는 장치가 없습니다.\n→ 다른 ${kind}를 선택하거나 기본 설정으로 다시 시도해주세요.`;
+    }
+    if (err && err.name === 'SecurityError') {
+      return `${kind} 사용이 보안 정책으로 차단되었습니다.\n→ 새 창에서 직접 열어주세요 (HTTPS 직접 접근).`;
+    }
+    if (err && err.name === 'AbortError') {
+      return `${kind} 시작이 중단되었습니다. 다시 시도해주세요.`;
+    }
+    if (!isSecure) {
+      return `${kind} 사용에는 보안 컨텍스트(HTTPS)가 필요합니다.\n→ 주소창의 URL이 https:// 로 시작하는지 확인해주세요.`;
+    }
+    if (inIframe) {
+      return `${kind}를 시작할 수 없습니다 (${(err && err.name) || '알 수 없는 오류'}).\n` +
+             `→ Replit 미리보기 iframe에서는 종종 ${kind}가 차단됩니다. 새 창에서 열어주세요.`;
+    }
+    return `${kind} 오류: ${(err && (err.message || err.name)) || '알 수 없는 오류'}\n→ 페이지를 새로고침 후 다시 시도해주세요.`;
   }
 
   // ---------- TTS + 진폭 시각화 ----------
