@@ -277,6 +277,7 @@ async def websocket_endpoint(ws: WebSocket):
         turn_meta = {
             "turn_id": telemetry.new_turn_id(),
             "ts": time.time(),
+            "input_channel": "text",  # 사이클 #4 T001
             "backend": cfg.llm_backend,
             "fallback_used": False,
             "fallback_chain": [cfg.llm_backend],
@@ -418,6 +419,7 @@ async def websocket_endpoint(ws: WebSocket):
         turn_meta = {
             "turn_id": telemetry.new_turn_id(),
             "ts": time.time(),
+            "input_channel": "text",  # compare 는 텍스트 입력 전용 (사이클 #4 T001)
             "backend": "compare",
             "fallback_used": False,
             "fallback_chain": ["compare:claude+openai"],
@@ -657,7 +659,10 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, build_context):
-    """브라우저에서 받은 WebM/Opus 오디오 → STT → Brain → TTS"""
+    """브라우저에서 받은 WebM/Opus 오디오 → STT → Brain → TTS
+
+    사이클 #4 T001: telemetry.log_turn() 추가 (input_channel="audio").
+    """
     await emit(type="state", state="listening")
     await emit(type="emotion", emotion="listening")
 
@@ -666,6 +671,16 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
         f.write(payload)
         path = f.name
 
+    # 사이클 #4 T001: 음성 경로 텔레메트리
+    turn_meta = {
+        "turn_id": telemetry.new_turn_id(),
+        "input_channel": "audio",
+        "backend": getattr(session.brain.cfg, "llm_backend", None),
+        "fallback_used": False,
+        "fallback_chain": [],
+    }
+    t_turn_start = time.monotonic()
+
     try:
         await emit(type="state", state="thinking")
         await emit(type="emotion", emotion="thinking")
@@ -673,28 +688,43 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
             await emit(type="error", message="음성 인식 모델이 아직 로딩 중입니다. 잠시 후 다시 시도해 주세요.")
             await emit(type="state", state="idle")
             await emit(type="emotion", emotion="neutral")
+            turn_meta["stt_ready"] = False
             return
+        t_stt = time.monotonic()
         text = await asyncio.to_thread(STT.transcribe, path)
+        turn_meta["stt_ms"] = (time.monotonic() - t_stt) * 1000.0
         text = (text or "").strip()
+        turn_meta["stt_text_len"] = len(text)
         if not text or len(text) < 2:
             await emit(type="state", state="idle")
             await emit(type="emotion", emotion="neutral")
+            turn_meta["empty_transcription"] = True
             return
 
         await emit(type="message", role="user", text=text)
 
+        t_llm = time.monotonic()
         emotion, reply = await asyncio.to_thread(
             session.brain.think, text, build_context()
         )
+        turn_meta["llm_ms"] = (time.monotonic() - t_llm) * 1000.0
+        turn_meta["emotion"] = emotion.value if hasattr(emotion, "value") else str(emotion)
+        turn_meta["reply_len"] = len(reply or "")
+
         await emit(type="message", role="assistant", text=reply)
         await emit(type="emotion", emotion=emotion.value)
         await emit(type="state", state="speaking")
 
         def _tts_regen_audio(orig: str, reason: str) -> str:
             return session.brain.regenerate_safe_tts(orig, reason)
+        t_tts = time.monotonic()
         tts_result = await asyncio.to_thread(
             TTS.synthesize_bytes_verified, reply, _tts_regen_audio,
         )
+        turn_meta["tts_ms"] = (time.monotonic() - t_tts) * 1000.0
+        turn_meta["tts_ok"] = tts_result["ok"]
+        turn_meta["tts_reason"] = tts_result["reason"]
+        turn_meta["tts_regenerated"] = bool(tts_result.get("regenerated"))
         if tts_result["audio"]:
             await emit_bytes(tts_result["audio"])
         elif not tts_result["ok"]:
@@ -705,6 +735,7 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
             )
     except Exception as e:
         traceback.print_exc()
+        turn_meta["error"] = type(e).__name__
         await emit(type="error", message=str(e))
     finally:
         try:
@@ -713,6 +744,11 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
             pass
         await emit(type="state", state="idle")
         await emit(type="emotion", emotion="neutral")
+        turn_meta["total_ms"] = (time.monotonic() - t_turn_start) * 1000.0
+        try:
+            telemetry.log_turn(turn_meta)
+        except Exception as _e:
+            print(f"[handle_audio] telemetry.log_turn failed: {_e!r}")
 
 
 # ============================================================

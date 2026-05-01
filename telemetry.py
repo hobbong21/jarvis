@@ -20,6 +20,37 @@ MAX_LINES = 5000  # 자동 회전 임계 (초과 시 절반만 유지)
 
 _lock = threading.Lock()
 
+# 사이클 #4 T002: 실시간 구독자 (대시보드 WS 등)
+# 콜백 시그니처: callback(meta_dict) — 비동기 안전 의무는 콜백 측 책임 (run_coroutine_threadsafe 등).
+_subscribers: List = []
+_sub_lock = threading.Lock()
+
+
+def subscribe(callback) -> None:
+    """log_turn() 마다 호출될 콜백 등록. 동일 콜백 중복 등록 금지."""
+    with _sub_lock:
+        if callback not in _subscribers:
+            _subscribers.append(callback)
+
+
+def unsubscribe(callback) -> None:
+    with _sub_lock:
+        try:
+            _subscribers.remove(callback)
+        except ValueError:
+            pass
+
+
+def _notify(meta: Dict) -> None:
+    """모든 구독자에게 새 turn 메타를 통지. 콜백 예외는 격리."""
+    with _sub_lock:
+        subs = list(_subscribers)
+    for cb in subs:
+        try:
+            cb(meta)
+        except Exception as e:
+            print(f"[telemetry] subscriber {cb!r} raised: {e!r}")
+
 
 def _ensure_dir():
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -141,6 +172,9 @@ def summarize(limit: Optional[int] = None) -> Dict:
 
     fallback_count = sum(1 for r in rows if r.get("fallback_used"))
     tts_fail = sum(1 for r in rows if r.get("tts_ok") is False)
+    tts_regen = sum(1 for r in rows if r.get("tts_regenerated"))
+    # 입력 채널 (audio vs text) — handle_audio 는 input_channel="audio" 로 기록
+    channels = Counter(r.get("input_channel") for r in rows if r.get("input_channel"))
 
     def _avg(key):
         vals = [r.get(key) for r in rows if isinstance(r.get(key), (int, float))]
@@ -149,8 +183,11 @@ def summarize(limit: Optional[int] = None) -> Dict:
     return {
         "total": total,
         "backends": dict(backends),
+        "input_channels": dict(channels),
         "fallback_rate": fallback_count / total,
         "tts_failure_rate": tts_fail / total,
+        "tts_regen_count": tts_regen,
+        "tts_regen_rate": tts_regen / total,
         "tts_reasons": dict(tts_reasons),
         "intents": dict(intents),
         "avg_fanout_ms": _avg("fanout_ms"),
