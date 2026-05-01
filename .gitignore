@@ -54,6 +54,12 @@ models/
 *.mp3
 *.wav
 
+# 커버리지 산출물
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
 
 # 메모리 DB (v2.0) — 사이클 #9 부터 data/ 아래.
 data/memory.db
