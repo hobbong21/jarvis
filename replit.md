@@ -42,21 +42,23 @@ SARVIS uses **[Harness](harness/README.md)** (a Claude Code Team-Architecture Fa
 
 **Target composition** (per Harness Phase 2): `Supervisor[Pipeline(Fan-out → Expert-Pool → Generate-Verify)]` plus `Hierarchical Delegation` for development.
 
-**Current implementation status** (cycle #4 complete, 2026-05-01):
+**Current implementation status** (cycle #5 complete, 2026-05-01):
 - ✅ **Supervisor + Pipeline + Hierarchical** — `brain.py`, `.claude/agents/`.
-- ✅ **Expert Pool** — `Brain.think_stream_with_fallback()` + `_ollama_healthcheck()` (60s cache, 1.2s timeout + 1 retry).
-- ✅ **Fan-out / Fan-in** — `analysis.parallel_analyze()` (4-way 200ms timeout) — applied to both `respond_internal` and `respond_compare`.
-- ✅ **Generate-Verify** — `tts_verifier` + `audio_io.synthesize_bytes_verified()` + `Brain.regenerate_safe_tts()` (1 safe rewrite on block).
-- ✅ **Telemetry & Feedback Loop** — `telemetry.log_turn()` writes per-turn metadata to `data/harness_telemetry.jsonl`. PII (utterance bodies) is never persisted — only lengths. **Cycle #4**: text + audio + compare all feed telemetry; `summarize()` adds `input_channels`, `tts_regen_count`, `tts_regen_rate` (consistent keys for empty/non-empty paths). `web/harness/dashboard.html` shows new cards (TTS 재생성률, 입력 채널) + recent-30-turn stream table. **Real-time WebSocket push** via `WS /api/harness/ws` — `telemetry.subscribe/_notify` pub-sub; queue-full safe drop inside loop thread; 25s keepalive ping. Dashboard prefers WS, auto-falls back to 5s polling on disconnect. Main page top bar has a `⚙ 제어판` button (new tab) opening the dashboard.
-- ✅ **Self-Evolution Proposer** — `harness_evolve.propose_next_cycle()` + `POST /api/harness/evolve` (same auth gate, `min_turns` upward-only clamp). Writes `harness/sarvis/proposals/cycle-{n}.md`.
+- ✅ **Expert Pool** — `Brain.think_stream_with_fallback()` + `_ollama_healthcheck()`.
+- ✅ **Fan-out / Fan-in** — `analysis.parallel_analyze()` (4-way 200ms timeout).
+- ✅ **Generate-Verify** — `tts_verifier` + `synthesize_bytes_verified()` + `Brain.regenerate_safe_tts()`.
+- ✅ **Telemetry & Feedback Loop** — `log_turn()` to JSONL (no PII). Real-time `WS /api/harness/ws` push + 5s polling fallback. **Cycle #5**: `summarize().latency` exposes `avg/p50/p95/p99/count` for `fanout_ms`/`llm_ms`/`tts_ms`/`total_ms` (nearest-rank percentile, pure Python). `respond_internal` / `respond_compare` now also record `total_ms`. Dashboard shows a new "응답시간 분포" table.
+- ✅ **Self-Evolution Proposer + Export** — `propose_next_cycle()` writes `harness/sarvis/proposals/cycle-{n}.md`. **Cycle #5**: `export_proposal_to_github()` + `POST /api/harness/evolve/export` posts the proposal as a GitHub Issue. Path-traversal blocked (`PROPOSALS_DIR` allowlist), `repo` from arg or env (`HARNESS_GITHUB_REPO`/`GITHUB_REPO`), token from env (`GITHUB_TOKEN`/`GH_TOKEN`) **only** — never accepted in body. `issue_url` is verified against the `https://github.com/` scheme allowlist on both server and client. Dashboard adds a "GitHub Issue 로 내보내기" button (with dry-run option) inside the evolve result.
+- ✅ **Regression Tests** *(new in cycle #5)* — `tests/test_telemetry.py` (12) + `tests/test_evolve_export.py` (12). Pure stdlib `unittest` (no extra deps). Run via `python -m unittest discover tests`. Covers: summarize keyset equivalence (empty vs non-empty), nearest-rank percentile correctness, PII sanitization (str/list/tuple/dict all → `*_len`), pub-sub callback isolation + idempotent subscribe, GitHub export (traversal block, missing repo/token, body truncation, dry-run, env priority).
 
-Cycle #4 added/changed:
-- `telemetry.py` — `subscribe/unsubscribe/_notify` pub-sub + `_notify` call after `log_turn()`. New summary keys (`input_channels`, `tts_regen_count`, `tts_regen_rate`) on both empty and non-empty paths.
-- `server.py` — `WS /api/harness/ws` endpoint with `_harness_ws_auth_ok` (parity with HTTP gate), per-connection `asyncio.Queue(200)` + `_enqueue_safe` (drop on full), 25s keepalive, `unsubscribe` in `finally`. `respond_internal` / `respond_compare` mark `input_channel="text"`. `handle_audio` now records its own `turn_meta` (`input_channel="audio"`, `stt_ms`, `llm_ms`, `tts_ms`, `tts_regenerated`, `total_ms`).
-- `web/harness/dashboard.html` — full rewrite: WS-first with polling fallback, `escapeHtml` everywhere, recent-30-turn stream table with fresh-row flash, status pulse pill on live connection.
-- `web/index.html` + `web/style.css` — top-bar `⚙ 제어판` link button (`target="_blank" rel="noopener"`, mobile label-hidden).
+Cycle #5 added/changed:
+- `telemetry.py` — `_percentile`, `_latency_stats`, `LATENCY_KEYS`, `summarize().latency` (consistent empty/non-empty). Sanitize collections via `len()`. Fixed file-handle leak in `_rotate_if_needed`.
+- `server.py` — `total_ms` recorded in `respond_internal` / `respond_compare`. New `POST /api/harness/evolve/export` endpoint.
+- `harness_evolve.py` — `export_proposal_to_github()` with traversal-safe `_read_proposal()`, `_resolve_repo()`, `https://github.com/` `issue_url` allowlist, 60KB body cap, urllib + `asyncio.to_thread` (20s timeout).
+- `web/harness/dashboard.html` — "응답시간 분포" table; dynamic GitHub export button, dry-run checkbox, repo input, scheme-checked link.
+- `tests/__init__.py`, `tests/test_telemetry.py`, `tests/test_evolve_export.py` — 24 unit tests.
 
-Remaining work (cycle #5 candidates) is tracked in `harness/sarvis/validation.md` §9.
+Remaining work (cycle #6 candidates) is tracked in `harness/sarvis/validation.md` §10.
 
 Key locations:
 - `harness/` — Original Harness plugin assets (READMEs EN/KO/JA, CHANGELOG, landing page source, banner images, plus `harness/sarvis/` SARVIS-specific Phase outputs). **Repo-internal — not publicly served.**

@@ -8,11 +8,16 @@
   5. {ok, cycle, path, markdown, reason} 반환
 
 PII 안전: 메타데이터(intent/backend/지연 등)만 LLM 에 전달, 사용자 발화 본문 미포함.
+
+사이클 #5 T003: export_proposal_to_github() — proposal 을 GitHub Issue 로 export.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
@@ -22,6 +27,9 @@ from config import cfg
 
 PROPOSALS_DIR = Path(__file__).parent / "harness" / "sarvis" / "proposals"
 MIN_TURNS = 10  # 최소 누적 턴 — 데모용 낮음. 운영은 100+ 권장.
+
+# 사이클 #5: GitHub Issue body 최대 길이 (GitHub 한도 65536, 안전 마진).
+GH_BODY_MAX = 60000
 
 
 def _next_cycle_number() -> int:
@@ -169,4 +177,149 @@ def propose_next_cycle(
         "total": total,
         "summary": summary,
         "used_backend": used_backend,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 사이클 #5 T003: GitHub Issue Export
+# ════════════════════════════════════════════════════════════════════════
+
+GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$")
+
+
+def _resolve_repo(repo: Optional[str]) -> Optional[str]:
+    """우선순위: 인자 > HARNESS_GITHUB_REPO > GITHUB_REPO 환경변수."""
+    candidate = repo or os.environ.get("HARNESS_GITHUB_REPO") or os.environ.get("GITHUB_REPO")
+    if not candidate:
+        return None
+    candidate = candidate.strip()
+    if not GITHUB_REPO_RE.match(candidate):
+        return None
+    return candidate
+
+
+def _read_proposal(path: str) -> Optional[Dict]:
+    """Proposal 경로 검증 (PROPOSALS_DIR 안에 있어야 path traversal 방지) + 읽기."""
+    p = Path(path)
+    if not p.is_absolute():
+        p = (Path(__file__).parent / p).resolve()
+    else:
+        p = p.resolve()
+    base = PROPOSALS_DIR.resolve()
+    try:
+        p.relative_to(base)
+    except ValueError:
+        return None  # PROPOSALS_DIR 밖 → 거부
+    if not p.is_file() or p.suffix != ".md":
+        return None
+    body = p.read_text(encoding="utf-8")
+    title_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else p.stem
+    return {"path": str(p), "title": title, "body": body}
+
+
+def export_proposal_to_github(
+    proposal_path: str,
+    repo: Optional[str] = None,
+    token: Optional[str] = None,
+    labels: Optional[list] = None,
+    dry_run: bool = False,
+) -> Dict:
+    """Proposal markdown 을 GitHub Issue 로 게시.
+
+    Args:
+        proposal_path: PROPOSALS_DIR 안의 .md 경로 (상대/절대 모두 허용, traversal 차단).
+        repo: "owner/name" 형식. 미지정 시 환경변수 fallback.
+        token: GitHub Personal Access Token. 미지정 시 환경변수 GITHUB_TOKEN/GH_TOKEN.
+        labels: Issue labels (선택).
+        dry_run: True 면 API 호출 없이 payload 만 반환 (테스트용).
+
+    Returns:
+        {ok, reason, issue_url, issue_number, repo, title, dry_run}
+    """
+    proposal = _read_proposal(proposal_path)
+    if not proposal:
+        return {
+            "ok": False, "reason": "invalid_proposal_path",
+            "issue_url": None, "issue_number": None,
+            "repo": None, "title": None, "dry_run": dry_run,
+        }
+
+    resolved_repo = _resolve_repo(repo)
+    if not resolved_repo:
+        return {
+            "ok": False, "reason": "missing_or_invalid_repo (set HARNESS_GITHUB_REPO env or pass repo='owner/name')",
+            "issue_url": None, "issue_number": None,
+            "repo": None, "title": proposal["title"], "dry_run": dry_run,
+        }
+
+    body = proposal["body"]
+    if len(body) > GH_BODY_MAX:
+        body = body[:GH_BODY_MAX] + "\n\n*(truncated by harness_evolve)*\n"
+
+    payload = {
+        "title": proposal["title"],
+        "body": body,
+        "labels": list(labels) if labels else ["harness", "auto-proposal"],
+    }
+
+    if dry_run:
+        return {
+            "ok": True, "reason": "dry_run",
+            "issue_url": None, "issue_number": None,
+            "repo": resolved_repo, "title": proposal["title"], "dry_run": True,
+            "payload_size": len(body),
+        }
+
+    gh_token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if not gh_token:
+        return {
+            "ok": False, "reason": "missing_github_token (set GITHUB_TOKEN env or pass token=...)",
+            "issue_url": None, "issue_number": None,
+            "repo": resolved_repo, "title": proposal["title"], "dry_run": False,
+        }
+
+    url = f"https://api.github.com/repos/{resolved_repo}/issues"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={
+            "Authorization": f"Bearer {gh_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "sarvis-harness-evolve/1.0",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+            obj = json.loads(raw.decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            err_body = ""
+        return {
+            "ok": False,
+            "reason": f"github_api_error: HTTP {e.code} — {err_body}",
+            "issue_url": None, "issue_number": None,
+            "repo": resolved_repo, "title": proposal["title"], "dry_run": False,
+        }
+    except urllib.error.URLError as e:
+        return {
+            "ok": False,
+            "reason": f"github_network_error: {e!r}",
+            "issue_url": None, "issue_number": None,
+            "repo": resolved_repo, "title": proposal["title"], "dry_run": False,
+        }
+
+    # 사이클 #5 architect 권고: issue_url 스킴 allowlist 검증 (https://github.com/ 만).
+    raw_url = obj.get("html_url") or ""
+    issue_url = raw_url if isinstance(raw_url, str) and raw_url.startswith("https://github.com/") else None
+    return {
+        "ok": True, "reason": "ok",
+        "issue_url": issue_url,
+        "issue_number": obj.get("number"),
+        "repo": resolved_repo, "title": proposal["title"], "dry_run": False,
     }

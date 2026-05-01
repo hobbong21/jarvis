@@ -86,11 +86,11 @@ def _sanitize(meta: Dict) -> Dict:
     out = {}
     for k, v in meta.items():
         if k in blocked:
-            # 길이만 보존
+            # 길이만 보존 — str/list/tuple/dict 모두 len() 적용 가능 (none-PII 메타정보).
             try:
-                out[f"{k}_len"] = len(v) if isinstance(v, str) else 0
+                out[f"{k}_len"] = len(v) if hasattr(v, "__len__") else 0
             except TypeError:
-                pass
+                out[f"{k}_len"] = 0
             continue
         # 컬렉션은 평탄화
         if isinstance(v, (str, int, float, bool)) or v is None:
@@ -107,7 +107,8 @@ def _sanitize(meta: Dict) -> Dict:
 def _rotate_if_needed():
     """라인이 너무 많으면 후반부 절반만 유지 (단순 회전)."""
     try:
-        size_lines = sum(1 for _ in open(LOG_PATH, "r", encoding="utf-8", errors="ignore"))
+        with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            size_lines = sum(1 for _ in f)
     except OSError:
         return
     if size_lines <= MAX_LINES:
@@ -144,19 +145,65 @@ def recent(n: int = 50) -> List[Dict]:
     return rows[-n:] if n > 0 else rows
 
 
+# 사이클 #5 T001: 백분위 추적 대상 키 (모두 ms 단위).
+LATENCY_KEYS = ("fanout_ms", "llm_ms", "tts_ms", "total_ms")
+
+
+def _percentile(sorted_vals: List[float], p: float) -> float:
+    """순수 파이썬 nearest-rank 백분위 (0<=p<=100). 빈 리스트는 0.0.
+
+    nearest-rank 방식: rank = ceil(p/100 * N), 1-indexed.
+    참고: NumPy/Scipy 의 기본(linear interpolation)과 짝수 N 의 p50 등에서
+    다소 차이날 수 있다. 운영 관측치는 항상 실 측정값 1개를 가리키므로
+    해석 단순함이 장점 (상위 5% 라인은 실제 어떤 턴이었는지 명확).
+    """
+    n = len(sorted_vals)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return float(sorted_vals[0])
+    # ceil(p/100 * n) — 정수 산술
+    import math
+    rank = max(1, min(n, math.ceil((p / 100.0) * n)))
+    return float(sorted_vals[rank - 1])
+
+
+def _latency_stats(rows: List[Dict], key: str) -> Dict[str, float]:
+    """단일 지연 키의 avg/p50/p95/p99 (ms). 빈 데이터는 0.0."""
+    vals = sorted(r.get(key) for r in rows if isinstance(r.get(key), (int, float)))
+    if not vals:
+        return {"avg": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "count": 0}
+    avg = sum(vals) / len(vals)
+    return {
+        "avg": float(avg),
+        "p50": _percentile(vals, 50),
+        "p95": _percentile(vals, 95),
+        "p99": _percentile(vals, 99),
+        "count": len(vals),
+    }
+
+
+def _empty_latency_stats() -> Dict[str, float]:
+    return {"avg": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "count": 0}
+
+
 def summarize(limit: Optional[int] = None) -> Dict:
     """전체 (또는 최근 N개) 턴 집계.
 
     반환 키:
       total            : int
       backends         : {backend: count}
+      input_channels   : {channel: count}
       fallback_rate    : float (0.0~1.0)
       tts_failure_rate : float
+      tts_regen_count  : int
+      tts_regen_rate   : float
       tts_reasons      : {reason: count}
       intents          : {intent: count}
-      avg_fanout_ms    : float
+      avg_fanout_ms    : float  (호환성 유지 — 사이클 #5 이전 클라이언트)
       avg_llm_ms       : float
       avg_tts_ms       : float
+      latency          : {key: {avg, p50, p95, p99, count}}  (사이클 #5)
       last_ts          : float | None
     """
     rows = _load_all()
@@ -164,8 +211,8 @@ def summarize(limit: Optional[int] = None) -> Dict:
         rows = rows[-limit:]
     total = len(rows)
     if total == 0:
-        # 사이클 #4 architect P1: 빈 경로도 비-빈 경로와 동일 키 셋을 반환해야
-        # 클라이언트(대시보드/테스트)가 키 존재를 가정해도 안전하다.
+        # 사이클 #4 architect P1: 빈 경로도 비-빈 경로와 동일 키 셋을 반환.
+        # 사이클 #5 T001: latency 키 추가 (역시 동일 셋).
         return {
             "total": 0, "backends": {}, "input_channels": {},
             "fallback_rate": 0.0,
@@ -173,6 +220,7 @@ def summarize(limit: Optional[int] = None) -> Dict:
             "tts_regen_count": 0, "tts_regen_rate": 0.0,
             "tts_reasons": {}, "intents": {},
             "avg_fanout_ms": 0.0, "avg_llm_ms": 0.0, "avg_tts_ms": 0.0,
+            "latency": {k: _empty_latency_stats() for k in LATENCY_KEYS},
             "last_ts": None,
         }
 
@@ -186,9 +234,7 @@ def summarize(limit: Optional[int] = None) -> Dict:
     # 입력 채널 (audio vs text) — handle_audio 는 input_channel="audio" 로 기록
     channels = Counter(r.get("input_channel") for r in rows if r.get("input_channel"))
 
-    def _avg(key):
-        vals = [r.get(key) for r in rows if isinstance(r.get(key), (int, float))]
-        return (sum(vals) / len(vals)) if vals else 0.0
+    latency = {k: _latency_stats(rows, k) for k in LATENCY_KEYS}
 
     return {
         "total": total,
@@ -200,8 +246,10 @@ def summarize(limit: Optional[int] = None) -> Dict:
         "tts_regen_rate": tts_regen / total,
         "tts_reasons": dict(tts_reasons),
         "intents": dict(intents),
-        "avg_fanout_ms": _avg("fanout_ms"),
-        "avg_llm_ms": _avg("llm_ms"),
-        "avg_tts_ms": _avg("tts_ms"),
+        # 호환성: 기존 avg_* 키 유지 (clients of cycle <=4)
+        "avg_fanout_ms": latency["fanout_ms"]["avg"],
+        "avg_llm_ms": latency["llm_ms"]["avg"],
+        "avg_tts_ms": latency["tts_ms"]["avg"],
+        "latency": latency,
         "last_ts": rows[-1].get("ts"),
     }

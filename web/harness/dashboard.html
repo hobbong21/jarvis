@@ -82,6 +82,12 @@ pre{background:#0a0d12;padding:12px;border-radius:6px;overflow:auto;font-size:12
   </div>
 </div>
 
+<h2>응답시간 분포 (avg / p50 / p95 / p99, ms)</h2>
+<table id="latencyTable">
+  <thead><tr><th>지표</th><th>샘플 수</th><th>avg</th><th>p50</th><th>p95</th><th>p99</th></tr></thead>
+  <tbody></tbody>
+</table>
+
 <h2>최근 턴 스트림 (최신 30개)</h2>
 <table id="streamTable">
   <thead><tr><th>시각</th><th>채널</th><th>Backend</th><th>Intent</th><th>LLM ms</th><th>TTS ms</th><th>TTS</th></tr></thead>
@@ -165,12 +171,41 @@ function renderStream(){
   }).join('');
 }
 
+const LATENCY_LABELS = {
+  fanout_ms: 'Fan-out',
+  llm_ms: 'LLM',
+  tts_ms: 'TTS',
+  total_ms: '전체 (turn 합)'
+};
+
+function renderLatency(latency){
+  const tbody = $('latencyTable').querySelector('tbody');
+  if(!latency || typeof latency !== 'object'){
+    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center">데이터 없음</td></tr>';
+    return;
+  }
+  const keys = ['fanout_ms','llm_ms','tts_ms','total_ms'];
+  tbody.innerHTML = keys.map(k => {
+    const s = latency[k] || {avg:0,p50:0,p95:0,p99:0,count:0};
+    const muted = s.count === 0 ? ' style="color:var(--muted)"' : '';
+    return `<tr${muted}>
+      <td>${escapeHtml(LATENCY_LABELS[k] || k)}</td>
+      <td>${s.count|0}</td>
+      <td>${(s.avg||0).toFixed(1)}</td>
+      <td>${(s.p50||0).toFixed(1)}</td>
+      <td>${(s.p95||0).toFixed(1)}</td>
+      <td>${(s.p99||0).toFixed(1)}</td>
+    </tr>`;
+  }).join('');
+}
+
 function applySummary(s){
   renderCards(s);
   renderTable('backendTable', s.backends, s.total);
   renderTable('intentTable', s.intents, s.total);
   renderTable('channelTable', s.input_channels, s.total);
   renderTable('ttsTable', s.tts_reasons, s.total);
+  renderLatency(s.latency);
 }
 
 function pushTurn(meta){
@@ -244,6 +279,9 @@ function connectWS(){
   };
 }
 
+// 사이클 #5 T003: 마지막 evolve 결과의 proposal path (export 버튼이 사용).
+let lastProposalPath = null;
+
 async function evolve(){
   $('status').textContent = '/harness:evolve 실행 중…'; $('status').className = 'status';
   $('evolveBtn').disabled = true;
@@ -252,12 +290,21 @@ async function evolve(){
     const div = $('evolveResult');
     div.style.display = 'block';
     if(r.ok){
+      lastProposalPath = r.path;
       div.innerHTML = `<strong>✓ 사이클 #${r.cycle} 제안서 생성됨</strong><br>
-        파일: <code>${escapeHtml(r.path)}</code> (backend: ${escapeHtml(r.used_backend||'?')}, total turns: ${r.total})<br><br>
+        파일: <code>${escapeHtml(r.path)}</code> (backend: ${escapeHtml(r.used_backend||'?')}, total turns: ${r.total})<br>
+        <button id="exportGhBtn" class="primary" style="margin:8px 0">GitHub Issue 로 내보내기</button>
+        <input id="exportRepoInput" type="text" placeholder="owner/name (선택, 환경변수 우선)" style="margin-left:6px;padding:4px 8px;width:240px">
+        <label style="margin-left:6px;font-size:12px;color:var(--muted)"><input id="exportDryRun" type="checkbox"> dry-run (검증만)</label>
+        <div id="exportResult" style="margin-top:8px"></div>
         <hr style="border-color:var(--border)">
         <pre>${escapeHtml(r.markdown||'')}</pre>`;
       $('status').textContent = '✓ Evolve 완료'; $('status').className = 'status ok';
+      // 동적으로 추가된 export 버튼에 핸들러 연결
+      const eb = $('exportGhBtn');
+      if(eb) eb.addEventListener('click', exportToGithub);
     } else {
+      lastProposalPath = null;
       div.innerHTML = `<strong>✗ 트리거 조건 미충족</strong><br>사유: ${escapeHtml(r.reason||'')}<br>현재 누적: ${r.total} 턴`;
       $('status').textContent = '✗ ' + (r.reason||''); $('status').className = 'status err';
     }
@@ -265,6 +312,41 @@ async function evolve(){
     $('status').textContent = '오류: ' + e.message; $('status').className = 'status err';
   } finally {
     $('evolveBtn').disabled = false;
+  }
+}
+
+async function exportToGithub(){
+  if(!lastProposalPath){ return; }
+  const btn = $('exportGhBtn');
+  const resultDiv = $('exportResult');
+  const repo = ($('exportRepoInput').value || '').trim();
+  const dryRun = $('exportDryRun').checked;
+  btn.disabled = true;
+  resultDiv.innerHTML = '<span style="color:var(--muted)">전송 중…</span>';
+  try {
+    const body = {path: lastProposalPath, dry_run: dryRun};
+    if(repo) body.repo = repo;
+    const r = await fetchJSON('/api/harness/evolve/export', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    if(r.ok){
+      if(r.dry_run){
+        resultDiv.innerHTML = `<span class="value ok">✓ Dry-run OK</span> repo=${escapeHtml(r.repo||'?')}, payload=${r.payload_size||0}바이트`;
+      } else {
+        // architect 권고: issue_url 도 클라에서 스킴 allowlist 검증 (defense in depth).
+        const safeUrl = (typeof r.issue_url === 'string' && r.issue_url.startsWith('https://github.com/')) ? r.issue_url : null;
+        const url = safeUrl ? `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener">#${r.issue_number}</a>` : '(no url)';
+        resultDiv.innerHTML = `<span class="value ok">✓ Issue 생성됨</span> ${url} on ${escapeHtml(r.repo||'?')}`;
+      }
+    } else {
+      resultDiv.innerHTML = `<span class="value err">✗ 실패</span> ${escapeHtml(r.reason||'')}`;
+    }
+  } catch(e){
+    resultDiv.innerHTML = `<span class="value err">오류:</span> ${escapeHtml(e.message)}`;
+  } finally {
+    btn.disabled = false;
   }
 }
 

@@ -274,6 +274,7 @@ async def websocket_endpoint(ws: WebSocket):
         await emit(type="emotion", emotion="thinking")
 
         # ── Harness 텔레메트리: 턴 메타 초기화 ───────────────────────
+        t_turn_start = time.monotonic()  # 사이클 #5 T001: total_ms 계산용
         turn_meta = {
             "turn_id": telemetry.new_turn_id(),
             "ts": time.time(),
@@ -287,6 +288,7 @@ async def websocket_endpoint(ws: WebSocket):
             "fanout_ms": 0.0,
             "llm_ms": 0.0,
             "tts_ms": 0.0,
+            "total_ms": 0.0,
             "tts_ok": None,
             "tts_reason": None,
             "prompt_len": len(prompt or ""),
@@ -402,6 +404,7 @@ async def websocket_endpoint(ws: WebSocket):
             await emit(type="state", state="idle")
             await emit(type="emotion", emotion="neutral")
             try:
+                turn_meta["total_ms"] = (time.monotonic() - t_turn_start) * 1000.0
                 telemetry.log_turn(turn_meta)
             except Exception:
                 traceback.print_exc()
@@ -429,13 +432,15 @@ async def websocket_endpoint(ws: WebSocket):
             "fanout_ms": 0.0,
             "llm_ms": 0.0,
             "tts_ms": 0.0,
+            "total_ms": 0.0,
             "tts_ok": None,
             "tts_reason": "compare_no_tts",
             "prompt_len": len(prompt or ""),
             "reply_len": 0,
             "compare_sources": [],
         }
-        t_llm_start = time.monotonic()
+        t_turn_start = time.monotonic()  # 사이클 #5 T001
+        t_llm_start = t_turn_start
 
         try:
             # Fan-out 분석 — compare 도 동일하게 실행 (intent 분포 통계용)
@@ -501,6 +506,7 @@ async def websocket_endpoint(ws: WebSocket):
         finally:
             await emit(type="state", state="idle")
             try:
+                turn_meta["total_ms"] = (time.monotonic() - t_turn_start) * 1000.0
                 telemetry.log_turn(turn_meta)
             except Exception:
                 traceback.print_exc()
@@ -855,6 +861,52 @@ async def harness_evolve_endpoint(
         effective_min,
     )
     # markdown 본문은 응답에 포함하되, 파일 경로도 안내
+    return result
+
+
+@app.post("/api/harness/evolve/export")
+async def harness_evolve_export_endpoint(
+    request: Request,
+    token: Optional[str] = None,
+):
+    """사이클 #5 T003: 자동 생성된 사이클 제안서를 GitHub Issue 로 export.
+
+    Request body (JSON):
+      {
+        "path": "harness/sarvis/proposals/cycle-5.md",  # 필수, PROPOSALS_DIR 안만 허용
+        "repo": "owner/name",          # 선택, 미지정 시 HARNESS_GITHUB_REPO 환경변수
+        "labels": ["harness"],         # 선택
+        "dry_run": false               # 선택, true 면 GitHub 호출 없이 payload 검증만
+      }
+
+    인증: telemetry/evolve 와 동일 게이트 (token query 또는 Bearer header).
+    GitHub 토큰: GITHUB_TOKEN/GH_TOKEN 환경변수 우선 (요청 본문에선 받지 않음 — 누출 방지).
+
+    응답: {ok, reason, issue_url, issue_number, repo, title, dry_run}
+    """
+    _harness_auth_check(request, token)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    path = body.get("path")
+    if not isinstance(path, str) or not path:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="missing 'path' (proposal markdown)")
+
+    repo = body.get("repo") if isinstance(body.get("repo"), str) else None
+    labels = body.get("labels") if isinstance(body.get("labels"), list) else None
+    dry_run = bool(body.get("dry_run"))
+
+    import harness_evolve
+    result = await asyncio.to_thread(
+        harness_evolve.export_proposal_to_github,
+        path, repo, None, labels, dry_run,
+    )
     return result
 
 

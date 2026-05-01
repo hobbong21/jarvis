@@ -138,12 +138,46 @@
 | unsubscribe 누락 가능 경로 | OK | finally 보장. |
 | 대시보드 escapeHtml 누락 | OK | 모든 동적 출력 이스케이프 + status 는 textContent. |
 
-## 9. 다음 단계 (open items, 사이클 #5 후보)
+## 9. Phase 7 — 사이클 #5 결과 (운영 관측 + 회귀 안전망 + GitHub 루프)
+
+| 항목 | 결과 | 비고 |
+|------|------|------|
+| `telemetry.summarize().latency` 추가 | ✅ | 4개 키(fanout/llm/tts/total_ms) × {avg,p50,p95,p99,count}. 빈/비빈 경로 동일 키셋. |
+| `_percentile()` nearest-rank 백분위 | ✅ | 순수 파이썬, 의존성 추가 없음. docstring 에 NumPy 와의 차이 명시. |
+| `respond_internal` / `respond_compare` 에 `total_ms` 추가 | ✅ | 기존엔 handle_audio 만 기록했으나 모든 경로 균일화. |
+| 대시보드 "응답시간 분포" 표 | ✅ | count=0 행은 muted, 실시간 갱신. |
+| `tests/test_telemetry.py` (12) + `tests/test_evolve_export.py` (12) | ✅ | unittest, 의존성 추가 X, 24/24 PASS. |
+| PII sanitize 일관화 (str/list/tuple/dict 모두 len) | ✅ | history/body 등 컬렉션도 길이로만 보존. |
+| `_rotate_if_needed` 파일 핸들 누수 fix | ✅ | with open 으로 감쌈. |
+| `harness_evolve.export_proposal_to_github()` | ✅ | urllib 동기, asyncio.to_thread 격리, 20s timeout. |
+| `POST /api/harness/evolve/export` | ✅ | _harness_auth_check 게이트, body={path,repo?,labels?,dry_run?}, **token body 미수용**. |
+| Path traversal 방어 | ✅ | `Path.resolve().relative_to(PROPOSALS_DIR)` 검증. 절대/상대 traversal 모두 차단 (테스트 검증). |
+| `issue_url` 스킴 allowlist | ✅ | 서버+클라 양쪽 `https://github.com/` prefix 검증. |
+| body 60KB 잘림 (GitHub 한도 65536 마진) | ✅ | 테스트 검증. |
+| 대시보드 evolve 결과에 "GitHub Issue 로 내보내기" 버튼 + dry-run | ✅ | 동적 추가, escapeHtml 일관 적용. |
+
+## 9.1 Architect 사이클 #5 리뷰 결과 (PASS)
+
+| 항목 | 등급 | 처리 |
+|------|------|------|
+| traversal 방어 (symlink 포함) | OK | resolve() + relative_to 충분. |
+| token env-only 디자인 | OK | 누출면 축소, 적절. |
+| asyncio.to_thread + urllib 20s | OK | 자원정리/timeout 합리적. |
+| nearest-rank vs linear interp | INFO | docstring 명시 권고 → 적용. |
+| 대시보드 XSS 표면 | OK | escapeHtml 전반 적용. issue_url allowlist 추가 권고 → 적용. |
+| 회귀 | 없음 | smoke + 24/24 unit test PASS. |
+
+architect 권고 3건 모두 즉시 적용:
+1. `issue_url` https://github.com/ allowlist (서버 `harness_evolve.py` + 클라 `dashboard.html`).
+2. `tests/test_evolve_export.py` 추가 (12 tests).
+3. `_percentile` docstring 에 NumPy 차이 명시.
+
+## 10. 다음 단계 (open items, 사이클 #6 후보)
 
 1. **Ollama 자동 모델 풀** — 헬스체크 통과 시 미설치 모델 자동 pull (백그라운드).
-2. **Telemetry export to GitHub Issue** — 사이클 #N+1 제안서를 자동으로 PR/Issue 로 생성 (github 통합 이미 설치됨).
-3. **proposals 자동 적용** — 승인된 cycle-N.md 의 acceptance 항목을 task 트리로 변환.
-4. **summary 키셋 회귀 테스트** — architect 권장: `summarize()` 빈/비빈 키셋 동등성 + WS 큐 포화 drop 자동 검증.
-5. **WS soak test** — 5~10분 고빈도 turn 부하에서 메모리/연결 안정성.
-6. **응답시간 백분위** — avg 외 p50/p95/p99 추가 (LLM/TTS 분포).
+2. **proposals 자동 적용** — 승인된 cycle-N.md 의 acceptance 항목을 task 트리로 변환.
+3. **WS soak test** — 5~10분 고빈도 turn 부하에서 메모리/연결 안정성.
+4. **백엔드별 백분위** — latency 를 backend (claude/openai/ollama) 차원으로 분리.
+5. **UI 백분위 차트** — 표 외에 mini sparkline 추가 (라이브러리 없이 SVG).
+6. **GitHub Issue 중복 방지** — 동일 cycle-N proposal 재export 시 기존 issue update 옵션.
 7. `references/orchestrator-template.md`, `references/team-examples.md` 등 나머지 참조 문서.
