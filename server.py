@@ -813,6 +813,10 @@ async def websocket_endpoint(ws: WebSocket):
                         warnings.append("ANTHROPIC_API_KEY 누락")
                     elif target == "openai" and b.openai_client is None:
                         warnings.append("OPENAI_API_KEY 누락")
+                    elif target == "zhipuai" and b.zhipuai_client is None:
+                        warnings.append("ZHIPUAI_API_KEY 누락")
+                    elif target == "gemini" and b.gemini_client is None:
+                        warnings.append("GOOGLE_API_KEY 누락")
                     elif target == "compare":
                         if b.anthropic_client is None:
                             warnings.append("Claude 키 없음 — Claude 응답 안 나옴")

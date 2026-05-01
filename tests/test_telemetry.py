@@ -239,6 +239,86 @@ class ZhipuAIBackendTests(unittest.TestCase):
                          f"키셋 불일치: 누락={empty_keys - zhipuai_keys}, 추가={zhipuai_keys - empty_keys}")
 
 
+class GeminiBackendTests(unittest.TestCase):
+    """Gemini 백엔드 추가가 텔레메트리 집계 + friendly_error 분기에 정상 통합되는지."""
+
+    def test_gemini_counted_in_backends(self):
+        with _IsolatedLog():
+            for _ in range(3):
+                telemetry.log_turn({"backend": "gemini", "llm_ms": 80.0})
+            telemetry.log_turn({"backend": "openai", "llm_ms": 120.0})
+            s = telemetry.summarize()
+        self.assertEqual(s["backends"].get("gemini"), 3)
+        self.assertEqual(s["backends"].get("openai"), 1)
+        self.assertEqual(s["total"], 4)
+
+    def test_gemini_keyset_matches_other_backends(self):
+        with _IsolatedLog():
+            empty_keys = set(telemetry.summarize().keys())
+        with _IsolatedLog():
+            telemetry.log_turn({"backend": "gemini", "llm_ms": 200.0, "input_channel": "voice"})
+            gemini_keys = set(telemetry.summarize().keys())
+        self.assertEqual(empty_keys, gemini_keys,
+                         f"키셋 불일치: 누락={empty_keys - gemini_keys}, 추가={gemini_keys - empty_keys}")
+
+    def test_gemini_in_alt_buttons(self):
+        from brain import _ALT_BUTTONS
+        # 다른 백엔드의 alt 메시지가 gemini 를 후보로 안내해야 함 (claude/openai/zhipuai)
+        self.assertIn("GEMINI", _ALT_BUTTONS["claude"])
+        self.assertIn("GEMINI", _ALT_BUTTONS["openai"])
+        # gemini 자신의 alt 도 정의되어 있어야 (KeyError 회귀 방지)
+        self.assertIn("gemini", _ALT_BUTTONS)
+
+    def test_gemini_friendly_error_korean(self):
+        from brain import _friendly_error
+        # 인증 실패
+        msg = _friendly_error(Exception("401 Unauthorized: API key invalid"), "gemini")
+        self.assertIn("Gemini", msg)
+        self.assertIn("키", msg)
+        self.assertNotIn("401 Unauthorized", msg)  # raw 영문 노출 금지
+        # 크레딧/할당량
+        msg2 = _friendly_error(Exception("You exceeded your current quota"), "gemini")
+        self.assertIn("Gemini", msg2)
+        self.assertTrue("크레딧" in msg2 or "할당량" in msg2)
+
+    def test_think_does_not_leak_raw_english_on_failure(self):
+        """`server.handle_audio` 가 호출하는 `Brain.think()` 가 백엔드에서 raw 예외를
+        던질 때, 반환된 reply 가 한국어 friendly_error 로 감싸져야 한다 (architect
+        사이클 #5: 음성 경로 raw 영문 노출 회귀 방지).
+        """
+        import os
+        os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
+        from unittest.mock import patch
+        from brain import Brain
+        from config import cfg
+        from emotion import Emotion
+
+        original_backend = cfg.llm_backend
+        try:
+            cfg.llm_backend = "gemini"
+            b = Brain()
+            # GOOGLE_API_KEY 미설정 환경에서도 결정적으로 통과하도록 클라이언트
+            # 더미 객체를 강제 주입 (think() 의 조기 None 가드 우회).
+            # architect 사이클 #5 권장.
+            b.gemini_client = object()
+            # _think_gemini_simple 가 raw 영문 예외를 던지도록 패치
+            with patch.object(
+                b, "_think_gemini_simple",
+                side_effect=Exception("401 Unauthorized: invalid api key xyz123"),
+            ):
+                emotion, reply = b.think("아무말")
+            self.assertEqual(emotion, Emotion.CONCERNED)
+            # raw 영문 토큰이 사용자 응답에 노출되면 안 됨
+            self.assertNotIn("401 Unauthorized", reply)
+            self.assertNotIn("xyz123", reply)
+            self.assertNotIn("invalid api key", reply)
+            # 한국어 friendly_error 의 키 단어 ("키" 또는 "Gemini") 가 들어있어야 함
+            self.assertTrue("키" in reply or "Gemini" in reply,
+                            f"friendly_error 미적용 의심: {reply!r}")
+        finally:
+            cfg.llm_backend = original_backend
+
+
 class FriendlyErrorTests(unittest.TestCase):
     """사이클 #6 핫픽스: server.py 가 raw 영문 예외(`Internal Server Error`,
     `Connection error` 등)를 사용자에게 그대로 노출하던 회귀를 막기 위한

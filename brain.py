@@ -15,10 +15,11 @@ _EMOTION_PREFIX_RE = re.compile(r"^\s*\[emotion:\w+\]\s*", re.IGNORECASE)
 
 
 _ALT_BUTTONS = {
-    "claude": "[2·OPENAI] 또는 [4·GLM]",
-    "openai": "[1·CLAUDE] 또는 [4·GLM]",
+    "claude": "[2·OPENAI] 또는 [5·GEMINI]",
+    "openai": "[1·CLAUDE] 또는 [5·GEMINI]",
     "ollama": "[1·CLAUDE] 또는 [2·OPENAI]",
-    "zhipuai": "[1·CLAUDE] 또는 [2·OPENAI]",
+    "zhipuai": "[1·CLAUDE] 또는 [5·GEMINI]",
+    "gemini": "[1·CLAUDE] 또는 [2·OPENAI]",
 }
 
 
@@ -45,6 +46,10 @@ def _friendly_error(e: Exception, backend: str) -> str:
             return ("⚠ ZhipuAI(GLM) API 크레딧이 부족합니다.\n"
                     f"→ 하단의 {alt} 버튼을 눌러 다른 AI 로 전환하세요.\n"
                     "(open.bigmodel.cn 의 财务中心 → 充值 에서 충전 시 즉시 복구됩니다.)")
+        if backend == "gemini":
+            return ("⚠ Google Gemini API 크레딧/할당량이 부족합니다.\n"
+                    f"→ 하단의 {alt} 버튼을 눌러 다른 AI 로 전환하세요.\n"
+                    "(aistudio.google.com 의 Billing 에서 결제 활성화 시 한도가 늘어납니다.)")
         return f"⚠ {label} 크레딧이 부족합니다.\n→ 하단의 {alt} 버튼을 눌러주세요."
 
     # 인증 실패
@@ -54,6 +59,10 @@ def _friendly_error(e: Exception, backend: str) -> str:
             return ("⚠ ZhipuAI(GLM) API 키가 유효하지 않습니다 (401 身份验证失败).\n"
                     "→ open.bigmodel.cn 의 API Keys 페이지에서 키 상태를 확인하고\n"
                     f"  새 키를 발급받아 ZHIPUAI_API_KEY 환경변수에 설정하세요. 또는 하단의 {alt} 버튼을 눌러주세요.")
+        if backend == "gemini":
+            return ("⚠ Google Gemini API 키가 유효하지 않습니다 (401).\n"
+                    "→ aistudio.google.com/apikey 에서 키를 확인하고\n"
+                    f"  GOOGLE_API_KEY 환경변수에 설정하세요. 또는 하단의 {alt} 버튼을 눌러주세요.")
         return (f"⚠ {label} API 키가 유효하지 않습니다.\n"
                 f"→ 환경변수를 확인하거나 하단의 {alt} 버튼을 눌러주세요.")
 
@@ -96,6 +105,7 @@ class Brain:
         self.anthropic_client = None    # 비전 도구용 (항상 보유 시도)
         self.openai_client = None       # OpenAI 용 (compare/openai 모드용)
         self.zhipuai_client = None      # ZhipuAI(GLM, OpenAI 호환) 용
+        self.gemini_client = None       # Google Gemini (OpenAI 호환) 용
         self.tools = tool_executor
         self._init_backend()
 
@@ -138,6 +148,13 @@ class Brain:
             self._ensure_anthropic()
             if self.client is None:
                 print("[Brain] 경고: ZHIPUAI_API_KEY (또는 OLLAMA_API_KEY 폴백) 가 없습니다.")
+        elif backend == "gemini":
+            self._ensure_gemini()
+            self.client = self.gemini_client
+            # 비전 도구는 Claude 가 처리하므로 가능하면 Anthropic 도 로드
+            self._ensure_anthropic()
+            if self.client is None:
+                print("[Brain] 경고: GOOGLE_API_KEY (또는 GEMINI_API_KEY 폴백) 가 없습니다.")
         else:
             raise ValueError(f"알 수 없는 백엔드: {backend}")
 
@@ -180,6 +197,24 @@ class Brain:
         except Exception as e:
             print(f"[Brain] ZhipuAI 클라이언트 초기화 실패: {e}")
 
+    def _ensure_gemini(self):
+        """Google Gemini 도 OpenAI 호환 엔드포인트
+        (https://generativelanguage.googleapis.com/v1beta/openai/) 를 제공한다.
+        OpenAI SDK 의 base_url 만 교체해서 사용 — 별도 패키지 설치 불필요."""
+        if self.gemini_client is not None:
+            return
+        if not cfg.gemini_api_key:
+            return
+        try:
+            from openai import OpenAI
+            self.gemini_client = OpenAI(
+                api_key=cfg.gemini_api_key,
+                base_url=cfg.gemini_base_url,
+                timeout=20.0,
+            )
+        except Exception as e:
+            print(f"[Brain] Gemini 클라이언트 초기화 실패: {e}")
+
     def get_client(self):
         """비전 도구는 항상 Anthropic 사용 (있으면)."""
         return self.anthropic_client
@@ -218,11 +253,14 @@ class Brain:
                 return self._think_openai_simple()
             elif backend == "zhipuai":
                 return self._think_zhipuai_simple()
+            elif backend == "gemini":
+                return self._think_gemini_simple()
             else:
                 return self._think_ollama()
         except Exception as e:
             traceback.print_exc()
-            return Emotion.CONCERNED, f"AI 통신 오류가 발생했어요. {e}"
+            # raw 영문 예외 노출 금지 — friendly_error 로 한국어 안내 + alt 버튼.
+            return Emotion.CONCERNED, _friendly_error(e, cfg.llm_backend)
 
     # ============================================================
     # OpenAI 호환 단순 채팅 헬퍼 (OpenAI / ZhipuAI 공용)
@@ -259,6 +297,9 @@ class Brain:
 
     def _think_zhipuai_simple(self) -> Tuple[Emotion, str]:
         return self._think_openai_compatible(self.zhipuai_client, cfg.zhipuai_model)
+
+    def _think_gemini_simple(self) -> Tuple[Emotion, str]:
+        return self._think_openai_compatible(self.gemini_client, cfg.gemini_model)
 
     # ============================================================
     # Claude + Tool Use (메인 경로)
@@ -437,6 +478,8 @@ class Brain:
                 yield from self._stream_openai()
             elif backend == "zhipuai":
                 yield from self._stream_zhipuai()
+            elif backend == "gemini":
+                yield from self._stream_gemini()
             else:
                 yield from self._stream_ollama()
         except Exception as e:
@@ -449,6 +492,9 @@ class Brain:
 
     def _stream_zhipuai(self):
         yield from self._stream_openai_compatible(self.zhipuai_client, cfg.zhipuai_model)
+
+    def _stream_gemini(self):
+        yield from self._stream_openai_compatible(self.gemini_client, cfg.gemini_model)
 
     def _stream_openai_compatible(self, client, model: str):
         """OpenAI ChatCompletion 스트리밍 (OpenAI / ZhipuAI 공용) — 도구 없이 단순 응답."""
@@ -757,7 +803,7 @@ class Brain:
             self.history = self.history[-60:]
 
     def switch_backend(self, backend: str):
-        if backend not in ("claude", "openai", "ollama", "zhipuai", "compare"):
+        if backend not in ("claude", "openai", "ollama", "zhipuai", "gemini", "compare"):
             raise ValueError(f"지원하지 않는 백엔드: {backend}")
         cfg.llm_backend = backend
         self._init_backend()
@@ -780,6 +826,8 @@ class Brain:
             out.append("openai")
         if self.zhipuai_client is not None:
             out.append("zhipuai")
+        if self.gemini_client is not None:
+            out.append("gemini")
         # ollama: 현재 backend 가 ollama 면 client 직접, 아니면 헬스체크
         if cfg.llm_backend == "ollama" and self.client is not None:
             out.append("ollama")
@@ -888,6 +936,8 @@ class Brain:
             return self.openai_client
         if backend == "zhipuai":
             return self.zhipuai_client
+        if backend == "gemini":
+            return self.gemini_client
         if backend == "ollama":
             if cfg.llm_backend == "ollama" and self.client is not None:
                 return self.client
@@ -910,6 +960,8 @@ class Brain:
             yield from self._stream_openai()
         elif backend == "zhipuai":
             yield from self._stream_zhipuai()
+        elif backend == "gemini":
+            yield from self._stream_gemini()
         elif backend == "ollama":
             yield from self._stream_ollama()
         else:
@@ -963,6 +1015,16 @@ class Brain:
             if self.zhipuai_client is not None:
                 resp = self.zhipuai_client.chat.completions.create(
                     model=cfg.zhipuai_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=400,
+                )
+                return (resp.choices[0].message.content or "").strip()
+
+            # Gemini 폴백 — 모든 다른 백엔드 키가 없을 때 마지막 수단
+            self._ensure_gemini()
+            if self.gemini_client is not None:
+                resp = self.gemini_client.chat.completions.create(
+                    model=cfg.gemini_model,
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=400,
                 )

@@ -7,7 +7,7 @@ from typing import List
 @dataclass
 class Config:
     # ============ LLM 백엔드 ============
-    # "claude" | "openai" | "ollama" | "zhipuai" | "compare" (Claude + OpenAI 병렬 A/B)
+    # "claude" | "openai" | "ollama" | "zhipuai" | "gemini" | "compare" (Claude + OpenAI 병렬 A/B)
     llm_backend: str = os.getenv("SARVIS_BACKEND", "openai")
 
     # Claude API
@@ -30,6 +30,12 @@ class Config:
     zhipuai_api_key: str = os.getenv("ZHIPUAI_API_KEY") or os.getenv("OLLAMA_API_KEY") or ""
     zhipuai_base_url: str = os.getenv("ZHIPUAI_BASE_URL") or "https://open.bigmodel.cn/api/paas/v4"
     zhipuai_model: str = os.getenv("ZHIPUAI_MODEL") or "glm-4-flash"
+
+    # Google Gemini (OpenAI 호환 엔드포인트). 키는 GOOGLE_API_KEY 우선,
+    # 없으면 GEMINI_API_KEY 폴백. 기본 모델은 빠르고 저렴한 gemini-2.5-flash.
+    gemini_api_key: str = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or ""
+    gemini_base_url: str = os.getenv("GEMINI_BASE_URL") or "https://generativelanguage.googleapis.com/v1beta/openai/"
+    gemini_model: str = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
 
     # ============ 호출어 ============
     porcupine_access_key: str = os.getenv("PORCUPINE_ACCESS_KEY", "")

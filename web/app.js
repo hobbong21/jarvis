@@ -155,6 +155,7 @@
     openai: 'OPENAI',
     ollama: 'OLLAMA',
     zhipuai: 'GLM',
+    gemini: 'GEMINI',
     compare: 'COMPARE',
   };
   function backendDisplay(id) {
@@ -547,6 +548,8 @@
       } else if (e.key === '4') {
         send({ type: 'switch_backend', backend: 'zhipuai' });
       } else if (e.key === '5') {
+        send({ type: 'switch_backend', backend: 'gemini' });
+      } else if (e.key === '6') {
         send({ type: 'switch_backend', backend: 'compare' });
       } else if (e.key === 'r' || e.key === 'R') {
         send({ type: 'reset' });
