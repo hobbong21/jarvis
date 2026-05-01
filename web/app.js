@@ -113,7 +113,8 @@
   function handleMessage(m) {
     switch (m.type) {
       case 'ready':
-        backendLabel.textContent = (m.backend || 'claude').toUpperCase();
+        if (m.backend) backendLabel.textContent = m.backend.toUpperCase();
+        if (m.backend === 'compare') setCompareMode(true);
         renderFaces(m.faces || []);
         break;
       case 'face_list':
