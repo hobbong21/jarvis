@@ -119,10 +119,24 @@
     ws.send(u8.buffer);
   }
 
+  // 백엔드 ID → 표시 라벨 (UI 버튼과 일치). 매핑 없는 ID 는 대문자 그대로.
+  // (frontend-engineer 사이클 #6 P1)
+  const BACKEND_LABEL = {
+    claude: 'CLAUDE',
+    openai: 'OPENAI',
+    ollama: 'OLLAMA',
+    zhipuai: 'GLM',
+    compare: 'COMPARE',
+  };
+  function backendDisplay(id) {
+    if (!id) return '';
+    return BACKEND_LABEL[id] || String(id).toUpperCase();
+  }
+
   function handleMessage(m) {
     switch (m.type) {
       case 'ready':
-        if (m.backend) backendLabel.textContent = m.backend.toUpperCase();
+        if (m.backend) backendLabel.textContent = backendDisplay(m.backend);
         if (m.backend === 'compare') setCompareMode(true);
         renderFaces(m.faces || []);
         break;
@@ -202,7 +216,7 @@
         observeToggle.checked = m.on;
         break;
       case 'backend_changed':
-        backendLabel.textContent = m.backend.toUpperCase();
+        backendLabel.textContent = backendDisplay(m.backend);
         setCompareMode(m.backend === 'compare');
         break;
       case 'reset_ack':

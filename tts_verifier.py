@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Dict, List
 
 # ---- 설정 ----
-MAX_LEN = 600                  # 글자 (한국어 기준 ~3분 발화)
+MAX_LEN = 800                  # 글자 (한국어 기준 ~4분 발화). ZhipuAI/GLM 은 한국어 응답이 더 긴 경향이라 600 → 800 상향 (사이클 #6 voice-engineer P1).
 MIN_KOREAN_RATIO = 0.10        # 한국어 비율 최소치 (영어/숫자만이어도 통과 가능하지만 너무 낮으면 차단)
 MIN_LEN_FOR_KOREAN_CHECK = 12  # 짧은 텍스트("OK", "네")는 한국어 비율 체크 면제
 

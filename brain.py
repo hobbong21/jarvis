@@ -41,10 +41,19 @@ def _friendly_error(e: Exception, backend: str) -> str:
             return ("⚠ OpenAI API 크레딧이 부족합니다.\n"
                     f"→ 하단의 {alt} 버튼을 눌러 다른 AI 로 전환하세요.\n"
                     "(platform.openai.com 의 Billing 에서 충전 시 즉시 복구됩니다.)")
+        if backend == "zhipuai":
+            return ("⚠ ZhipuAI(GLM) API 크레딧이 부족합니다.\n"
+                    f"→ 하단의 {alt} 버튼을 눌러 다른 AI 로 전환하세요.\n"
+                    "(open.bigmodel.cn 의 财务中心 → 充值 에서 충전 시 즉시 복구됩니다.)")
         return f"⚠ {label} 크레딧이 부족합니다.\n→ 하단의 {alt} 버튼을 눌러주세요."
 
     # 인증 실패
-    if any(k in msg for k in ("api key", "authentication", "401", "unauthorized", "invalid_api_key")):
+    if any(k in msg for k in ("api key", "authentication", "401", "unauthorized", "invalid_api_key",
+                              "身份验证", "1000")):
+        if backend == "zhipuai":
+            return ("⚠ ZhipuAI(GLM) API 키가 유효하지 않습니다 (401 身份验证失败).\n"
+                    "→ open.bigmodel.cn 의 API Keys 페이지에서 키 상태를 확인하고\n"
+                    f"  새 키를 발급받아 ZHIPUAI_API_KEY 환경변수에 설정하세요. 또는 하단의 {alt} 버튼을 눌러주세요.")
         return (f"⚠ {label} API 키가 유효하지 않습니다.\n"
                 f"→ 환경변수를 확인하거나 하단의 {alt} 버튼을 눌러주세요.")
 
@@ -150,7 +159,7 @@ class Brain:
             return
         try:
             from openai import OpenAI
-            self.openai_client = OpenAI(api_key=cfg.openai_api_key)
+            self.openai_client = OpenAI(api_key=cfg.openai_api_key, timeout=20.0)
         except Exception as e:
             print(f"[Brain] OpenAI 클라이언트 초기화 실패: {e}")
 
@@ -166,6 +175,7 @@ class Brain:
             self.zhipuai_client = OpenAI(
                 api_key=cfg.zhipuai_api_key,
                 base_url=cfg.zhipuai_base_url,
+                timeout=20.0,
             )
         except Exception as e:
             print(f"[Brain] ZhipuAI 클라이언트 초기화 실패: {e}")
@@ -943,6 +953,16 @@ class Brain:
             if self.openai_client is not None:
                 resp = self.openai_client.chat.completions.create(
                     model=cfg.openai_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=400,
+                )
+                return (resp.choices[0].message.content or "").strip()
+
+            # ZhipuAI 폴백 — Claude/OpenAI 키가 없는 환경에서도 안전 재작성 동작
+            self._ensure_zhipuai()
+            if self.zhipuai_client is not None:
+                resp = self.zhipuai_client.chat.completions.create(
+                    model=cfg.zhipuai_model,
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=400,
                 )

@@ -7,6 +7,7 @@ FaceRegistry  : 웹 등록용 — 사람 이름 ↔ 얼굴 JPEG 저장 (Claude V
 from __future__ import annotations
 
 import base64
+import os
 import pickle
 import re
 import threading
@@ -50,7 +51,11 @@ def _bg_preload_cv2():
     _ensure_cv2()
 
 
-threading.Thread(target=_bg_preload_cv2, daemon=True, name="cv2-loader").start()
+# 환경변수 SARVIS_SKIP_CV2_PRELOAD=1 이면 스레드를 띄우지 않는다.
+# 테스트/CI 환경에서 `import vision` 만으로 무거운 cv2 가 로드되는 것을 방지.
+# (qa-engineer 사이클 #6 P1)
+if os.environ.get("SARVIS_SKIP_CV2_PRELOAD", "").strip() not in ("1", "true", "True"):
+    threading.Thread(target=_bg_preload_cv2, daemon=True, name="cv2-loader").start()
 
 from config import cfg
 

@@ -214,5 +214,30 @@ class InputChannelTests(unittest.TestCase):
         self.assertEqual(s["input_channels"], {"text": 3, "audio": 2})
 
 
+class ZhipuAIBackendTests(unittest.TestCase):
+    """사이클 #6: 신규 zhipuai 백엔드가 텔레메트리 집계에 정상 포함되는지."""
+
+    def test_zhipuai_counted_in_backends(self):
+        """`backend`='zhipuai' 가 backends Counter 에 누락 없이 집계되어야 한다."""
+        with _IsolatedLog():
+            for _ in range(4):
+                telemetry.log_turn({"backend": "zhipuai", "llm_ms": 100.0})
+            telemetry.log_turn({"backend": "claude", "llm_ms": 50.0})
+            s = telemetry.summarize()
+        self.assertEqual(s["backends"].get("zhipuai"), 4)
+        self.assertEqual(s["backends"].get("claude"), 1)
+        self.assertEqual(s["total"], 5)
+
+    def test_zhipuai_keyset_matches_other_backends(self):
+        """zhipuai 만 있는 경로의 summarize 키셋이 빈 경로와 동등해야 한다 (사이클 #4 P1 패턴 유지)."""
+        with _IsolatedLog():
+            empty_keys = set(telemetry.summarize().keys())
+        with _IsolatedLog():
+            telemetry.log_turn({"backend": "zhipuai", "llm_ms": 200.0, "input_channel": "text"})
+            zhipuai_keys = set(telemetry.summarize().keys())
+        self.assertEqual(empty_keys, zhipuai_keys,
+                         f"키셋 불일치: 누락={empty_keys - zhipuai_keys}, 추가={zhipuai_keys - empty_keys}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
