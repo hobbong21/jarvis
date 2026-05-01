@@ -665,5 +665,127 @@ class Cycle7SemanticIndexTests(unittest.TestCase):
             os.unlink(tmp.name)
 
 
+class Cycle9PillarTests(unittest.TestCase):
+    """사이클 #9 — 3-Pillar (voice/vision/action) 메트릭 회귀."""
+
+    def test_pillars_in_summarize_keyset_empty_and_nonempty(self):
+        """빈/비빈 둘 다 'pillars' 키 + 동일 하위 키셋."""
+        with _IsolatedLog():
+            empty = telemetry.summarize()
+            self.assertIn("pillars", empty)
+            for p in ("voice", "vision", "action"):
+                self.assertIn(p, empty["pillars"])
+                self.assertEqual(
+                    set(empty["pillars"][p].keys()),
+                    {"score", "samples", "metrics", "notes"},
+                )
+            telemetry.log_turn({
+                "backend": "openai", "input_channel": "audio",
+                "fanout_ms": 100.0, "llm_ms": 200.0, "tts_ms": 300.0,
+                "total_ms": 600.0, "tts_ok": True, "vision_used": True,
+                "tool_count": 1, "tool_ms": 250.0,
+            })
+            non_empty = telemetry.summarize()
+            self.assertIn("pillars", non_empty)
+            for p in ("voice", "vision", "action"):
+                self.assertEqual(
+                    set(non_empty["pillars"][p].keys()),
+                    set(empty["pillars"][p].keys()),
+                    f"pillars.{p} 빈/비빈 키셋 불일치",
+                )
+
+    def test_voice_pillar_audio_ratio_drives_score(self):
+        """audio 비율이 100% 이고 빈전사·TTS차단 0% 면 voice score = 100."""
+        with _IsolatedLog():
+            for _ in range(5):
+                telemetry.log_turn({
+                    "backend": "openai", "input_channel": "audio",
+                    "tts_ok": True, "fanout_ms": 100.0,
+                    "llm_ms": 100.0, "total_ms": 300.0,
+                })
+            voice = telemetry.summarize()["pillars"]["voice"]
+            self.assertEqual(voice["samples"], 5)
+            self.assertAlmostEqual(voice["score"], 100.0, places=1)
+            self.assertEqual(voice["metrics"]["audio_ratio"], 1.0)
+
+    def test_voice_pillar_text_only_low_score_with_note(self):
+        """텍스트 입력만 5턴이면 audio_ratio=0 → 음성 점수 매우 낮음 + 권장 note."""
+        with _IsolatedLog():
+            for _ in range(5):
+                telemetry.log_turn({
+                    "backend": "openai", "input_channel": "text",
+                    "tts_ok": True, "total_ms": 300.0,
+                })
+            voice = telemetry.summarize()["pillars"]["voice"]
+            self.assertLess(voice["score"], 50.0)
+            joined = " ".join(voice["notes"])
+            self.assertIn("음성 입력 비율", joined)
+
+    def test_vision_pillar_zero_use_low_score(self):
+        """vision_used=False 만 5턴 → vision_use_ratio=0, score 낮음, 권장 note."""
+        with _IsolatedLog():
+            for _ in range(5):
+                telemetry.log_turn({
+                    "backend": "openai", "input_channel": "text",
+                    "tts_ok": True, "total_ms": 300.0, "vision_used": False,
+                })
+            vis = telemetry.summarize()["pillars"]["vision"]
+            self.assertEqual(vis["metrics"]["vision_use_ratio"], 0.0)
+            self.assertLess(vis["score"], 50.0)
+            joined = " ".join(vis["notes"])
+            self.assertTrue("비전 호출" in joined or "카메라" in joined)
+
+    def test_action_pillar_fast_total_ms_high_score(self):
+        """total_ms 가 일관되게 < 2000ms 이고 에러 0 → action score ≥ 90."""
+        with _IsolatedLog():
+            for _ in range(5):
+                telemetry.log_turn({
+                    "backend": "openai", "input_channel": "text",
+                    "tts_ok": True, "total_ms": 800.0, "tool_count": 1,
+                    "tool_ms": 300.0,
+                })
+            act = telemetry.summarize()["pillars"]["action"]
+            self.assertGreaterEqual(act["score"], 90.0)
+            self.assertEqual(act["metrics"]["tool_use_ratio"], 1.0)
+
+    def test_action_pillar_slow_total_ms_low_score(self):
+        """total_ms 가 일관되게 > 8000ms → action speed_score=0, 종합 score 낮음."""
+        with _IsolatedLog():
+            for _ in range(5):
+                telemetry.log_turn({
+                    "backend": "openai", "input_channel": "text",
+                    "tts_ok": True, "total_ms": 9500.0,
+                })
+            act = telemetry.summarize()["pillars"]["action"]
+            self.assertLess(act["score"], 30.0)
+            joined = " ".join(act["notes"])
+            self.assertIn("즉각성", joined)
+
+    def test_pillar_score_none_when_under_3_samples(self):
+        """3턴 미만이면 score=None (UI 가 '측정중' 표시)."""
+        with _IsolatedLog():
+            telemetry.log_turn({
+                "backend": "openai", "input_channel": "audio",
+                "tts_ok": True, "total_ms": 500.0, "vision_used": True,
+            })
+            p = telemetry.summarize()["pillars"]
+            for name in ("voice", "vision", "action"):
+                self.assertIsNone(p[name]["score"], f"{name} score should be None")
+                self.assertIn("측정 표본 부족", " ".join(p[name]["notes"]))
+
+    def test_pillar_notes_propagate_to_insights(self):
+        """pillar notes 가 summarize.insights 에 [pillar] 접두로 승격되어야."""
+        with _IsolatedLog():
+            for _ in range(10):
+                telemetry.log_turn({
+                    "backend": "openai", "input_channel": "text",
+                    "tts_ok": True, "total_ms": 9500.0,
+                })
+            s = telemetry.summarize()
+            tags = [m["message"] for m in s["insights"] if m["message"].startswith("[")]
+            self.assertTrue(any(t.startswith("[action]") for t in tags),
+                            f"action pillar 권장이 insights 로 승격 안 됨: {tags}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

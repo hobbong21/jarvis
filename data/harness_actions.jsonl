@@ -1,0 +1,2 @@
+{"name":"silence_duration","category":"voice","from":"1.50s","to":"1.70s","source":"smoke","op":"apply","ts":1777633717.7651434}
+{"name":"silence_duration","category":"voice","from":"1.70s","to":"1.50s","source":"dashboard","op":"revert","ts":1777633717.9697356}

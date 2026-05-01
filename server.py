@@ -143,8 +143,31 @@ class UserSession:
         # memory.get_or_start_conversation 으로 재평가 — idle 후 자동 전환.
         self._conv_id_lock = threading.Lock()
 
+        # 사이클 #9 — 3-Pillar 텔레메트리: 현재 turn 의 도구/비전 카운터.
+        # process_prompt / handle_audio 진입 시 초기화, _on_tool_event(start) 마다 +1,
+        # turn 종료 시 turn_meta 에 합산해 telemetry.log_turn 으로 흘려보낸다.
+        self._turn_tool_count = 0
+        self._turn_vision_used = False
+        self._turn_tool_t0: Optional[float] = None
+        self._turn_tool_total_ms: float = 0.0
+
         if cfg.llm_backend == "claude" and cfg.anthropic_api_key:
             self._attach_tools()
+
+    def reset_turn_counters(self) -> None:
+        """매 turn 진입 시 호출 — 도구/비전 카운터 초기화."""
+        self._turn_tool_count = 0
+        self._turn_vision_used = False
+        self._turn_tool_t0 = None
+        self._turn_tool_total_ms = 0.0
+
+    def turn_pillar_meta(self) -> dict:
+        """turn_meta 에 머지할 3-pillar 카운터 스냅샷."""
+        return {
+            "tool_count": int(self._turn_tool_count),
+            "tool_ms": float(self._turn_tool_total_ms),
+            "vision_used": bool(self._turn_vision_used),
+        }
 
     def get_conv_id(self) -> int:
         """현재 대화 conversation id. 30분 idle 후 자동 재시작.
@@ -177,6 +200,20 @@ class UserSession:
             asyncio.run_coroutine_threadsafe(self.on_event(msg), self.loop)
 
     def _on_tool_event(self, tool_name: str, status: str):
+        # 사이클 #9 — turn 단위 도구 카운터 (3-pillar telemetry).
+        # status: 'start' / 'end'. ToolExecutor 가 매 호출마다 두 번 발화.
+        try:
+            if status == "start":
+                self._turn_tool_count += 1
+                self._turn_tool_t0 = time.monotonic()
+                # 카메라 기반 비전 도구 — identify_person 도 카메라 프레임 사용.
+                if tool_name in ("see", "observe_action", "identify_person"):
+                    self._turn_vision_used = True
+            elif status == "end" and self._turn_tool_t0 is not None:
+                self._turn_tool_total_ms += (time.monotonic() - self._turn_tool_t0) * 1000.0
+                self._turn_tool_t0 = None
+        except Exception:
+            traceback.print_exc()
         self._emit({"type": "tool_event", "tool": tool_name, "status": status})
 
     def _on_timer(self, label: str):
@@ -360,6 +397,9 @@ async def websocket_endpoint(ws: WebSocket):
         if cfg.llm_backend == "compare" and log_user:
             await respond_compare(prompt)
             return
+
+        # 사이클 #9 — 3-Pillar telemetry: 매 turn 진입 시 도구/비전 카운터 초기화.
+        session.reset_turn_counters()
 
         await emit(type="state", state="thinking")
         await emit(type="emotion", emotion="thinking")
@@ -588,6 +628,7 @@ async def websocket_endpoint(ws: WebSocket):
             await emit(type="emotion", emotion="neutral")
             try:
                 turn_meta["total_ms"] = (time.monotonic() - t_turn_start) * 1000.0
+                turn_meta.update(session.turn_pillar_meta())  # 사이클 #9
                 telemetry.log_turn(turn_meta)
             except Exception:
                 traceback.print_exc()
@@ -597,6 +638,8 @@ async def websocket_endpoint(ws: WebSocket):
 
         사이클 #3 #4: 텔레메트리 기록 추가 (backend="compare", source 별 reply_len 합산).
         """
+        # 사이클 #9 — 3-Pillar telemetry: turn 진입 시 카운터 초기화.
+        session.reset_turn_counters()
         await emit(type="state", state="thinking")
         await emit(type="emotion", emotion="thinking")
         await emit(type="message", role="user", text=prompt)
@@ -717,6 +760,7 @@ async def websocket_endpoint(ws: WebSocket):
             await emit(type="state", state="idle")
             try:
                 turn_meta["total_ms"] = (time.monotonic() - t_turn_start) * 1000.0
+                turn_meta.update(session.turn_pillar_meta())  # 사이클 #9
                 telemetry.log_turn(turn_meta)
             except Exception:
                 traceback.print_exc()
@@ -984,6 +1028,9 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
     await emit(type="state", state="listening")
     await emit(type="emotion", emotion="listening")
 
+    # 사이클 #9 — 3-Pillar telemetry: 음성 turn 진입 시 카운터 초기화.
+    session.reset_turn_counters()
+
     # 임시 파일에 저장 후 Whisper 에 경로 전달
     with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as f:
         f.write(payload)
@@ -1092,6 +1139,7 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
         await emit(type="state", state="idle")
         await emit(type="emotion", emotion="neutral")
         turn_meta["total_ms"] = (time.monotonic() - t_turn_start) * 1000.0
+        turn_meta.update(session.turn_pillar_meta())  # 사이클 #9
         try:
             telemetry.log_turn(turn_meta)
         except Exception as _e:
@@ -1203,6 +1251,103 @@ async def harness_evolve_endpoint(
     )
     # markdown 본문은 응답에 포함하되, 파일 경로도 안내
     return result
+
+
+# ============================================================
+# 사이클 #9 — Harness 자가 개선 액션 API
+# ============================================================
+# 모두 _harness_auth_check 동일 게이트(token 또는 loopback) 적용.
+
+@app.get("/api/harness/actions")
+async def harness_actions_list(
+    request: Request,
+    token: Optional[str] = None,
+):
+    """현재 적용 가능한 액션 목록 + 권장값.
+
+    응답: {actions: [...], recommendations: [...], summary_total: N}
+    actions[*] = list_actions() — name/label/category/bounds/current/can_revert.
+    recommendations[*] = recommend_actions(summary).
+    """
+    _harness_auth_check(request, token)
+    import harness_actions
+    summary = telemetry.summarize()
+    return {
+        "actions": harness_actions.list_actions(),
+        "recommendations": harness_actions.recommend_actions(summary),
+        "summary_total": summary.get("total", 0),
+    }
+
+
+@app.post("/api/harness/actions/apply")
+async def harness_actions_apply(
+    request: Request,
+    token: Optional[str] = None,
+):
+    """액션 적용. body: {name, value, source?='dashboard'}."""
+    _harness_auth_check(request, token)
+    from fastapi import HTTPException
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    name = body.get("name")
+    if not isinstance(name, str) or not name:
+        raise HTTPException(status_code=400, detail="missing 'name'")
+    if "value" not in body:
+        raise HTTPException(status_code=400, detail="missing 'value'")
+    source = body.get("source") if isinstance(body.get("source"), str) else "dashboard"
+    import harness_actions
+    try:
+        entry = harness_actions.apply_action(name, body["value"], source=source)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown action: {name}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "entry": entry, "actions": harness_actions.list_actions()}
+
+
+@app.post("/api/harness/actions/revert")
+async def harness_actions_revert(
+    request: Request,
+    token: Optional[str] = None,
+):
+    """직전 적용 한 단계 되돌리기. body: {name, source?='dashboard'}."""
+    _harness_auth_check(request, token)
+    from fastapi import HTTPException
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    name = body.get("name")
+    if not isinstance(name, str) or not name:
+        raise HTTPException(status_code=400, detail="missing 'name'")
+    source = body.get("source") if isinstance(body.get("source"), str) else "dashboard"
+    import harness_actions
+    try:
+        entry = harness_actions.revert_action(name, source=source)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown action: {name}")
+    if entry is None:
+        return {"ok": False, "reason": "no_previous_value", "actions": harness_actions.list_actions()}
+    return {"ok": True, "entry": entry, "actions": harness_actions.list_actions()}
+
+
+@app.get("/api/harness/actions/audit")
+async def harness_actions_audit(
+    request: Request,
+    token: Optional[str] = None,
+    limit: Optional[int] = 50,
+):
+    """최근 감사 로그 N개 (apply/revert 모두)."""
+    _harness_auth_check(request, token)
+    import harness_actions
+    n = max(1, min(500, int(limit or 50)))
+    return {"audit": harness_actions.recent_audit(n)}
 
 
 @app.post("/api/harness/evolve/export")

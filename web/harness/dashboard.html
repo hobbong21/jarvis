@@ -54,6 +54,39 @@ pre{background:#0a0d12;padding:12px;border-radius:6px;overflow:auto;font-size:12
 .insight.info .badge{background:rgba(77,208,225,0.18);color:var(--accent)}
 .insight.warn .badge{background:rgba(255,183,77,0.18);color:var(--warn)}
 .insight.err .badge{background:rgba(229,115,115,0.18);color:var(--err)}
+/* 사이클 #9 — 3-Pillar 점수 카드 + 액션 UI */
+.pillars{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:18px}
+.pillar{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px}
+.pillar .head{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.pillar .icon{font-size:18px}
+.pillar .name{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em}
+.pillar .score{font-size:28px;font-weight:600}
+.pillar .samples{font-size:11px;color:var(--muted);margin-left:auto}
+.pillar .barbar{height:8px}
+.pillar.ok .score{color:var(--ok)} .pillar.ok .barbar>div{background:var(--ok)}
+.pillar.warn .score{color:var(--warn)} .pillar.warn .barbar>div{background:var(--warn)}
+.pillar.err .score{color:var(--err)} .pillar.err .barbar>div{background:var(--err)}
+.pillar.idle .score{color:var(--muted)}
+.pillar dl{display:grid;grid-template-columns:1fr auto;gap:4px 12px;margin:10px 0 0;font-size:12px}
+.pillar dt{color:var(--muted)} .pillar dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.action-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:6px}
+.action-row .meta{display:flex;flex-direction:column;gap:2px}
+.action-row .label{font-weight:500;font-size:13px}
+.action-row .desc{font-size:11px;color:var(--muted)}
+.action-row .controls{display:flex;gap:6px;align-items:center}
+.action-row input.value{width:100px;padding:4px 8px;background:#1c2128;border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-variant-numeric:tabular-nums;text-align:right}
+.action-row button{padding:4px 10px;background:#1f2937;border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;cursor:pointer}
+.action-row button.primary{background:var(--accent);color:#0b0d10;font-weight:500}
+.action-row button:disabled{opacity:0.5;cursor:not-allowed}
+.action-row button:hover:not(:disabled){background:#2c3849}
+.recommendation{background:rgba(255,183,77,0.08);border:1px solid rgba(255,183,77,0.35);border-radius:6px;padding:10px 12px;margin-bottom:6px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}
+.recommendation .reason{font-size:12px;color:var(--text)}
+.recommendation .change{font-size:11px;color:var(--muted);margin-top:2px}
+.recommendation button{padding:4px 10px;background:var(--warn);color:#0b0d10;border:none;border-radius:4px;font-size:12px;cursor:pointer;font-weight:500}
+.audit-row{font-size:12px;padding:6px 10px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:auto 1fr auto;gap:10px}
+.audit-row:last-child{border-bottom:none}
+.audit-row .ts{color:var(--muted);font-variant-numeric:tabular-nums}
+.audit-row .op-apply{color:var(--accent)} .audit-row .op-revert{color:var(--warn)}
 </style>
 </head>
 <body>
@@ -69,6 +102,20 @@ pre{background:#0a0d12;padding:12px;border-radius:6px;overflow:auto;font-size:12
 </div>
 
 <div class="cards" id="cards"></div>
+
+<h2>SARVIS 3-Pillar 점수 <span style="font-weight:400;color:var(--muted);font-size:11px">(음성 / 비전 / 즉각 실행 — 사이클 #9)</span></h2>
+<div class="pillars" id="pillars"></div>
+
+<h2>자가 개선 권장 <span style="font-weight:400;color:var(--muted);font-size:11px">(즉시 적용 가능 — 1 단계 되돌리기 지원)</span></h2>
+<div id="recommendations"></div>
+<details style="margin-top:6px">
+  <summary style="cursor:pointer;color:var(--muted);font-size:12px;padding:6px">수동 튜닝 (전체 액션 ▾)</summary>
+  <div id="actionsList" style="margin-top:8px"></div>
+</details>
+<details style="margin-top:6px">
+  <summary style="cursor:pointer;color:var(--muted);font-size:12px;padding:6px">감사 로그 (적용/되돌리기 이력 ▾)</summary>
+  <div id="auditList" style="margin-top:8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;overflow:hidden"></div>
+</details>
 
 <h2>SARVIS 자기 개선 인사이트 <span style="font-weight:400;color:var(--muted);font-size:11px">(자동 분석 — 5턴 이상 누적된 백엔드 기준)</span></h2>
 <div id="insights" class="insights"></div>
@@ -254,6 +301,7 @@ function renderBackendCompare(per){
 
 function applySummary(s){
   renderCards(s);
+  renderPillars(s.pillars);  // 사이클 #9
   renderInsights(s.insights);
   renderBackendCompare(s.per_backend);
   renderTable('backendTable', s.backends, s.total);
@@ -261,6 +309,180 @@ function applySummary(s){
   renderTable('channelTable', s.input_channels, s.total);
   renderTable('ttsTable', s.tts_reasons, s.total);
   renderLatency(s.latency);
+}
+
+// ── 사이클 #9 — 3-Pillar 점수 카드 ─────────────────────────────
+const PILLAR_META = {
+  voice:  {icon: '🎙️', name: '음성 (Voice)'},
+  vision: {icon: '👁️', name: '비전 (Vision)'},
+  action: {icon: '⚡', name: '즉각 실행 (Action)'},
+};
+const PILLAR_METRIC_LABELS = {
+  audio_ratio: '오디오 비율',
+  empty_transcription_rate: '빈 전사율',
+  tts_failure_rate: 'TTS 차단율',
+  p50_fanout_ms: 'p50 fan-out',
+  audio_turns: '오디오 턴',
+  total_turns: '전체 턴',
+  vision_use_ratio: '비전 호출율',
+  p50_vision_tool_ms: 'p50 비전 도구',
+  vision_turns: '비전 턴',
+  p50_total_ms: 'p50 응답',
+  p95_total_ms: 'p95 응답',
+  tool_use_ratio: '도구 호출율',
+  error_rate: '에러율',
+};
+function fmtPillarMetric(k, v){
+  if (v == null) return '-';
+  if (k.endsWith('_ratio') || k.endsWith('_rate')) return (v*100).toFixed(1) + '%';
+  if (k.endsWith('_ms')) return Math.round(v) + 'ms';
+  return String(v);
+}
+function pillarClass(score){
+  if (score == null) return 'idle';
+  if (score >= 80) return 'ok';
+  if (score >= 50) return 'warn';
+  return 'err';
+}
+function renderPillars(pillars){
+  const c = $('pillars');
+  if (!pillars) { c.innerHTML = ''; return; }
+  c.innerHTML = ['voice','vision','action'].map(name => {
+    const p = pillars[name] || {score: null, samples: 0, metrics: {}, notes: []};
+    const meta = PILLAR_META[name];
+    const cls = pillarClass(p.score);
+    const scoreText = p.score == null ? '측정중' : Math.round(p.score);
+    const barW = p.score == null ? 0 : Math.max(0, Math.min(100, p.score));
+    const metricRows = Object.entries(p.metrics || {}).map(([k,v]) =>
+      `<dt>${escapeHtml(PILLAR_METRIC_LABELS[k] || k)}</dt><dd>${escapeHtml(fmtPillarMetric(k,v))}</dd>`
+    ).join('');
+    const notes = (p.notes || []).map(n => `<div style="font-size:11px;color:var(--muted);margin-top:4px">· ${escapeHtml(n)}</div>`).join('');
+    return `<div class="pillar ${cls}">
+      <div class="head">
+        <span class="icon">${meta.icon}</span>
+        <span class="name">${escapeHtml(meta.name)}</span>
+        <span class="samples">샘플 ${p.samples|0}</span>
+      </div>
+      <div class="score">${scoreText}<span style="font-size:14px;color:var(--muted);font-weight:400">${p.score==null?'':' / 100'}</span></div>
+      <div class="barbar"><div style="width:${barW}%"></div></div>
+      <dl>${metricRows}</dl>
+      ${notes}
+    </div>`;
+  }).join('');
+}
+
+// ── 사이클 #9 — 액션 / 권장 / 감사 로그 ────────────────────────
+let actionsState = [];
+
+async function refreshActions(){
+  try {
+    const r = await fetchJSON('/api/harness/actions');
+    actionsState = r.actions || [];
+    renderActions(r.actions || []);
+    renderRecommendations(r.recommendations || []);
+  } catch(e){
+    $('actionsList').innerHTML = `<div style="color:var(--err);font-size:12px;padding:8px">액션 조회 실패: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderActions(actions){
+  const c = $('actionsList');
+  if (!actions.length){
+    c.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">액션 없음</div>';
+    return;
+  }
+  c.innerHTML = actions.map(a => `
+    <div class="action-row" data-name="${escapeHtml(a.name)}">
+      <div class="meta">
+        <div class="label">${escapeHtml(a.label)} <span style="font-size:11px;color:var(--muted)">[${escapeHtml(a.category)}]</span></div>
+        <div class="desc">${escapeHtml(a.description)} · 현재: <strong>${escapeHtml(a.current)}</strong> · 범위: ${a.bounds[0]}~${a.bounds[1]}</div>
+      </div>
+      <div class="controls">
+        <input class="value" type="text" value="${escapeHtml(a.current)}" placeholder="값">
+        <button class="primary" data-act="apply">적용</button>
+        <button data-act="revert" ${a.can_revert?'':'disabled'}>되돌리기</button>
+      </div>
+    </div>
+  `).join('');
+  c.querySelectorAll('.action-row').forEach(row => {
+    const name = row.dataset.name;
+    row.querySelector('[data-act="apply"]').addEventListener('click', () => {
+      const v = row.querySelector('input.value').value.trim();
+      applyActionCall(name, v);
+    });
+    row.querySelector('[data-act="revert"]').addEventListener('click', () => {
+      revertActionCall(name);
+    });
+  });
+}
+
+function renderRecommendations(recs){
+  const c = $('recommendations');
+  if (!recs || !recs.length){
+    c.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">현재 권장 액션 없음 — 메트릭이 정상 범위에 있거나 표본이 부족합니다.</div>';
+    return;
+  }
+  c.innerHTML = recs.map(r => `
+    <div class="recommendation">
+      <div>
+        <div class="reason">[${escapeHtml(r.category)}] ${escapeHtml(r.reason)}</div>
+        <div class="change">${escapeHtml(r.name)}: <strong>${escapeHtml(r.current)}</strong> → <strong>${escapeHtml(r.suggested_str || String(r.suggested))}</strong></div>
+      </div>
+      <button data-name="${escapeHtml(r.name)}" data-value="${escapeHtml(String(r.suggested))}">권장값 적용</button>
+    </div>
+  `).join('');
+  c.querySelectorAll('button').forEach(b => {
+    b.addEventListener('click', () => applyActionCall(b.dataset.name, b.dataset.value, 'recommendation'));
+  });
+}
+
+async function applyActionCall(name, value, source){
+  try {
+    await fetchJSON('/api/harness/actions/apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, value, source: source || 'dashboard'}),
+    });
+    await refreshActions();
+    refreshAudit();
+  } catch(e){
+    alert('적용 실패: ' + e.message);
+  }
+}
+
+async function revertActionCall(name){
+  try {
+    await fetchJSON('/api/harness/actions/revert', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, source: 'dashboard'}),
+    });
+    await refreshActions();
+    refreshAudit();
+  } catch(e){
+    alert('되돌리기 실패: ' + e.message);
+  }
+}
+
+async function refreshAudit(){
+  try {
+    const r = await fetchJSON('/api/harness/actions/audit?limit=20');
+    const list = r.audit || [];
+    const c = $('auditList');
+    if (!list.length){
+      c.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:10px">감사 로그 없음</div>';
+      return;
+    }
+    c.innerHTML = list.slice().reverse().map(e => `
+      <div class="audit-row">
+        <span class="ts">${fmtTs(e.ts)}</span>
+        <span><strong>${escapeHtml(e.name)}</strong> [${escapeHtml(e.category||'-')}] ${escapeHtml(e.from||'')} → <strong>${escapeHtml(e.to||'')}</strong> (${escapeHtml(e.source||'-')})</span>
+        <span class="op-${escapeHtml(e.op||'')}">${escapeHtml(e.op||'')}</span>
+      </div>
+    `).join('');
+  } catch(e){
+    $('auditList').innerHTML = `<div style="color:var(--err);font-size:12px;padding:10px">감사 로그 조회 실패: ${escapeHtml(e.message)}</div>`;
+  }
 }
 
 function pushTurn(meta){
@@ -421,6 +643,10 @@ $('token').addEventListener('change', () => {
 
 renderStream();
 connectWS();
+// 사이클 #9 — 액션/감사 초기 로드 + 30초 주기 갱신.
+refreshActions();
+refreshAudit();
+setInterval(() => { refreshActions(); refreshAudit(); }, 30000);
 </script>
 </body>
 </html>
