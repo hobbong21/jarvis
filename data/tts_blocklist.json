@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "description": "EdgeTTS 합성 직전 차단할 패턴. case-insensitive 부분 일치.",
+  "phrases": [
+    "AKIA",
+    "BEGIN PRIVATE KEY",
+    "BEGIN RSA PRIVATE KEY",
+    "BEGIN OPENSSH PRIVATE KEY",
+    "ssh-rsa AAAA",
+    "ssh-ed25519 AAAA",
+    "Bearer ey",
+    "sk-proj-",
+    "sk-ant-",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "xoxb-",
+    "xoxp-",
+    "AIza"
+  ]
+}

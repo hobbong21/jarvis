@@ -42,13 +42,21 @@ SARVIS uses **[Harness](harness/README.md)** (a Claude Code Team-Architecture Fa
 
 **Target composition** (per Harness Phase 2): `Supervisor[Pipeline(Fan-out → Expert-Pool → Generate-Verify)]` plus `Hierarchical Delegation` for development.
 
-**Current implementation status**:
-- ✅ **Supervisor + Pipeline + Hierarchical** are operational (`brain.py`, `.claude/agents/`).
-- 🟡 **Expert Pool** — manual backend switching works; automatic cross-provider fallback is not yet implemented (today: `_friendly_error()` shows Korean guidance pointing to alternative-backend buttons).
-- 🟡 **Fan-out / Fan-in** — emotion / face / memory are each callable but a real parallel fan-out scheduler does not exist; calls happen sequentially when needed.
-- ⏳ **Generate-Verify** — `tts-verifier` skill exists as a spec only; `verify_tts_candidate()` is not yet wired into `audio_io.py`.
+**Current implementation status** (cycle #2 complete, 2026-05-01):
+- ✅ **Supervisor + Pipeline + Hierarchical** — `brain.py`, `.claude/agents/`.
+- ✅ **Expert Pool** — `Brain.think_stream_with_fallback()` automatically retries the next available backend on failure and emits a `backend_fallback` WS event so the user is informed transparently. Manual switch buttons remain available as the last resort.
+- ✅ **Fan-out / Fan-in** — `analysis.parallel_analyze()` runs intent / emotion-hint / face-context / memory-hint concurrently via `asyncio.gather` (200ms per-task timeout). Result is merged into the LLM context before `think_stream`.
+- ✅ **Generate-Verify** — `tts_verifier.verify_tts_candidate()` checks length / Korean ratio / blocklist / control chars + auto-sanitizes. Called by `audio_io.synthesize_bytes_verified()`. Blocked candidates trigger a `tts_blocked` WS event (text still rendered).
+- ✅ **Telemetry & Feedback Loop** — `telemetry.log_turn()` writes per-turn metadata (backend, fallback chain, latencies, intent, TTS result) to `data/harness_telemetry.jsonl`. `GET /api/harness/telemetry` returns aggregate stats. PII (utterance bodies) is never persisted — only lengths.
 
-Open work items are tracked in `harness/sarvis/validation.md`.
+Cycle #2 added these modules:
+- `tts_verifier.py` + `data/tts_blocklist.json`
+- `analysis.py`
+- `telemetry.py`
+- New API: `GET /api/harness/telemetry`
+- New WS events: `backend_fallback`, `tts_blocked`
+
+Remaining work (cycle #3 candidates) is tracked in `harness/sarvis/validation.md` §7.
 
 Key locations:
 - `harness/` — Original Harness plugin assets (READMEs EN/KO/JA, CHANGELOG, landing page source, banner images, plus `harness/sarvis/` SARVIS-specific Phase outputs). **Repo-internal — not publicly served.**

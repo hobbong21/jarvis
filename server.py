@@ -19,7 +19,7 @@ import traceback
 from pathlib import Path
 from typing import Dict, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -29,6 +29,10 @@ from config import cfg
 from emotion import Emotion
 from tools import ToolExecutor
 from vision import FaceRegistry, WebVision
+
+# Harness Phase 4 — Fan-out 분석 + Evolution 텔레메트리
+from analysis import parallel_analyze, analysis_to_context
+import telemetry
 
 # ============================================================
 # 전역 — 서버를 즉시 시작하고 Whisper 는 백그라운드에서 로드
@@ -268,18 +272,55 @@ async def websocket_endpoint(ws: WebSocket):
 
         await emit(type="state", state="thinking")
         await emit(type="emotion", emotion="thinking")
+
+        # ── Harness 텔레메트리: 턴 메타 초기화 ───────────────────────
+        turn_meta = {
+            "turn_id": telemetry.new_turn_id(),
+            "ts": time.time(),
+            "backend": cfg.llm_backend,
+            "fallback_used": False,
+            "fallback_chain": [cfg.llm_backend],
+            "intent": None,
+            "emotion": None,
+            "tools_used": 0,
+            "fanout_ms": 0.0,
+            "llm_ms": 0.0,
+            "tts_ms": 0.0,
+            "tts_ok": None,
+            "tts_reason": None,
+            "prompt_len": len(prompt or ""),
+            "reply_len": 0,
+        }
+
         try:
-            ctx = build_context()
+            # ── Phase: Fan-out/Fan-in 사전 분석 ─────────────────────
+            base_ctx = build_context()
+            analysis = await parallel_analyze(prompt, session)
+            turn_meta["fanout_ms"] = analysis.get("ms", 0.0)
+            turn_meta["intent"] = analysis.get("intent")
+
+            extra_ctx = analysis_to_context(analysis)
+            ctx = ", ".join(p for p in (base_ctx, extra_ctx) if p)
+
             if log_user:
                 await emit(type="message", role="user", text=prompt)
+
+            # 폴백 알림 큐 — 메인 루프에서만 emit (스레드 안전)
+            fallback_events = []
+            def on_fallback(from_b, to_b, reason):
+                fallback_events.append((from_b, to_b, reason))
 
             # 스트리밍 브릿지 (sync generator → async WebSocket)
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
+            t_llm_start = time.monotonic()
 
             def run_stream():
                 try:
-                    for item in session.brain.think_stream(prompt, ctx):
+                    gen = session.brain.think_stream_with_fallback(
+                        prompt, ctx, on_fallback=on_fallback,
+                    )
+                    for item in gen:
                         loop.call_soon_threadsafe(queue.put_nowait, item)
                 except Exception as exc:
                     traceback.print_exc()
@@ -295,31 +336,68 @@ async def websocket_endpoint(ws: WebSocket):
             await emit(type="stream_start")
             final_text = ""
             final_emotion = "neutral"
+            announced_fallbacks = 0
 
             while True:
                 item = await queue.get()
                 if item is None:
                     break
+
+                # 새 폴백 이벤트가 있으면 사용자에게 알림
+                while announced_fallbacks < len(fallback_events):
+                    f_from, f_to, _r = fallback_events[announced_fallbacks]
+                    announced_fallbacks += 1
+                    turn_meta["fallback_used"] = True
+                    if f_to not in turn_meta["fallback_chain"]:
+                        turn_meta["fallback_chain"].append(f_to)
+                    await emit(
+                        type="backend_fallback",
+                        from_backend=f_from,
+                        to_backend=f_to,
+                        message=f"⤴ {f_from.upper()} 응답 실패 — {f_to.upper()} 로 자동 전환",
+                    )
+
                 chunk, emo, body = item
                 if emo is not None:
-                    # 스트림 종료 신호
                     final_text = body or ""
                     final_emotion = emo.value
                     await emit(type="stream_end", text=final_text, emotion=final_emotion)
                 elif chunk:
                     await emit(type="stream_chunk", text=chunk)
 
+            turn_meta["llm_ms"] = (time.monotonic() - t_llm_start) * 1000.0
+            turn_meta["emotion"] = final_emotion
+            turn_meta["reply_len"] = len(final_text)
+
             await emit(type="emotion", emotion=final_emotion)
             await emit(type="state", state="speaking")
-            audio = await asyncio.to_thread(TTS.synthesize_bytes, final_text)
-            if audio:
-                await emit_bytes(audio)
+
+            # ── Generate-Verify TTS 게이트 ──────────────────────────
+            t_tts_start = time.monotonic()
+            tts_result = await asyncio.to_thread(TTS.synthesize_bytes_verified, final_text)
+            turn_meta["tts_ms"] = (time.monotonic() - t_tts_start) * 1000.0
+            turn_meta["tts_ok"] = tts_result["ok"]
+            turn_meta["tts_reason"] = tts_result["reason"]
+
+            if tts_result["audio"]:
+                await emit_bytes(tts_result["audio"])
+            elif not tts_result["ok"]:
+                # 합성 차단 — 사용자에게 투명하게 알림 (텍스트는 이미 표시됨)
+                await emit(
+                    type="tts_blocked",
+                    reason=tts_result["reason"],
+                    message="음성 합성이 안전 검증에서 차단되었습니다 (텍스트만 표시).",
+                )
         except Exception as e:
             traceback.print_exc()
             await emit(type="error", message=str(e))
         finally:
             await emit(type="state", state="idle")
             await emit(type="emotion", emotion="neutral")
+            try:
+                telemetry.log_turn(turn_meta)
+            except Exception:
+                traceback.print_exc()
 
     async def respond_compare(prompt: str):
         """A/B 비교 모드 — Claude + OpenAI 동시 스트리밍, TTS 자동재생 안 함."""
@@ -560,9 +638,15 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
         await emit(type="emotion", emotion=emotion.value)
         await emit(type="state", state="speaking")
 
-        audio = await asyncio.to_thread(TTS.synthesize_bytes, reply)
-        if audio:
-            await emit_bytes(audio)
+        tts_result = await asyncio.to_thread(TTS.synthesize_bytes_verified, reply)
+        if tts_result["audio"]:
+            await emit_bytes(tts_result["audio"])
+        elif not tts_result["ok"]:
+            await emit(
+                type="tts_blocked",
+                reason=tts_result["reason"],
+                message="음성 합성이 안전 검증에서 차단되었습니다 (텍스트만 표시).",
+            )
     except Exception as e:
         traceback.print_exc()
         await emit(type="error", message=str(e))
@@ -586,6 +670,48 @@ async def health():
         "stt_ready": STT is not None,
         "connections": len(ACTIVE),
     }
+
+
+# ============================================================
+# Harness Evolution — 텔레메트리 요약 엔드포인트
+# ============================================================
+@app.get("/api/harness/telemetry")
+async def harness_telemetry_summary(
+    request: Request,
+    limit: Optional[int] = None,
+    token: Optional[str] = None,
+):
+    """Harness Evolution — 라우팅/지연/품질 집계. PII 없음.
+
+    /harness/* 는 정적 파일 마운트가 점유하므로 API 는 /api/harness/* 사용.
+
+    인증 (architect P2 피드백):
+      - HARNESS_TELEMETRY_TOKEN 환경변수가 설정된 경우: ?token=... 또는 Authorization: Bearer ... 일치 필요
+      - 미설정 시: 127.0.0.1 / ::1 (loopback) 만 허용 (개발 모드)
+    """
+    expected = os.environ.get("HARNESS_TELEMETRY_TOKEN", "").strip()
+
+    if expected:
+        # 토큰 모드: query param 또는 Bearer header
+        provided = token or ""
+        if not provided:
+            auth = request.headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                provided = auth[7:].strip()
+        if not secrets.compare_digest(provided, expected):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401, detail="invalid token")
+    else:
+        # 개발 모드: loopback 만
+        client_host = (request.client.host if request.client else "") or ""
+        if client_host not in ("127.0.0.1", "::1", "localhost"):
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=403,
+                detail="HARNESS_TELEMETRY_TOKEN 미설정 — loopback 외 접근 차단. 환경변수를 설정하세요.",
+            )
+
+    return telemetry.summarize(limit=limit)
 
 
 if __name__ == "__main__":

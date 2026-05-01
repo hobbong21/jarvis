@@ -233,15 +233,51 @@ class EdgeTTS:
         return path
 
     def synthesize_bytes(self, text: str) -> bytes:
-        """텍스트 → MP3 바이트 (웹 서버가 클라이언트에 푸시할 때 사용)."""
-        if not text or not text.strip():
-            return b""
-        path = self._synthesize(text)
+        """텍스트 → MP3 바이트. 검증 게이트 통과한 경우만 합성."""
+        result = self.synthesize_bytes_verified(text)
+        return result["audio"]
+
+    def synthesize_bytes_verified(self, text: str) -> dict:
+        """Generate-Verify 게이트 적용 합성.
+
+        반환:
+          audio   : bytes  — MP3 (실패 시 b"")
+          ok      : bool
+          reason  : str    — verifier slug ("ok"/"empty"/"too_long"/"blocklist:..." 등)
+          warnings: list[str]
+          length  : int    — 실제 합성에 사용된 텍스트 길이
+        """
+        from tts_verifier import verify_tts_candidate
+
+        verdict = verify_tts_candidate(text or "")
+        if not verdict["ok"]:
+            print(f"[TTS-Verify] 차단: {verdict['reason']} (len={len(text or '')})")
+            return {
+                "audio": b"",
+                "ok": False,
+                "reason": verdict["reason"],
+                "warnings": verdict.get("warnings", []),
+                "length": 0,
+            }
+
+        sanitized = verdict["sanitized"]
+        if verdict.get("warnings"):
+            print(f"[TTS-Verify] 경고와 함께 합성: {verdict['warnings']}")
+
+        path = self._synthesize(sanitized)
         try:
             with open(path, "rb") as f:
-                return f.read()
+                audio = f.read()
         finally:
             try:
                 os.unlink(path)
-            except Exception:
+            except OSError:
                 pass
+
+        return {
+            "audio": audio,
+            "ok": True,
+            "reason": "ok",
+            "warnings": verdict.get("warnings", []),
+            "length": len(sanitized),
+        }

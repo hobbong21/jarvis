@@ -13,17 +13,15 @@
 |-----|---------|------|------|
 | 메인 조율 | **Supervisor** | ✅ | `brain.py` 가 의도 분류 후 도구/응답을 분배. |
 | 핵심 경로 | **Pipeline** | ✅ | STT → 의도 분석 → LLM → TTS 는 코드상 단방향. |
-| 백엔드 선택 | **Expert Pool** | 🟡 | 사용자 명령으로 `SARVIS_BACKEND` 전환 가능. **자동 폴백은 미구현** — 백엔드 실패 시 친절 한국어 에러를 보여주고 사용자가 다른 백엔드 버튼을 누르도록 유도. |
-| 부가 분석 | **Fan-out / Fan-in** | 🟡 | 감정/얼굴/메모리는 각각 호출되지만, **명시적 병렬 fan-out 스케줄러는 없음** — 순차로 필요할 때 호출. |
-| TTS 직전 | **Generate-Verify** | ⏳ | `tts-verifier` 스킬은 명세만 존재. 실제 `verify_tts_candidate()` 함수 미구현. |
+| 백엔드 선택 | **Expert Pool** | ✅ | `Brain.think_stream_with_fallback()` — 1차 백엔드 실패 시 가용 백엔드로 자동 재시도. 사용자에게 `backend_fallback` WS 이벤트로 투명 알림. 친절 한국어 에러 + 수동 전환 버튼은 그대로 유지(체인 모두 실패 시). |
+| 부가 분석 | **Fan-out / Fan-in** | ✅ | `analysis.parallel_analyze()` — intent/emotion/face/memory 4개 분석을 `asyncio.gather` 로 동시 실행 (각 200ms 타임아웃). 결과는 LLM 컨텍스트에 합류. |
+| TTS 직전 | **Generate-Verify** | ✅ | `tts_verifier.verify_tts_candidate()` — 길이/한국어 비율/금칙어/제어문자 검증 + 자동 sanitize. 차단 시 `tts_blocked` WS 이벤트로 알림. `data/tts_blocklist.json` 사전 분리. |
+| 진화 관측 | **Telemetry & Feedback** | ✅ | `telemetry.log_turn()` — 턴별 메타(백엔드/폴백/지연/intent/TTS결과) JSONL 저장. `GET /api/harness/telemetry` 로 집계 조회. PII(본문) 미수집. |
 | 신규 기능 추가 (개발 시) | **Hierarchical Delegation** | ✅ | `architect` → 7개 leaf 에이전트 위임 트리는 본 저장소에 정의됨. |
 
-**목표 합성형**: `Supervisor[Pipeline(Fan-out/Fan-in → Expert-Pool → Generate-Verify)]`.
+**목표 합성형 (달성)**: `Supervisor[Pipeline(Fan-out/Fan-in → Expert-Pool → Generate-Verify)] + Telemetry feedback loop`.
 
-**현재 합성형**: `Supervisor[Pipeline]` + 수동 백엔드 전환 + 순차 부가 분석.
-
-목표 ↔ 현재의 차이는 향후 작업 항목이며, 본 문서 §5 와 `validation.md` 의 open
-items 에 추적된다.
+모든 핵심 패턴 ✅. 추가 개선 항목은 §5 와 `validation.md` 의 open items 참조.
 
 ## 2. 팀 구성도
 
@@ -63,7 +61,9 @@ items 에 추적된다.
 | `llm.router` | 백엔드 선택 + 호출 | 프롬프트 + 컨텍스트 | LLM 응답 | `brain.py` 내부 |
 | `tools.executor` | 도구 호출 (RAG, web 등) | 함수명 + args | 결과 JSON | `tools.py` |
 | `composer.tts` | 응답 합성 + TTS 변환 | 텍스트 | 오디오 스트림 | `audio_io.py` (EdgeTTS) |
-| `verifier.tts` | TTS 직전 한국어/길이/금칙 검증 | 후보 텍스트 | pass/fail + 사유 | **미구현** (개발 항목) |
+| `verifier.tts` | TTS 직전 한국어/길이/금칙 검증 | 후보 텍스트 | pass/fail + 사유 | `tts_verifier.py` + `audio_io.synthesize_bytes_verified()` |
+| `analyzer.fanout` | intent/emotion/face/memory 병렬 분석 | 사용자 텍스트 + session | 컨텍스트 dict | `analysis.parallel_analyze()` |
+| `evolution.telemetry` | 턴 메타데이터 수집 + 집계 | turn_meta dict | JSONL + summary API | `telemetry.py` |
 
 ## 4. 에이전트 명세 (개발용 — 신규 기능 추가 시)
 

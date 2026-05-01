@@ -708,3 +708,139 @@ class Brain:
 
     def reset_history(self):
         self.history = []
+
+    # ============================================================
+    # Expert Pool — 자동 폴백 체인
+    # ============================================================
+    def available_backends(self) -> list:
+        """현재 사용 가능한 백엔드 목록 (키/클라이언트 보유 기준)."""
+        out = []
+        if self.anthropic_client is not None:
+            out.append("claude")
+        if self.openai_client is not None:
+            out.append("openai")
+        # ollama 는 client 보유 여부로 판단
+        if cfg.llm_backend == "ollama" and self.client is not None:
+            out.append("ollama")
+        else:
+            # ollama 클라이언트는 init_backend("ollama") 시점에만 생성됨 →
+            # 다른 백엔드 모드일 때는 폴백 후보에서 제외 (네트워크 의존성 방어)
+            pass
+        return out
+
+    def _fallback_chain(self, primary: str) -> list:
+        """primary → 사용 가능한 다른 백엔드 순 (compare 제외)."""
+        avail = self.available_backends()
+        chain = []
+        if primary in avail:
+            chain.append(primary)
+        for b in avail:
+            if b != primary and b not in chain:
+                chain.append(b)
+        return chain
+
+    def think_stream_with_fallback(
+        self, user_message: str, context: Optional[str] = None,
+        on_fallback=None,
+    ):
+        """think_stream 의 폴백 버전.
+
+        설계 원칙 (architect P1 피드백 반영):
+          1) **전역 `cfg.llm_backend` 를 변경하지 않는다.** 후보 백엔드별 클라이언트는
+             Brain 인스턴스가 보유한 anthropic_client/openai_client/(ollama)client 를
+             직접 선택하여 _stream_* 메서드에 일시 바인딩한다. 다른 세션과의 경합 없음.
+          2) **실패 판정은 예외 기반.** "⚠ 시작 휴리스틱" 제거 — 정상 응답 오탐 위험 차단.
+             각 _stream_* 가 raise 하면 다음 후보로, 정상 yield 완료시 종료.
+          3) compare 모드는 폴백 비대상 (think_stream 위임).
+        """
+        backend = cfg.llm_backend
+        if backend == "compare":
+            yield from self.think_stream(user_message, context)
+            return
+
+        # 컨텍스트 결합 + user 턴 1회만 추가 (모든 후보가 같은 history 공유)
+        merged = user_message
+        if context:
+            merged = f"[컨텍스트: {context}]\n\n{user_message}"
+
+        chain = self._fallback_chain(backend)
+        if not chain:
+            yield None, Emotion.CONCERNED, (
+                "사용 가능한 LLM 백엔드가 없습니다. API 키를 설정해주세요."
+            )
+            return
+
+        # user 턴은 단 한 번 추가 — 후보 시도 사이에 중복 추가/삭제 안 함
+        self.history.append({"role": "user", "content": merged})
+        history_snapshot_len = len(self.history)
+
+        last_friendly_error = None
+        original_client = self.client  # 인스턴스 단위 임시 바인딩 — cfg 미변경
+
+        try:
+            for idx, candidate in enumerate(chain):
+                # 후보용 client 선택
+                cand_client = self._client_for(candidate)
+                if cand_client is None:
+                    last_friendly_error = (
+                        f"⚠ {candidate.upper()} 백엔드 클라이언트를 찾을 수 없습니다."
+                    )
+                    continue
+
+                # 폴백 알림 (1차 후보 외)
+                if idx > 0 and on_fallback is not None:
+                    try:
+                        on_fallback(chain[idx - 1], candidate, last_friendly_error or "primary_failed")
+                    except (TypeError, ValueError):
+                        pass
+
+                # 인스턴스 단위 임시 바인딩 — 같은 Brain 의 다른 메서드 호출 시까지만 유지
+                self.client = cand_client
+                try:
+                    stream_iter = self._dispatch_stream(candidate)
+                    for item in stream_iter:
+                        yield item
+                    return  # 정상 완료
+                except Exception as e:
+                    traceback.print_exc()
+                    last_friendly_error = _friendly_error(e, candidate)
+                    # _stream_* 가 self.history 에 assistant 턴을 부분 추가했을 수 있음 → 롤백
+                    while len(self.history) > history_snapshot_len:
+                        self.history.pop()
+                    # 다음 후보로
+
+            # 모든 후보 실패
+            yield None, Emotion.CONCERNED, (
+                last_friendly_error
+                or "모든 LLM 백엔드가 응답하지 않습니다. 잠시 후 다시 시도해주세요."
+            )
+        finally:
+            # 클라이언트 원복
+            self.client = original_client
+
+    def _client_for(self, backend: str):
+        """backend 이름 → 해당 클라이언트. 없으면 None."""
+        if backend == "claude":
+            return self.anthropic_client
+        if backend == "openai":
+            return self.openai_client
+        if backend == "ollama":
+            # ollama 는 cfg.llm_backend == "ollama" 일 때만 _init_backend 가 client 를 만듦
+            return self.client if cfg.llm_backend == "ollama" else None
+        return None
+
+    def _dispatch_stream(self, backend: str):
+        """후보 백엔드의 _stream_* 호출. self.client 는 호출 전에 바인딩되어 있어야 함."""
+        if backend == "claude":
+            if self.tools is not None:
+                # 도구 모드는 비스트리밍 — 한 번에 결과 yield
+                emotion, body = self._think_with_tools()
+                yield None, emotion, body
+                return
+            yield from self._stream_claude()
+        elif backend == "openai":
+            yield from self._stream_openai()
+        elif backend == "ollama":
+            yield from self._stream_ollama()
+        else:
+            raise ValueError(f"지원하지 않는 백엔드: {backend}")
