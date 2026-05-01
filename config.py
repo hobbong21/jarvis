@@ -45,9 +45,16 @@ class Config:
     wake_keyword_path: str = os.getenv("SARVIS_KEYWORD_PATH", "")
 
     # ============ STT ============
-    whisper_model: str = "small"
-    whisper_device: str = "auto"
-    whisper_language: str = "ko"
+    # Whisper 모델: tiny / base / small / medium / large-v3 (faster-whisper)
+    # 한국어 정확도는 medium 부터 크게 향상. 기본 medium, env 로 오버라이드 가능.
+    whisper_model: str = os.getenv("SARVIS_WHISPER_MODEL", "medium")
+    whisper_device: str = os.getenv("SARVIS_WHISPER_DEVICE", "auto")
+    whisper_language: str = os.getenv("SARVIS_WHISPER_LANGUAGE", "ko")
+    # 한국어 인식 품질을 끌어올리는 initial_prompt (Whisper 가 한국어/구두점 패턴을 학습).
+    whisper_initial_prompt: str = os.getenv(
+        "SARVIS_WHISPER_PROMPT",
+        "다음은 한국어 자연어 대화입니다. 사비스, 안녕하세요, 알려줘, 부탁해, 감사합니다.",
+    )
     silence_threshold: float = 0.012
     silence_duration: float = 1.5
     max_recording: float = 15.0

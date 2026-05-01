@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 
-from memory import Memory
+from memory import Memory, extract_user_facts
 
 
 class MemorySchemaTests(unittest.TestCase):
@@ -298,6 +298,59 @@ class CascadeDeleteTests(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(n, 0)
+
+
+class AutoFactExtractionTests(unittest.TestCase):
+    """Cycle #8 — 한국어 자기소개 패턴 → facts 자동 추출 회귀."""
+
+    def test_extracts_name_with_yo_ending(self):
+        self.assertIn(("name", "민수"), extract_user_facts("내 이름은 민수야"))
+
+    def test_extracts_name_with_imnida_ending(self):
+        self.assertIn(("name", "김철수"), extract_user_facts("저는 김철수입니다"))
+
+    def test_extracts_name_with_yeyo_ending(self):
+        self.assertIn(("name", "영희"), extract_user_facts("나는 영희예요"))
+
+    def test_extracts_location(self):
+        self.assertIn(("location", "서울"), extract_user_facts("나는 서울에 살아"))
+
+    def test_extracts_hobby(self):
+        self.assertIn(("hobby", "등산"), extract_user_facts("내 취미는 등산이에요"))
+
+    def test_extracts_favorite_with_double_i_ending(self):
+        # '떡볶이야' 가 '떡볶'+'이야' 로 잘못 잘리는 회귀 (greedy + 어미 strip)
+        self.assertIn(("favorite", "떡볶이"), extract_user_facts("내가 좋아하는 건 떡볶이야"))
+
+    def test_extracts_job(self):
+        self.assertIn(("job", "개발자"), extract_user_facts("저는 개발자로 일하고 있어요"))
+
+    def test_extracts_birthday(self):
+        self.assertIn(("birthday", "5월 1일"), extract_user_facts("제 생일은 5월 1일이에요"))
+
+    def test_extracts_nickname(self):
+        self.assertIn(("nickname", "지니"), extract_user_facts("나를 지니라고 불러줘"))
+
+    def test_no_match_for_question(self):
+        self.assertEqual(extract_user_facts("오늘 날씨 어때"), [])
+
+    def test_no_match_for_short_greeting(self):
+        self.assertEqual(extract_user_facts("사비스, 안녕"), [])
+
+    def test_banlist_blocks_assistant_name_as_user_name(self):
+        # '내 이름은 사비스야' — banlist 가 어시스턴트 이름 박제 방지.
+        out = extract_user_facts("내 이름은 사비스야")
+        self.assertNotIn(("name", "사비스"), out)
+
+    def test_too_long_input_returns_empty(self):
+        self.assertEqual(extract_user_facts("나는 " + "가" * 500 + "에 살아"), [])
+
+    def test_too_short_returns_empty(self):
+        self.assertEqual(extract_user_facts("응"), [])
+
+    def test_non_string_returns_empty(self):
+        self.assertEqual(extract_user_facts(None), [])
+        self.assertEqual(extract_user_facts(""), [])
 
 
 if __name__ == "__main__":

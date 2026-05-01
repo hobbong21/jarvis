@@ -28,7 +28,7 @@ from audio_io import EdgeTTS, WhisperSTT
 from brain import Brain, _friendly_error, _model_switch_friendly
 from config import cfg
 from emotion import Emotion
-from memory import get_memory
+from memory import get_memory, extract_user_facts
 from tools import ToolExecutor
 from vision import FaceRegistry, WebVision
 
@@ -410,6 +410,8 @@ async def websocket_endpoint(ws: WebSocket):
                     )
                 except Exception:
                     traceback.print_exc()
+                # 자동 사실 추출 + recall/learned 신호 emit (UI 헤더 점등)
+                await _learn_and_signal(prompt, user_msg_id)
 
             # 폴백 알림 큐 — 메인 루프에서만 emit (스레드 안전)
             fallback_events = []
@@ -632,10 +634,14 @@ async def websocket_endpoint(ws: WebSocket):
             extra_ctx = analysis_to_context(analysis)
             ctx = ", ".join(p for p in (base_ctx, extra_ctx) if p)
             # (기획서 v2.0) compare 모드도 사용자 발화를 메모리에 기록.
+            user_msg_id_cmp: Optional[int] = None
             try:
-                session.memory.add_message(session.get_conv_id(), "user", prompt)
+                user_msg_id_cmp = session.memory.add_message(
+                    session.get_conv_id(), "user", prompt,
+                )
             except Exception:
                 traceback.print_exc()
+            await _learn_and_signal(prompt, user_msg_id_cmp)
 
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
@@ -722,14 +728,47 @@ async def websocket_endpoint(ws: WebSocket):
         if session._last_observation:
             parts.append(f"최근 관찰: {session._last_observation}")
         # (기획서 v2.0) 저장된 사실/관련 과거 발언을 system prompt 에 주입.
-        # query 가 있으면 해당 키워드로 과거 메시지 LIKE 검색 — 빈 결과면 아무것도 추가 안 함.
+        # query 가 있으면 해당 키워드로 과거 메시지 LIKE/의미 검색 — 빈 결과면 아무것도 추가 안 함.
         try:
             mem_block = session.memory.context_block(session.memory_user_id, query=query)
             if mem_block:
                 parts.append(mem_block)
+                # 클라이언트 헤더 메모리 인디케이터를 잠깐 점등 — recall 신호.
+                session._last_recall = True
+            else:
+                session._last_recall = False
         except Exception:
             traceback.print_exc()
         return ", ".join(parts)
+
+    async def _learn_and_signal(prompt: str, user_msg_id: Optional[int]) -> None:
+        """사용자 발화에서 자기소개성 사실을 자동 추출해 facts 에 upsert.
+        성공 시 클라이언트로 'memory_event' 신호 → 헤더 인디케이터 점등.
+        recall (build_context 가 [기억] 블록 주입) 도 같은 채널로 알린다.
+        """
+        try:
+            if getattr(session, "_last_recall", False):
+                await emit(type="memory_event", kind="recall")
+                session._last_recall = False
+        except Exception:
+            traceback.print_exc()
+        try:
+            pairs = extract_user_facts(prompt or "")
+            if not pairs:
+                return
+            learned = []
+            for k, v in pairs:
+                try:
+                    session.memory.upsert_fact(
+                        session.memory_user_id, k, v, source_msg_id=user_msg_id,
+                    )
+                    learned.append({"key": k, "value": v})
+                except Exception:
+                    traceback.print_exc()
+            if learned:
+                await emit(type="memory_event", kind="learned", facts=learned)
+        except Exception:
+            traceback.print_exc()
 
     welcome_task = asyncio.create_task(welcome())
 
@@ -772,7 +811,7 @@ async def websocket_endpoint(ws: WebSocket):
                     if busy.locked():
                         continue
                     async with busy:
-                        await handle_audio(payload, emit, emit_bytes, session, build_context)
+                        await handle_audio(payload, emit, emit_bytes, session, build_context, _learn_and_signal)
                 continue
 
             # 텍스트 (JSON)
@@ -937,7 +976,7 @@ async def websocket_endpoint(ws: WebSocket):
         ACTIVE.pop(conn_id, None)
 
 
-async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, build_context):
+async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, build_context, learn_and_signal=None):
     """브라우저에서 받은 WebM/Opus 오디오 → STT → Brain → TTS
 
     사이클 #4 T001: telemetry.log_turn() 추가 (input_channel="audio").
@@ -985,15 +1024,26 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
             return
 
         await emit(type="message", role="user", text=text)
-        # (기획서 v2.0) 음성 turn 도 장기 메모리에 기록.
+        # (기획서 v2.0) 음성 turn 도 장기 메모리에 기록 + 자동 사실 추출/recall 신호.
+        user_msg_id_audio: Optional[int] = None
         try:
-            session.memory.add_message(session.get_conv_id(), "user", text)
+            user_msg_id_audio = session.memory.add_message(
+                session.get_conv_id(), "user", text,
+            )
         except Exception:
             traceback.print_exc()
 
         t_llm = time.monotonic()
+        # build_context 가 [기억] 블록을 주입하면 session._last_recall=True 가 set 되어
+        # 이어지는 learn_and_signal 호출이 recall 인디케이터를 점등한다.
+        ctx_for_audio = build_context(query=text)
+        if learn_and_signal is not None:
+            try:
+                await learn_and_signal(text, user_msg_id_audio)
+            except Exception:
+                traceback.print_exc()
         emotion, reply = await asyncio.to_thread(
-            session.brain.think, text, build_context(query=text)
+            session.brain.think, text, ctx_for_audio
         )
         turn_meta["llm_ms"] = (time.monotonic() - t_llm) * 1000.0
         turn_meta["emotion"] = emotion.value if hasattr(emotion, "value") else str(emotion)

@@ -8,6 +8,29 @@
   const hintLabel = $('hint-label');
   const statePill = $('state-pill');
   const backendLabel = $('backend-label');
+  const emotionMini = $('emotion-mini');
+  const emotionMiniGlyph = emotionMini ? emotionMini.querySelector('.emo-glyph') : null;
+  const emotionMiniText = emotionMini ? emotionMini.querySelector('.emo-text') : null;
+  const memoryMini = $('memory-mini');
+  const memoryMiniStatus = $('memory-mini-status');
+  let memoryMiniTimer = null;
+  const EMOTION_GLYPHS = {
+    neutral: '😐', happy: '😊', surprised: '😲', thinking: '🤔',
+    speaking: '🗣️', listening: '👂', sad: '😔', angry: '😠', error: '⚠️',
+  };
+  function flashMemory(kind, label, ms) {
+    if (!memoryMini) return;
+    if (memoryMiniTimer) { clearTimeout(memoryMiniTimer); memoryMiniTimer = null; }
+    memoryMini.classList.remove('recall', 'learned');
+    if (kind) memoryMini.classList.add(kind);
+    if (memoryMiniStatus && label) memoryMiniStatus.textContent = label;
+    memoryMiniTimer = setTimeout(() => {
+      if (!memoryMini) return;
+      memoryMini.classList.remove('recall', 'learned');
+      if (memoryMiniStatus) memoryMiniStatus.textContent = 'ON';
+      memoryMiniTimer = null;
+    }, ms || 2200);
+  }
   const clockEl = $('clock');
   const toolBadge = $('tool-badge');
   const toolName = $('tool-name');
@@ -251,6 +274,15 @@
         addLog(m.role, m.text);
         if (isMobile() && m.role === 'assistant') markTabBadge('chat');
         break;
+      case 'memory_event':
+        if (m.kind === 'learned') {
+          flashMemory('learned', '학습', 2800);
+          const facts = (m.facts || []).map(f => `${f.key}=${f.value}`).join(', ');
+          if (facts) addLog('system', `· 기억에 저장: ${facts}`);
+        } else if (m.kind === 'recall') {
+          flashMemory('recall', '회상', 1800);
+        }
+        break;
       case 'tool_event':
         if (m.status === 'start') {
           toolBadge.classList.remove('hidden');
@@ -353,13 +385,26 @@
     }
   }
 
+  function updateEmotionMini(name) {
+    if (!emotionMini) return;
+    const key = (name || 'neutral').toLowerCase();
+    emotionMini.dataset.emotion = key;
+    if (emotionMiniText) emotionMiniText.textContent = key.toUpperCase();
+    if (emotionMiniGlyph) emotionMiniGlyph.textContent = EMOTION_GLYPHS[key] || '😐';
+  }
+
   function setEmotion(name) {
-    if (!mainOrb) return;
+    if (!mainOrb) {
+      updateEmotionMini(name);
+      return;
+    }
     // 비교 모드에서는 글로벌 emotion 이벤트가 양쪽 오브를 동시에 흔들지 않도록
-    // 무시 — 각 source 별로 compare_* 이벤트가 따로 옴.
+    // 무시 — 각 source 별로 compare_* 이벤트가 따로 옴. mini 인디케이터도 비교 모드에선
+    // 헤더가 좁아 표시 안 함 (orb-pane 의 sub-emotion 라벨이 대신함).
     if (compareMode) return;
     mainOrb.setEmotion(name);
     emotionLabel.textContent = (name || 'neutral').toUpperCase();
+    updateEmotionMini(name);
   }
 
   // 비교 모드용: 특정 source 오브의 감정 설정
@@ -1207,7 +1252,10 @@
   function addLog(role, text) {
     const div = document.createElement('div');
     div.className = `log-msg ${role}`;
-    div.innerHTML = `<div class="who">▸ ${role === 'user' ? 'YOU' : 'SARVIS'}</div><div class="text"></div>`;
+    const label = role === 'user' ? 'YOU'
+                : role === 'system' ? 'MEMORY'
+                : 'SARVIS';
+    div.innerHTML = `<div class="who">▸ ${label}</div><div class="text"></div>`;
     const textEl = div.querySelector('.text');
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;

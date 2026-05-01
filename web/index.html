@@ -53,6 +53,22 @@
       <span id="clock"></span>
       <span class="dot">·</span>
       <span>BRAIN <strong id="backend-label">CLAUDE</strong></span>
+      <span class="dot">·</span>
+      <span id="emotion-mini" class="emotion-mini" data-emotion="neutral"
+            title="SARVIS 의 현재 감정 — 응답에 따라 실시간 변화">
+        <span class="emo-glyph" aria-hidden="true">😐</span>
+        <span class="emo-text">NEUTRAL</span>
+      </span>
+      <span class="dot">·</span>
+      <span id="memory-mini" class="memory-mini on"
+            title="대화 기억 — 사용자 사실/대화 내용을 자동 저장하고 다음 답변에 활용">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 2a4 4 0 0 0-4 4v1a4 4 0 0 0-3 6.7A4 4 0 0 0 8 20a4 4 0 0 0 4 1 4 4 0 0 0 4-1 4 4 0 0 0 3-6.3 4 4 0 0 0-3-6.7V6a4 4 0 0 0-4-4z"/>
+          <path d="M9 9v3M15 9v3M9 15h6"/>
+        </svg>
+        <span class="mem-text">MEM <strong id="memory-mini-status">ON</strong></span>
+      </span>
       <button id="continuous-toggle" class="continuous-toggle ghost" type="button"
               aria-pressed="false" title="연속 대화 모드 — 응답 후 자동으로 다음 발화를 듣습니다 (30초 무음 시 자동 종료)">
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -637,6 +638,80 @@ class Memory:
         if not parts:
             return ""
         return "[기억]\n" + "\n".join(parts)
+
+
+# ── 자동 사실 추출 (한국어 자기소개 패턴) ──────────────────────────
+# 사용자가 발화 중 "내 이름은 X" / "내가 좋아하는 건 X" 같은 자기소개 패턴을
+# 흘리면 facts 에 자동 upsert 한다. 정규식만 사용 (LLM 호출 0회 — 결정적/저비용).
+# 너무 적극적이면 잘못된 사실을 박제할 위험이 있어 가장 흔한 한국어 자기소개 패턴만
+# 보수적으로 다룬다.
+_FACT_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
+    # 이름 — "내 이름은 X" / "X라고 해" / "저는 X입니다" (X 는 한글 2~10자)
+    ("name",       re.compile(r"(?:내|제|나의|저의)\s*이름은\s+(.{1,30})(?:이에요|예요|입니다|이야|야|이다|임|이라고|라고)?\s*[.!?·,]?\s*$")),
+    ("name",       re.compile(r"(?:^|\s)(?:나는|저는)\s+(.{1,30})\s*(?:이?라고)\s*해(?:요|s)?\s*[.!?·,]?\s*$")),
+    ("name",       re.compile(r"(?:^|\s)(?:나는|저는)\s+([가-힣]{2,10})\s*(?:이에요|예요|입니다|이야|야)\s*[.!?·,]?\s*$")),
+    ("nickname",   re.compile(r"(?:나를|저를|내|제)\s+(.{1,20})\s*(?:라고|이라고)\s*불러")),
+    ("job",        re.compile(r"(?:나는|저는|내|제)\s*직업은?\s+(.{1,40})(?:이에요|예요|입니다|이야|야|이다)?\s*[.!?·,]?\s*$")),
+    ("job",        re.compile(r"(?:나는|저는)\s+(.{1,40})(?:으로|로)\s*일(?:하고\s*있|해|합니다|해요)")),
+    ("location",   re.compile(r"(?:나는|저는|내|제가)\s+(.{1,30})에\s*살아?(?:요|아요|고\s*있어요|고\s*있습니다)?\s*[.!?·,]?\s*$")),
+    ("birthday",   re.compile(r"(?:내|제)\s*생일은\s+(.{1,30})(?:이에요|예요|입니다|이야|야)?\s*[.!?·,]?\s*$")),
+    # favorite/hobby — greedy (lazy + '이?야' 가 '떡볶이야' 를 '떡볶'+'이야' 로 잘못 자르는 문제 해결)
+    ("favorite",   re.compile(r"(?:내가|제가)\s*(?:좋아하는|제일\s*좋아하는)\s+(?:건|것은|건요|것은요)?\s*(.{1,40})(?:예요|이에요|입니다|이야|야)\s*[.!?·,]?\s*$")),
+    ("hobby",      re.compile(r"(?:내|제)\s*취미는\s+(.{1,40})(?:예요|이에요|입니다|이야|야)\s*[.!?·,]?\s*$")),
+    ("language",   re.compile(r"(?:나는|저는)\s+(.{1,20})(?:어|언어)?\s*(?:를|을)\s*(?:한다|쓴다|써요|합니다|해요)\s*[.!?·,]?\s*$")),
+]
+
+# 너무 짧거나 LLM 호출어/잡담일 가능성이 높은 값은 거르자.
+_FACT_VALUE_BANLIST = {
+    "그", "이", "저", "뭐", "뭐야", "응", "음", "어", "아", "예", "네",
+    "사비스", "사비스야", "사비스에게", "사비스가",
+}
+
+# 추출된 값 끝에 흔히 붙는 한국어 종결어미/조사. 긴 것부터 제거 (탐욕).
+_TRAILING_PARTICLES = (
+    "이라고", "라고", "이에요", "이예요", "예요", "에요", "입니다",
+    "이야", "이다", "이어요", "이고", "이라", "이임", "임", "야", "라", "다",
+)
+
+
+def _strip_trailing_particles(s: str) -> str:
+    s = s.strip(" .,!?·\"'`~")
+    changed = True
+    while changed:
+        changed = False
+        for p in _TRAILING_PARTICLES:
+            if len(s) > len(p) + 1 and s.endswith(p):
+                s = s[: -len(p)].rstrip()
+                changed = True
+                break
+    return s
+
+
+def extract_user_facts(text: str) -> List[Tuple[str, str]]:
+    """사용자 발화에서 자기소개성 사실을 (key, value) 리스트로 추출.
+
+    LLM 호출 없이 정규식으로만 동작 — 결정적이고 빠르며 비용 0. 동일 key 가
+    여러 번 매칭되면 가장 마지막(가장 길고 구체적인) 값을 채택한다.
+    """
+    if not text or not isinstance(text, str):
+        return []
+    s = text.strip()
+    if len(s) < 4 or len(s) > 400:
+        return []
+    found: Dict[str, str] = {}
+    for key, pat in _FACT_PATTERNS:
+        m = pat.search(s)
+        if not m:
+            continue
+        val = _strip_trailing_particles((m.group(1) or "").strip())
+        if not val or len(val) < 1 or len(val) > 60:
+            continue
+        if val in _FACT_VALUE_BANLIST:
+            continue
+        # 같은 key 가 이미 있으면 더 긴 값(=더 구체적) 우선.
+        if key not in found or len(val) > len(found[key]):
+            found[key] = val
+    return list(found.items())
 
 
 # 모듈 레벨 싱글톤 (server.py / brain.py 가 import 만으로 사용 가능).
