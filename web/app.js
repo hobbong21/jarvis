@@ -73,6 +73,7 @@
   connectWS();
   listCameras();
   switchTab('orb');
+  showIframeWarningIfNeeded();
 
   // ---------- WebSocket ----------
   function connectWS() {
@@ -1041,6 +1042,42 @@
       const c2 = faceOverlay.getContext('2d');
       c2.clearRect(0, 0, faceOverlay.width, faceOverlay.height);
     }, 3000);
+  }
+
+  // ---------- iframe 사전 경고 ----------
+  // Replit 미리보기 iframe 안에서는 마이크/카메라가 권한 정책으로 차단됨.
+  // 사용자가 SPEAK 를 눌러 실패하기 전에 미리 안내 + 새 창 버튼 노출.
+  function showIframeWarningIfNeeded() {
+    const inIframe = window.top !== window.self;
+    if (!inIframe) return;
+    let canUseMic = null;
+    try {
+      const policy = document.permissionsPolicy || document.featurePolicy;
+      if (policy && typeof policy.allowsFeature === 'function') {
+        canUseMic = !!policy.allowsFeature('microphone');
+      }
+    } catch { /* policy API not supported — leave canUseMic=null */ }
+    if (canUseMic === true) return;
+    // canUseMic === false : 명확히 차단 → 배너 표시
+    // canUseMic === null  : 판단 불가 → iframe 안에서는 안전하게 배너 표시
+    const banner = document.createElement('div');
+    banner.className = 'iframe-warn-banner';
+    banner.innerHTML = `
+      <div class="iframe-warn-text">
+        <strong>마이크 / 카메라 사용 안내</strong><br>
+        Replit 미리보기 안에서는 보안 정책상 마이크와 카메라가 차단됩니다.<br>
+        음성으로 대화하려면 <strong>새 창</strong>에서 열어주세요. (텍스트 입력은 여기서도 가능)
+      </div>
+      <button class="iframe-warn-btn" type="button">↗ 새 창에서 열기</button>
+      <button class="iframe-warn-close" type="button" aria-label="닫기">×</button>
+    `;
+    banner.querySelector('.iframe-warn-btn').addEventListener('click', () => {
+      window.open(window.location.href, '_blank', 'noopener,noreferrer');
+    });
+    banner.querySelector('.iframe-warn-close').addEventListener('click', () => {
+      banner.remove();
+    });
+    document.body.insertBefore(banner, document.body.firstChild);
   }
 
   // ---------- 시계 ----------

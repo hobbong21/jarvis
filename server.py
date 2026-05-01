@@ -10,6 +10,7 @@
 """
 import asyncio
 import json
+import os
 import secrets
 import tempfile
 import threading
@@ -156,6 +157,21 @@ app = FastAPI(title="SARVIS Web")
 
 if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
+
+# 개발 환경에서는 정적 파일 캐시 비활성 (Replit 미리보기에서 옛 JS/CSS 가 잡혀
+# 사용자가 수정 사항을 못 보는 문제 방지). 운영 배포 시에는 캐시 허용.
+_IS_DEV = os.getenv("NODE_ENV") != "production"
+
+@app.middleware("http")
+async def _no_cache_static_in_dev(request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if _IS_DEV and (path == "/" or path.startswith("/static/")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 @app.get("/")
