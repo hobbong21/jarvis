@@ -59,6 +59,7 @@ models/
 .coverage.*
 coverage.xml
 htmlcov/
+test-results/
 
 
 # 메모리 DB (v2.0) — 사이클 #9 부터 data/ 아래.
