@@ -23,6 +23,15 @@ _ALT_BUTTONS = {
 }
 
 
+def _model_switch_friendly(e: Exception) -> str:
+    """사이클 #7: switch_model 의 ValueError 를 사용자 친화 한국어로.
+    이미 brain.switch_model 이 한국어 직접 메시지로 raise 하므로 단순 래핑.
+    _friendly_error 와 분리한 이유: _friendly_error 는 API 통신 오류용이라
+    카탈로그 검증 실패를 '통신 오류' 로 오안내함.
+    """
+    return "⚠ 모델 변경 실패: " + str(e)
+
+
 def _friendly_error(e: Exception, backend: str) -> str:
     """백엔드 예외를 사용자 친화적 한글 메시지로 변환.
     크레딧 부족·인증 실패·네트워크 오류 등 흔한 케이스를 분기하고,
@@ -807,6 +816,39 @@ class Brain:
             raise ValueError(f"지원하지 않는 백엔드: {backend}")
         cfg.llm_backend = backend
         self._init_backend()
+
+    def switch_model(self, backend: str, model: str):
+        """백엔드별 활성 모델 변경. 카탈로그에 있는 모델만 허용 (사이클 #7).
+        compare 모드는 두 모델 (Claude+OpenAI) 동시 사용이라 본 API 로 변경 불가.
+
+        architect P1 (사이클 #7 follow-up): _init_backend 단계 실패 시 cfg 를
+        원복해 옛 모델로 안전하게 회귀한다. cfg 변경 → init 실패 → 후속 요청이
+        잘못된 모델명으로 가는 회귀를 방지.
+        """
+        from config import MODEL_CATALOG
+        if backend == "compare":
+            raise ValueError("compare 모드는 모델 변경을 지원하지 않음 — 개별 백엔드를 변경하세요")
+        catalog = MODEL_CATALOG.get(backend)
+        if not catalog:
+            raise ValueError(f"지원하지 않는 백엔드: {backend}")
+        if model not in catalog:
+            raise ValueError(f"백엔드 {backend} 의 카탈로그에 없는 모델: {model}")
+        attr = f"{backend}_model"
+        old_model = getattr(cfg, attr, None)
+        setattr(cfg, attr, model)
+        # 클라이언트는 base_url/api_key 만 바뀌면 재생성. 모델명은 호출 시 매개변수.
+        # 단, 현재 활성 백엔드면 init 갱신 — 실패 시 cfg 롤백.
+        if cfg.llm_backend == backend:
+            try:
+                self._init_backend()
+            except Exception:
+                if old_model is not None:
+                    setattr(cfg, attr, old_model)
+                    try:
+                        self._init_backend()
+                    except Exception:
+                        pass  # 원복도 실패 — 적어도 cfg 값은 옛 모델로 복구됨.
+                raise
 
     def reset_history(self):
         self.history = []

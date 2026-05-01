@@ -343,6 +343,19 @@ input, select { outline: none; }
 }
 .mode-panel .quick-keys { margin-top: 0; }
 .mode-panel .quick-keys .ghost { padding: 6px 10px; font-size: 11px; min-height: 32px; }
+.model-select {
+  width: 100%;
+  padding: 6px 10px;
+  background: rgba(8, 16, 24, 0.7);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 12px;
+}
+.model-select:focus { outline: 1px solid var(--accent); }
+.model-hint { font-size: 10px; margin-top: 6px; }
+#model-backend-label { color: var(--text); font-weight: 500; margin-left: 6px; }
 
 /* ===== Orb pane (좌/데스크톱, 토글식) ===== */
 .orb-pane {

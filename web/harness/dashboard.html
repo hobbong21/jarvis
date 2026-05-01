@@ -44,11 +44,21 @@ pre{background:#0a0d12;padding:12px;border-radius:6px;overflow:auto;font-size:12
 .evolve-result h1,.evolve-result h2,.evolve-result h3{color:var(--accent);margin:16px 0 6px}
 .flash{animation:flash 1.2s ease-out}
 @keyframes flash{0%{background:rgba(77,208,225,0.25)}100%{background:transparent}}
+/* 사이클 #7 — SARVIS 자기 개선 인사이트 패널 */
+.insights{display:flex;flex-direction:column;gap:6px;margin-bottom:18px}
+.insight{padding:10px 14px;border-radius:6px;border-left:3px solid var(--muted);background:var(--surface);font-size:13px}
+.insight.info{border-left-color:var(--accent)}
+.insight.warn{border-left-color:var(--warn)}
+.insight.err{border-left-color:var(--err)}
+.insight .badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;margin-right:8px;text-transform:uppercase;letter-spacing:0.05em}
+.insight.info .badge{background:rgba(77,208,225,0.18);color:var(--accent)}
+.insight.warn .badge{background:rgba(255,183,77,0.18);color:var(--warn)}
+.insight.err .badge{background:rgba(229,115,115,0.18);color:var(--err)}
 </style>
 </head>
 <body>
 <h1>SARVIS Harness — Telemetry Dashboard</h1>
-<p class="sub">실시간 라우팅·지연·품질 집계. PII 없음. (사이클 #4 — WS 실시간 + regen/입력채널 통계)</p>
+<p class="sub">실시간 라우팅·지연·품질 집계. PII 없음. (사이클 #7 — SARVIS 자기 개선 인사이트 + 백엔드 비교)</p>
 
 <div class="bar">
   <input id="token" type="password" placeholder="HARNESS_TELEMETRY_TOKEN (loopback 외에서 필수)">
@@ -60,7 +70,16 @@ pre{background:#0a0d12;padding:12px;border-radius:6px;overflow:auto;font-size:12
 
 <div class="cards" id="cards"></div>
 
-<div class="grid2">
+<h2>SARVIS 자기 개선 인사이트 <span style="font-weight:400;color:var(--muted);font-size:11px">(자동 분석 — 5턴 이상 누적된 백엔드 기준)</span></h2>
+<div id="insights" class="insights"></div>
+
+<h2>백엔드 비교 (count / avg LLM / p50 LLM / TTS 차단률 / 폴백률 / 재생성률)</h2>
+<table id="backendCompareTable">
+  <thead><tr><th>Backend</th><th>Count</th><th>avg LLM</th><th>p50 LLM</th><th>TTS 차단</th><th>폴백</th><th>재생성</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<div class="grid2" style="margin-top:18px">
   <div>
     <h2>백엔드 분포</h2>
     <table id="backendTable"><thead><tr><th>Backend</th><th>Count</th><th>비중</th></tr></thead><tbody></tbody></table>
@@ -199,8 +218,44 @@ function renderLatency(latency){
   }).join('');
 }
 
+function renderInsights(insights){
+  const c = $('insights');
+  if(!insights || insights.length === 0){
+    c.innerHTML = '<div class="insight" style="color:var(--muted)">아직 데이터가 부족합니다 — 5턴 이상 누적되면 자동 분석이 표시됩니다.</div>';
+    return;
+  }
+  c.innerHTML = insights.map(i => {
+    const lvl = (i.level||'info').toLowerCase();
+    return `<div class="insight ${lvl}"><span class="badge">${escapeHtml(lvl)}</span>${escapeHtml(i.message||'')}</div>`;
+  }).join('');
+}
+
+function renderBackendCompare(per){
+  const tbody = $('backendCompareTable').querySelector('tbody');
+  const entries = Object.entries(per || {}).sort((a,b)=>b[1].count-a[1].count);
+  if(entries.length === 0){
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center">데이터 없음</td></tr>';
+    return;
+  }
+  tbody.innerHTML = entries.map(([b,s]) => {
+    const ttsCls = s.tts_failure_rate > 0.20 ? 'err' : (s.tts_failure_rate > 0.05 ? 'warn' : 'ok');
+    const fbCls  = s.fallback_rate > 0.10 ? 'warn' : 'ok';
+    return `<tr>
+      <td>${escapeHtml(b)}</td>
+      <td>${s.count|0}</td>
+      <td>${(s.avg_llm_ms||0).toFixed(0)}ms</td>
+      <td>${(s.p50_llm_ms||0).toFixed(0)}ms</td>
+      <td class="value ${ttsCls}">${fmtPct(s.tts_failure_rate||0)}</td>
+      <td class="value ${fbCls}">${fmtPct(s.fallback_rate||0)}</td>
+      <td>${fmtPct(s.tts_regen_rate||0)}</td>
+    </tr>`;
+  }).join('');
+}
+
 function applySummary(s){
   renderCards(s);
+  renderInsights(s.insights);
+  renderBackendCompare(s.per_backend);
   renderTable('backendTable', s.backends, s.total);
   renderTable('intentTable', s.intents, s.total);
   renderTable('channelTable', s.input_channels, s.total);

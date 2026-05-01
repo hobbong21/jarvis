@@ -187,6 +187,113 @@ def _empty_latency_stats() -> Dict[str, float]:
     return {"avg": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "count": 0}
 
 
+# 사이클 #7 — 백엔드별 비교 통계.
+def _per_backend_stats(rows: List[Dict]) -> Dict[str, Dict]:
+    """백엔드별 count / avg/p50 LLM ms / TTS 실패율 / 폴백률 / 재생성률.
+
+    같은 키셋(빈 데이터 포함)을 보장 — 대시보드가 안전 렌더하도록.
+    """
+    by: Dict[str, List[Dict]] = {}
+    for r in rows:
+        b = r.get("backend")
+        if not b:
+            continue
+        by.setdefault(b, []).append(r)
+    out: Dict[str, Dict] = {}
+    for b, lst in by.items():
+        n = len(lst)
+        llm_vals = sorted(r.get("llm_ms") for r in lst if isinstance(r.get("llm_ms"), (int, float)))
+        avg_llm = (sum(llm_vals) / len(llm_vals)) if llm_vals else 0.0
+        p50_llm = _percentile(llm_vals, 50)
+        tts_fail = sum(1 for r in lst if r.get("tts_ok") is False)
+        tts_regen = sum(1 for r in lst if r.get("tts_regenerated"))
+        fb = sum(1 for r in lst if r.get("fallback_used"))
+        out[b] = {
+            "count": n,
+            "avg_llm_ms": float(avg_llm),
+            "p50_llm_ms": float(p50_llm),
+            "tts_failure_rate": (tts_fail / n) if n else 0.0,
+            "tts_regen_rate": (tts_regen / n) if n else 0.0,
+            "fallback_rate": (fb / n) if n else 0.0,
+        }
+    return out
+
+
+def _build_insights(rows: List[Dict], by_backend: Dict[str, Dict],
+                    tts_reasons: Dict[str, int], total: int) -> List[Dict]:
+    """SARVIS 자기 개선에 actionable 한 자동 인사이트 (사이클 #7).
+
+    각 인사이트: {level: 'info'|'warn'|'err', message: str}.
+    빈 데이터는 빈 리스트.
+    """
+    insights: List[Dict] = []
+    if total == 0:
+        return insights
+
+    # (1) 가장 빠른 / 가장 느린 백엔드 (p50 LLM ms 기준, count >= 3 만 비교).
+    eligible = {b: s for b, s in by_backend.items() if s["count"] >= 3 and s["p50_llm_ms"] > 0}
+    if len(eligible) >= 2:
+        fastest = min(eligible.items(), key=lambda kv: kv[1]["p50_llm_ms"])
+        slowest = max(eligible.items(), key=lambda kv: kv[1]["p50_llm_ms"])
+        if fastest[0] != slowest[0]:
+            insights.append({
+                "level": "info",
+                "message": (
+                    f"가장 빠른 백엔드는 {fastest[0]} (p50 {fastest[1]['p50_llm_ms']:.0f}ms), "
+                    f"가장 느린 백엔드는 {slowest[0]} (p50 {slowest[1]['p50_llm_ms']:.0f}ms)."
+                ),
+            })
+
+    # (2) 폴백률 10% 초과 백엔드 경고.
+    for b, s in by_backend.items():
+        if s["count"] >= 5 and s["fallback_rate"] > 0.10:
+            insights.append({
+                "level": "warn",
+                "message": (
+                    f"{b} 백엔드의 폴백률이 {s['fallback_rate']*100:.0f}% — "
+                    f"{s['count']}회 중 {int(s['fallback_rate']*s['count'])}건 다른 백엔드로 넘어감. "
+                    f"키/모델 점검 권장."
+                ),
+            })
+
+    # (3) TTS 실패율 5% 초과 백엔드 경고.
+    for b, s in by_backend.items():
+        if s["count"] >= 5 and s["tts_failure_rate"] > 0.05:
+            insights.append({
+                "level": "err" if s["tts_failure_rate"] > 0.20 else "warn",
+                "message": (
+                    f"{b} 백엔드의 TTS 차단률이 {s['tts_failure_rate']*100:.0f}% — "
+                    f"응답 길이/포맷 위반 가능. system_prompt 강화 또는 verifier 임계 검토."
+                ),
+            })
+
+    # (4) TTS 차단 사유 Top 1.
+    # 'ok' / 'success' 등 성공 sentinel 은 제외 — 차단 사유가 아님.
+    SUCCESS_SENTINELS = {"ok", "success", "passed", "none", ""}
+    blocked_reasons = {
+        k: v for k, v in tts_reasons.items()
+        if (k or "").strip().lower() not in SUCCESS_SENTINELS
+    }
+    if blocked_reasons:
+        top_reason, top_n = max(blocked_reasons.items(), key=lambda kv: kv[1])
+        ratio = top_n / total
+        if ratio >= 0.02:
+            insights.append({
+                "level": "warn" if ratio >= 0.05 else "info",
+                "message": (
+                    f"TTS 차단 사유 1위: '{top_reason}' ({top_n}건, 전체의 {ratio*100:.1f}%)."
+                ),
+            })
+
+    # (5) 데이터가 충분치 않으면 안내.
+    if total < 20:
+        insights.append({
+            "level": "info",
+            "message": f"누적 턴 {total}회 — 통계 신뢰도가 낮음. 20회 이상 권장.",
+        })
+    return insights
+
+
 def summarize(limit: Optional[int] = None) -> Dict:
     """전체 (또는 최근 N개) 턴 집계.
 
@@ -221,6 +328,9 @@ def summarize(limit: Optional[int] = None) -> Dict:
             "tts_reasons": {}, "intents": {},
             "avg_fanout_ms": 0.0, "avg_llm_ms": 0.0, "avg_tts_ms": 0.0,
             "latency": {k: _empty_latency_stats() for k in LATENCY_KEYS},
+            # 사이클 #7 — 빈/비빈 키셋 동등성 유지.
+            "per_backend": {},
+            "insights": [],
             "last_ts": None,
         }
 
@@ -235,6 +345,8 @@ def summarize(limit: Optional[int] = None) -> Dict:
     channels = Counter(r.get("input_channel") for r in rows if r.get("input_channel"))
 
     latency = {k: _latency_stats(rows, k) for k in LATENCY_KEYS}
+    per_backend = _per_backend_stats(rows)
+    insights = _build_insights(rows, per_backend, dict(tts_reasons), total)
 
     return {
         "total": total,
@@ -251,5 +363,8 @@ def summarize(limit: Optional[int] = None) -> Dict:
         "avg_llm_ms": latency["llm_ms"]["avg"],
         "avg_tts_ms": latency["tts_ms"]["avg"],
         "latency": latency,
+        # 사이클 #7 — SARVIS 자기 개선용 백엔드 비교 + actionable 인사이트.
+        "per_backend": per_backend,
+        "insights": insights,
         "last_ts": rows[-1].get("ts"),
     }

@@ -133,6 +133,12 @@
     };
 
     ws.onerror = () => setState('disconnected');
+
+    // 사이클 #7 — 연결 직후 모델 카탈로그 요청. WS open 이벤트는 setTimeout 으로
+    // 메시지 핸들러가 바인딩된 후 안전 전송 (readyState 가드).
+    ws.addEventListener('open', () => {
+      try { send({ type: 'models_list' }); } catch (_e) {}
+    });
   }
 
   function send(obj) {
@@ -161,6 +167,39 @@
   function backendDisplay(id) {
     if (!id) return '';
     return BACKEND_LABEL[id] || String(id).toUpperCase();
+  }
+
+  // 사이클 #7 — 모델 카탈로그 캐시 + 드롭다운 갱신 헬퍼.
+  let modelCatalog = {}; // {backend: {models: [...], current: '...'}}
+  function currentBackend() {
+    // 헤더 BRAIN 라벨에서 역추론 (대문자 라벨 → BACKEND_LABEL 역매핑).
+    const lbl = (backendLabel.textContent || '').trim().toUpperCase();
+    for (const [id, name] of Object.entries(BACKEND_LABEL)) {
+      if (name === lbl) return id;
+    }
+    return lbl.toLowerCase();
+  }
+  function updateModelSelectFor(backend) {
+    const sel = document.getElementById('model-select');
+    const lbl = document.getElementById('model-backend-label');
+    if (!sel) return;
+    if (lbl) lbl.textContent = backendDisplay(backend);
+    if (backend === 'compare') {
+      sel.innerHTML = '<option value="">(compare 는 변경 불가)</option>';
+      sel.disabled = true;
+      return;
+    }
+    const entry = modelCatalog[backend];
+    if (!entry || !entry.models || entry.models.length === 0) {
+      sel.innerHTML = '<option value="">(모델 없음)</option>';
+      sel.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    sel.innerHTML = entry.models.map((m) => {
+      const selAttr = m === entry.current ? ' selected' : '';
+      return `<option value="${m}"${selAttr}>${m}</option>`;
+    }).join('');
   }
 
   function handleMessage(m) {
@@ -266,6 +305,22 @@
       case 'backend_changed':
         backendLabel.textContent = backendDisplay(m.backend);
         setCompareMode(m.backend === 'compare');
+        // 사이클 #7: 백엔드 변경 시 모델 드롭다운도 해당 백엔드의 카탈로그로 갱신.
+        updateModelSelectFor(m.backend);
+        break;
+      case 'models_list':
+        // 사이클 #7: WS 연결 직후 서버가 보낸 모델 카탈로그 캐시.
+        modelCatalog = m.catalog || {};
+        updateModelSelectFor(currentBackend());
+        break;
+      case 'model_changed':
+        // 모델 변경 ack — 드롭다운에 currentModel 반영.
+        if (modelCatalog[m.backend]) modelCatalog[m.backend].current = m.model;
+        if (m.backend === currentBackend()) {
+          const sel = document.getElementById('model-select');
+          if (sel) sel.value = m.model;
+        }
+        flash(`✓ 모델 변경: ${m.model}`);
         break;
       case 'reset_ack':
         clearLog();
@@ -562,6 +617,16 @@
         else send({ type: 'switch_backend', backend: k });
       });
     });
+    // 사이클 #7 — 모델 드롭다운 change 이벤트.
+    const modelSel = document.getElementById('model-select');
+    if (modelSel) {
+      modelSel.addEventListener('change', () => {
+        const backend = currentBackend();
+        const model = modelSel.value;
+        if (!model || backend === 'compare') return;
+        send({ type: 'switch_model', backend, model });
+      });
+    }
   }
 
   // ---------- 오브 스타일 선택 ----------

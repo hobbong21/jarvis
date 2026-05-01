@@ -142,14 +142,153 @@ def _conn_ctx(path: Optional[str] = None):
 
 
 # ────────────────────────────────────────────────────────────────────
+# SemanticIndex (v2.0 stage 2) — 옵셔널 의미 검색.
+#
+# chromadb + sentence-transformers (ko-sroberta-multitask, 384차원) 가
+# 설치되어 있고 SARVIS_SEMANTIC=1 일 때만 동작. 그 외에는 모든 메서드가
+# no-op / False 반환 → Memory.search_messages 가 LIKE 폴백 사용.
+#
+# 모델 다운로드는 무거우므로 (~400MB), 기본은 비활성화.
+# 활성화 방법:
+#   pip install chromadb sentence-transformers
+#   export SARVIS_SEMANTIC=1
+# ────────────────────────────────────────────────────────────────────
+_semantic_warned = False
+
+
+def _semantic_enabled() -> bool:
+    return os.getenv("SARVIS_SEMANTIC", "").strip() in ("1", "true", "True", "yes")
+
+
+class SemanticIndex:
+    """옵셔널 ChromaDB 인덱스. 의존성/환경변수 부재 시 자동으로 비활성."""
+
+    EMBED_MODEL = os.getenv("SARVIS_EMBED_MODEL", "jhgan/ko-sroberta-multitask")
+
+    def __init__(self, persist_dir: Optional[str] = None) -> None:
+        self.persist_dir = persist_dir or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "chromadb"
+        )
+        self._client = None
+        self._collection = None
+        self._encoder = None
+        # `available=True` 는 "의존성/환경변수 OK" 를 의미. 인코더/컬렉션은
+        # 첫 호출 시 lazy 로드 — 부팅 시점에 ~400MB 모델 다운로드로 서버를
+        # 차단하지 않기 위함 (architect P0).
+        self.available = False
+        if not _semantic_enabled():
+            return
+        try:
+            import chromadb  # type: ignore
+            from sentence_transformers import SentenceTransformer  # type: ignore
+            self._SentenceTransformer = SentenceTransformer
+            self._chromadb = chromadb
+            self.available = True
+        except ImportError as e:
+            global _semantic_warned
+            if not _semantic_warned:
+                print(f"[memory.SemanticIndex] 의미 검색 비활성화 (의존성 부재): {e}")
+                _semantic_warned = True
+
+    def _ensure_loaded(self) -> bool:
+        """인코더/컬렉션 lazy 초기화. 첫 호출에서만 무거운 작업 발생."""
+        if self._encoder is not None and self._collection is not None:
+            return True
+        try:
+            if self._encoder is None:
+                self._encoder = self._SentenceTransformer(self.EMBED_MODEL)
+            if self._collection is None:
+                self._client = self._chromadb.PersistentClient(path=self.persist_dir)
+                self._collection = self._client.get_or_create_collection(
+                    name="sarvis_messages",
+                    metadata={"hnsw:space": "cosine"},
+                )
+            return True
+        except Exception as e:
+            print(f"[memory.SemanticIndex] lazy 로드 실패 — LIKE 폴백: {e}")
+            self.available = False
+            return False
+
+    def index_message(self, msg_id: int, user_id: str, content: str) -> bool:
+        """메시지 1건 인덱싱. 의미 검색 비활성 시 False."""
+        if not self.available or not content:
+            return False
+        if not self._ensure_loaded():
+            return False
+        try:
+            emb = self._encoder.encode([content], normalize_embeddings=True).tolist()
+            self._collection.upsert(
+                ids=[f"m{msg_id}"],
+                embeddings=emb,
+                metadatas=[{"user_id": user_id, "msg_id": int(msg_id)}],
+                documents=[content],
+            )
+            return True
+        except Exception as e:
+            print(f"[memory.SemanticIndex] index_message 실패: {e}")
+            return False
+
+    def search(self, user_id: str, query: str, k: int = 10) -> List[int]:
+        """의미적으로 유사한 message id 리스트. 비활성 시 빈 리스트."""
+        if not self.available or not query:
+            return []
+        if not self._ensure_loaded():
+            return []
+        try:
+            emb = self._encoder.encode([query], normalize_embeddings=True).tolist()
+            res = self._collection.query(
+                query_embeddings=emb,
+                n_results=max(1, min(int(k), 50)),
+                where={"user_id": user_id},
+            )
+            metas = (res.get("metadatas") or [[]])[0]
+            return [int(m["msg_id"]) for m in metas if "msg_id" in m]
+        except Exception as e:
+            print(f"[memory.SemanticIndex] search 실패: {e}")
+            return []
+
+
+_semantic_singleton: Optional[SemanticIndex] = None
+
+
+def get_semantic_index() -> SemanticIndex:
+    """프로세스 단일 SemanticIndex (lazy)."""
+    global _semantic_singleton
+    if _semantic_singleton is None:
+        _semantic_singleton = SemanticIndex()
+    return _semantic_singleton
+
+
+# ────────────────────────────────────────────────────────────────────
 # Memory: 인스턴스 객체. 테스트에서 별도 path 로 분리 가능.
 # ────────────────────────────────────────────────────────────────────
+class _NullSemanticIndex:
+    """SemanticIndex 와 동일 시그니처를 가진 no-op. 테스트 격리용."""
+    available = False
+    def index_message(self, msg_id, user_id, content): return False
+    def search(self, user_id, query, k=10): return []
+
+
 class Memory:
     """SARVIS 장기 메모리 게이트웨이. SQLite 단일 파일 백엔드."""
 
-    def __init__(self, path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        path: Optional[str] = None,
+        semantic_index: Optional["SemanticIndex"] = None,
+    ) -> None:
         self.path = path or DB_PATH
         _ensure_schema(self.path)
+        # 사이클 #7 (v2.0 stage 2) — 의미 검색 인덱스.
+        # 격리: 사용자 지정 path 가 있으면 (테스트 등) 자동으로 NullIndex 주입.
+        # 명시적 semantic_index 인자가 우선. 기본 path 일 때만 전역 싱글톤 공유.
+        if semantic_index is not None:
+            self._semantic = semantic_index
+        elif path and path != DB_PATH:
+            # 사용자 지정 DB → 운영 chromadb 오염 방지.
+            self._semantic = _NullSemanticIndex()
+        else:
+            self._semantic = get_semantic_index()
 
     # ── 대화 lifecycle ─────────────────────────────────────────────
     def start_conversation(self, user_id: str) -> int:
@@ -208,7 +347,22 @@ class Memory:
                 "INSERT INTO messages(conv_id, role, content, timestamp, emotion) VALUES (?, ?, ?, ?, ?)",
                 (conv_id, role, content, time.time(), emotion),
             )
-            return int(cur.lastrowid)
+            msg_id = int(cur.lastrowid)
+            # 사이클 #7: 사용자 메시지만 의미 인덱싱 (assistant 응답은 제외 — recall 의 query 가
+            # 일반적으로 사용자 발화에서 출발하므로 인덱스 크기/의미 모두 user 우선이 맞음).
+            user_id = None
+            if role == "user":
+                row = conn.execute(
+                    "SELECT user_id FROM conversations WHERE id=?", (conv_id,)
+                ).fetchone()
+                user_id = row["user_id"] if row else None
+        if role == "user" and user_id and self._semantic.available:
+            try:
+                self._semantic.index_message(msg_id, user_id, content)
+            except Exception as e:
+                # 인덱싱 실패는 SQLite 트랜잭션에 영향 없도록 격리.
+                print(f"[Memory.add_message] semantic index 실패: {e}")
+        return msg_id
 
     def get_recent_messages(self, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         """가장 최근 N 개 메시지를 시간순(오래된 → 최신)으로 반환."""
@@ -233,12 +387,43 @@ class Memory:
         query: str,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """키워드(LIKE) 기반 검색. v2.0 2단계에서 임베딩 검색으로 업그레이드 예정."""
+        """메시지 검색.
+
+        사이클 #7 (v2.0 stage 2):
+        - SemanticIndex 활성 시 의미 검색 (cosine top-k) → SQLite 에서 메타데이터 join.
+        - 비활성/실패 시 키워드(LIKE) 폴백.
+
+        반환 순서: 의미 검색 활성일 때는 유사도 순 (top-1 먼저).
+                   LIKE 폴백일 때는 최신 순.
+        """
         q = (query or "").strip()
         if not q:
             return []
-        like = f"%{q}%"
         limit = max(1, min(int(limit), 50))
+
+        # 1차: 의미 검색
+        if self._semantic.available:
+            try:
+                ids = self._semantic.search(user_id, q, k=limit)
+                if ids:
+                    placeholders = ",".join("?" * len(ids))
+                    with _conn_ctx(self.path) as conn:
+                        rows = conn.execute(
+                            f"""
+                            SELECT m.id, m.conv_id, m.role, m.content, m.timestamp, m.emotion
+                            FROM messages m
+                            JOIN conversations c ON c.id = m.conv_id
+                            WHERE c.user_id=? AND m.id IN ({placeholders})
+                            """,
+                            (user_id, *ids),
+                        ).fetchall()
+                    by_id = {int(r["id"]): dict(r) for r in rows}
+                    return [by_id[i] for i in ids if i in by_id]
+            except Exception as e:
+                print(f"[Memory.search_messages] semantic 실패 — LIKE 폴백: {e}")
+
+        # 2차: LIKE 폴백
+        like = f"%{q}%"
         with _conn_ctx(self.path) as conn:
             rows = conn.execute(
                 """

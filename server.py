@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from audio_io import EdgeTTS, WhisperSTT
-from brain import Brain, _friendly_error
+from brain import Brain, _friendly_error, _model_switch_friendly
 from config import cfg
 from emotion import Emotion
 from memory import get_memory
@@ -836,6 +836,37 @@ async def websocket_endpoint(ws: WebSocket):
                     # 사이클 #6 핫픽스: 백엔드 전환 실패도 raw 영문 예외 대신
                     # 친절 한국어 안내 (전환 대상 백엔드 라벨로 분기).
                     await emit(type="error", message=_friendly_error(e, target))
+
+            elif mtype == "switch_model":
+                # 사이클 #7 — 백엔드별 모델 변경. body: {backend, model}.
+                target_backend = (data.get("backend") or "").strip()
+                target_model = (data.get("model") or "").strip()
+                try:
+                    await asyncio.to_thread(
+                        session.brain.switch_model, target_backend, target_model
+                    )
+                    await emit(
+                        type="model_changed",
+                        backend=target_backend,
+                        model=target_model,
+                    )
+                except ValueError as e:
+                    # 카탈로그 검증 실패 — 이미 한국어 직접 메시지.
+                    # _friendly_error 는 API 통신 오류용이라 카탈로그 검증을
+                    # "통신 오류" 로 오안내하므로 전용 헬퍼 사용.
+                    await emit(type="error", message=_model_switch_friendly(e))
+                except Exception as e:
+                    # init 실패 등 — friendly_error 로 한국어화.
+                    await emit(type="error", message=_friendly_error(e, target_backend))
+
+            elif mtype == "models_list":
+                # 사이클 #7 — UI 가 드롭다운 채울 때 사용. 카탈로그 + 현재 선택 모델.
+                from config import MODEL_CATALOG, current_model
+                payload = {
+                    b: {"models": list(models), "current": current_model(b)}
+                    for b, models in MODEL_CATALOG.items()
+                }
+                await emit(type="models_list", catalog=payload)
 
             elif mtype == "reset":
                 session.brain.reset_history()

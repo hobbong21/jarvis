@@ -120,4 +120,65 @@ class Config:
 """
 
 
+# 사이클 #7 — 백엔드별 모델 후보 카탈로그.
+# UI 모델 드롭다운 (`/api/models` 또는 WS `models_list`) + `switch_model` 이 사용.
+# 새 모델을 추가하려면 여기에만 등록하면 자동으로 전 경로에 노출됨.
+MODEL_CATALOG = {
+    "claude": [
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "claude-opus-4-5",
+    ],
+    "openai": [
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-4.1-mini",
+    ],
+    "ollama": [
+        "qwen2.5:7b",
+        "qwen2.5:14b",
+        "llama3.2:3b",
+        "gemma2:9b",
+    ],
+    "zhipuai": [
+        "glm-4-flash",
+        "glm-4-plus",
+        "glm-4-air",
+    ],
+    "gemini": [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+    ],
+}
+
+
+def current_model(backend: str) -> str:
+    """현재 cfg 에 설정된 백엔드의 모델명을 반환 (compare 는 빈 문자열).
+
+    architect P1 (사이클 #7 follow-up): 환경변수로 카탈로그에 없는 모델을
+    지정한 경우 (예: SARVIS_CLAUDE_MODEL=실험모델), 그대로 반환하면 UI
+    드롭다운이 빈 상태가 되어 사용자 혼란. 이런 경우 카탈로그의 첫 항목을
+    반환해 select 가 항상 유효한 옵션을 가리키도록 한다 (단, cfg 값은
+    그대로 — 백엔드는 사용자가 지정한 모델로 실제 호출됨).
+    """
+    if backend == "claude":
+        raw = cfg.claude_model
+    elif backend == "openai":
+        raw = cfg.openai_model
+    elif backend == "ollama":
+        raw = cfg.ollama_model
+    elif backend == "zhipuai":
+        raw = cfg.zhipuai_model
+    elif backend == "gemini":
+        raw = cfg.gemini_model
+    else:
+        return ""
+    catalog = MODEL_CATALOG.get(backend) or []
+    if raw in catalog:
+        return raw
+    # 카탈로그 외 (사용자 환경변수 override) — UI 안전을 위해 첫 항목.
+    return catalog[0] if catalog else raw
+
+
 cfg = Config()

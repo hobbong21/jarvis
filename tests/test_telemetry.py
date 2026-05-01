@@ -421,5 +421,249 @@ class BrainCfgRegressionTests(unittest.TestCase):
                          + "\n".join(offending))
 
 
+class Cycle7InsightsTests(unittest.TestCase):
+    """사이클 #7 T002: 백엔드 비교 통계 + actionable insights."""
+
+    def test_per_backend_keys_present_when_empty(self):
+        with _IsolatedLog():
+            s = telemetry.summarize()
+        self.assertIn("per_backend", s)
+        self.assertIn("insights", s)
+        self.assertIsInstance(s["per_backend"], dict)
+        self.assertIsInstance(s["insights"], list)
+
+    def test_per_backend_stats_shape(self):
+        with _IsolatedLog():
+            for i in range(8):
+                telemetry.log_turn({
+                    "backend": "openai", "intent": "chat",
+                    "fanout_ms": 1.0, "llm_ms": 100.0 + i, "tts_ms": 30.0,
+                    "total_ms": 200.0, "tts_ok": True, "input_channel": "text",
+                })
+            s = telemetry.summarize()
+        per = s["per_backend"]
+        self.assertIn("openai", per)
+        row = per["openai"]
+        for key in (
+            "count", "avg_llm_ms", "p50_llm_ms",
+            "tts_failure_rate", "fallback_rate", "tts_regen_rate",
+        ):
+            self.assertIn(key, row, f"per_backend['openai'] 에 {key} 키 없음")
+        self.assertEqual(row["count"], 8)
+        self.assertGreater(row["avg_llm_ms"], 0.0)
+
+    def test_insights_warn_on_high_fallback(self):
+        """폴백률 10% 초과 시 warn insight 생성."""
+        with _IsolatedLog():
+            # 20턴 중 4턴 폴백 → 20%
+            for i in range(20):
+                telemetry.log_turn({
+                    "backend": "claude", "intent": "chat",
+                    "llm_ms": 100.0, "tts_ms": 50.0, "total_ms": 200.0,
+                    "tts_ok": True, "input_channel": "text",
+                    "fallback_used": (i < 4),
+                })
+            s = telemetry.summarize()
+        levels = [i.get("level") for i in s["insights"]]
+        self.assertTrue(any(l == "warn" for l in levels),
+                        f"폴백률 20% 인데 warn insight 없음: {s['insights']}")
+
+    def test_insights_data_insufficient_when_low_volume(self):
+        """5턴 미만은 신뢰도/부족 안내 (둘 중 하나)."""
+        with _IsolatedLog():
+            telemetry.log_turn({
+                "backend": "openai", "llm_ms": 50.0, "tts_ms": 30.0,
+                "total_ms": 100.0, "tts_ok": True, "input_channel": "text",
+            })
+            s = telemetry.summarize()
+        msgs = " ".join(i.get("message", "") for i in s["insights"])
+        self.assertTrue(("부족" in msgs) or ("신뢰도" in msgs),
+                        f"데이터 부족/신뢰도 안내 없음: {s['insights']}")
+
+    def test_insights_ignore_ok_sentinel_as_block_reason(self):
+        """TTS reason='ok' 는 성공이므로 '차단 사유' 인사이트로 표시되면 안 됨."""
+        with _IsolatedLog():
+            for _ in range(10):
+                telemetry.log_turn({
+                    "backend": "openai", "intent": "chat",
+                    "llm_ms": 100.0, "tts_ms": 50.0, "total_ms": 200.0,
+                    "tts_ok": True, "tts_reason": "ok",
+                    "input_channel": "text",
+                })
+            s = telemetry.summarize()
+        for ins in s["insights"]:
+            self.assertNotIn("'ok'", ins.get("message", ""),
+                             f"성공 sentinel 'ok' 가 차단 사유 인사이트로 노출됨: {ins}")
+
+    def test_summarize_keyset_includes_new_keys_in_both_paths(self):
+        """per_backend / insights 키도 빈/비빈 모두에 존재해야 (P1 회귀 방지)."""
+        with _IsolatedLog():
+            empty = telemetry.summarize()
+            telemetry.log_turn({
+                "backend": "claude", "llm_ms": 100.0, "tts_ms": 50.0,
+                "total_ms": 200.0, "tts_ok": True, "input_channel": "text",
+            })
+            full = telemetry.summarize()
+        self.assertIn("per_backend", empty)
+        self.assertIn("insights", empty)
+        self.assertEqual(set(empty.keys()), set(full.keys()))
+
+
+class Cycle7ModelSwitchTests(unittest.TestCase):
+    """사이클 #7 T001: brain.switch_model + config.MODEL_CATALOG."""
+
+    def test_catalog_covers_all_real_backends(self):
+        import config
+        cat = config.MODEL_CATALOG
+        for b in ("claude", "openai", "ollama", "gemini"):
+            self.assertIn(b, cat, f"MODEL_CATALOG 에 {b} 누락")
+            self.assertGreater(len(cat[b]), 0, f"MODEL_CATALOG[{b}] 비어있음")
+
+    def test_switch_model_accepts_known(self):
+        import config
+        from brain import Brain
+        brain = Brain()
+        first = config.MODEL_CATALOG["openai"][0]
+        # raise 하지 않으면 성공
+        brain.switch_model("openai", first)
+        self.assertEqual(getattr(config.cfg, "openai_model", None), first)
+
+    def test_switch_model_rejects_unknown(self):
+        from brain import Brain
+        brain = Brain()
+        with self.assertRaises(ValueError):
+            brain.switch_model("openai", "gpt-fake-9000")
+
+    def test_switch_model_rejects_unknown_backend(self):
+        from brain import Brain
+        brain = Brain()
+        with self.assertRaises(ValueError):
+            brain.switch_model("nonexistent", "anything")
+
+    def test_compare_backend_blocks_model_switch(self):
+        """compare 는 모델 변경 불가 (다중 백엔드 동시 호출 의미상)."""
+        from brain import Brain
+        brain = Brain()
+        with self.assertRaises(ValueError):
+            brain.switch_model("compare", "anything")
+
+    def test_current_model_falls_back_to_catalog_first_when_env_override(self):
+        """architect P1: 환경변수로 카탈로그 외 모델을 지정해도 current_model 은
+        UI 가 select 옵션을 잃지 않도록 카탈로그 첫 항목을 반환해야."""
+        import config
+        old = config.cfg.openai_model
+        try:
+            config.cfg.openai_model = "totally-custom-experimental-model"
+            cur = config.current_model("openai")
+            self.assertIn(cur, config.MODEL_CATALOG["openai"],
+                          "카탈로그 외 모델일 때 current_model 이 카탈로그 옵션을 반환해야")
+        finally:
+            config.cfg.openai_model = old
+
+    def test_switch_model_rolls_back_cfg_on_init_failure(self):
+        """architect P1: switch_model 의 _init_backend 가 raise 하면 cfg 가 옛 모델로 원복."""
+        import config
+        from brain import Brain
+        brain = Brain()
+        old_model = config.cfg.openai_model
+        valid_target = config.MODEL_CATALOG["openai"][1]
+        # _init_backend 를 강제 실패시켜 롤백 검증.
+        old_init = brain._init_backend
+        try:
+            brain._init_backend = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+            old_backend = config.cfg.llm_backend
+            config.cfg.llm_backend = "openai"
+            try:
+                with self.assertRaises(Exception):
+                    brain.switch_model("openai", valid_target)
+                # cfg 가 옛 모델로 복귀되어야
+                self.assertEqual(config.cfg.openai_model, old_model,
+                                 "switch_model 실패 후 cfg 가 신규 모델로 남아있음 — 롤백 누락")
+            finally:
+                config.cfg.llm_backend = old_backend
+        finally:
+            brain._init_backend = old_init
+
+    def test_server_uses_direct_korean_for_model_validation_error(self):
+        """architect P1 회귀 방지: server.py 의 switch_model 핸들러는 ValueError
+        를 _friendly_error 로 통과시키면 '통신 오류' 로 오안내된다. 직접
+        한국어 메시지를 emit 하는 ValueError 분기가 있어야 한다."""
+        from pathlib import Path as _P
+        src = _P(__file__).resolve().parent.parent.joinpath("server.py").read_text(encoding="utf-8")
+        # switch_model 블록 안에 except ValueError 가 있어야 함.
+        idx = src.find('mtype == "switch_model"')
+        self.assertGreater(idx, 0, "switch_model 핸들러 누락")
+        block = src[idx: idx + 1500]
+        self.assertIn("except ValueError", block,
+                      "switch_model 의 ValueError 전용 분기가 없음 — _friendly_error 가 "
+                      "검증 실패를 '통신 오류' 로 잘못 안내함")
+
+
+class Cycle7SemanticIndexTests(unittest.TestCase):
+    """사이클 #7 T003: SemanticIndex 옵셔널 폴백."""
+
+    def test_disabled_by_default(self):
+        import os, importlib
+        old = os.environ.pop("SARVIS_SEMANTIC", None)
+        try:
+            import memory
+            importlib.reload(memory)
+            idx = memory.SemanticIndex()
+            self.assertFalse(idx.available, "기본 환경에서 의미 검색이 활성화됨")
+            self.assertEqual(idx.search("u", "안녕", k=5), [])
+            self.assertFalse(idx.index_message(1, "u", "테스트"))
+        finally:
+            if old is not None:
+                os.environ["SARVIS_SEMANTIC"] = old
+
+    def test_search_messages_falls_back_to_like_when_semantic_unavailable(self):
+        """SemanticIndex 비활성 + LIKE 폴백 정상 동작."""
+        import tempfile, os
+        from memory import Memory
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            mem = Memory(path=tmp.name)
+            cid = mem.start_conversation("u1")
+            mem.add_message(cid, "user", "오늘 날씨가 정말 좋네요")
+            mem.add_message(cid, "user", "저녁 메뉴 추천해줘")
+            results = mem.search_messages("u1", "날씨", limit=5)
+            self.assertEqual(len(results), 1)
+            self.assertIn("날씨", results[0]["content"])
+        finally:
+            os.unlink(tmp.name)
+
+    def test_custom_path_isolates_from_global_singleton(self):
+        """architect P0: 사용자 지정 path Memory 는 운영 chromadb 와 격리되어야."""
+        import tempfile, os
+        from memory import Memory, _NullSemanticIndex
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            mem = Memory(path=tmp.name)
+            # 운영 SemanticIndex 가 활성이든 아니든, 테스트 인스턴스는 NullIndex 여야.
+            self.assertIsInstance(mem._semantic, _NullSemanticIndex,
+                                  "사용자 지정 path 인데 전역 SemanticIndex 가 주입됨 — "
+                                  "운영 chromadb 오염 위험")
+            self.assertFalse(mem._semantic.available)
+        finally:
+            os.unlink(tmp.name)
+
+    def test_add_message_safe_when_semantic_disabled(self):
+        """의미 검색 비활성 상태에서도 add_message 가 정상 반환."""
+        import tempfile, os
+        from memory import Memory
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            mem = Memory(path=tmp.name)
+            cid = mem.start_conversation("u1")
+            mid = mem.add_message(cid, "user", "테스트")
+            self.assertIsInstance(mid, int)
+            self.assertGreater(mid, 0)
+        finally:
+            os.unlink(tmp.name)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
