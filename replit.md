@@ -42,21 +42,23 @@ SARVIS uses **[Harness](harness/README.md)** (a Claude Code Team-Architecture Fa
 
 **Target composition** (per Harness Phase 2): `Supervisor[Pipeline(Fan-out → Expert-Pool → Generate-Verify)]` plus `Hierarchical Delegation` for development.
 
-**Current implementation status** (cycle #2 complete, 2026-05-01):
+**Current implementation status** (cycle #3 complete, 2026-05-01):
 - ✅ **Supervisor + Pipeline + Hierarchical** — `brain.py`, `.claude/agents/`.
-- ✅ **Expert Pool** — `Brain.think_stream_with_fallback()` automatically retries the next available backend on failure and emits a `backend_fallback` WS event so the user is informed transparently. Manual switch buttons remain available as the last resort.
-- ✅ **Fan-out / Fan-in** — `analysis.parallel_analyze()` runs intent / emotion-hint / face-context / memory-hint concurrently via `asyncio.gather` (200ms per-task timeout). Result is merged into the LLM context before `think_stream`.
-- ✅ **Generate-Verify** — `tts_verifier.verify_tts_candidate()` checks length / Korean ratio / blocklist / control chars + auto-sanitizes. Called by `audio_io.synthesize_bytes_verified()`. Blocked candidates trigger a `tts_blocked` WS event (text still rendered).
-- ✅ **Telemetry & Feedback Loop** — `telemetry.log_turn()` writes per-turn metadata (backend, fallback chain, latencies, intent, TTS result) to `data/harness_telemetry.jsonl`. `GET /api/harness/telemetry` returns aggregate stats. PII (utterance bodies) is never persisted — only lengths.
+- ✅ **Expert Pool** — `Brain.think_stream_with_fallback()` automatically retries the next available backend on failure and emits a `backend_fallback` WS event so the user is informed transparently. Manual switch buttons remain available as the last resort. **Cycle #3**: `_ollama_healthcheck()` (60s cache, 1.2s timeout + 1 retry) — when reachable, ollama is added to `available_backends()` regardless of `cfg.llm_backend`.
+- ✅ **Fan-out / Fan-in** — `analysis.parallel_analyze()` runs intent / emotion-hint / face-context / memory-hint concurrently via `asyncio.gather` (200ms per-task timeout). Result is merged into the LLM context before `think_stream`. **Cycle #3**: compare mode (`respond_compare`) now also runs the same fan-out and logs telemetry.
+- ✅ **Generate-Verify** — `tts_verifier.verify_tts_candidate()` checks length / Korean ratio / blocklist / control chars + auto-sanitizes. Called by `audio_io.synthesize_bytes_verified()`. Blocked candidates trigger a `tts_blocked` WS event (text still rendered). **Cycle #3**: blocked candidates now invoke `Brain.regenerate_safe_tts()` (Anthropic→OpenAI fallback) for one safe rewrite — re-verified, then synthesized if it passes.
+- ✅ **Telemetry & Feedback Loop** — `telemetry.log_turn()` writes per-turn metadata (backend, fallback chain, latencies, intent, TTS result) to `data/harness_telemetry.jsonl`. `GET /api/harness/telemetry` returns aggregate stats. PII (utterance bodies) is never persisted — only lengths. **Cycle #3**: `web/harness/dashboard.html` SPA — token input (Bearer header only, never query string), 5-second auto-refresh, Evolve button. Zero external libs.
+- ✅ **Self-Evolution Proposer** *(new in cycle #3)* — `harness_evolve.propose_next_cycle()` reads cumulative telemetry summary + recent N turn metadata (PII-safe), sends it to an LLM, and writes a fresh next-cycle markdown draft to `harness/sarvis/proposals/cycle-{n}.md`. Triggered via `POST /api/harness/evolve` (same `HARNESS_TELEMETRY_TOKEN` gate). External `min_turns` overrides are clamped — only **upward** adjustments are honored.
 
-Cycle #2 added these modules:
-- `tts_verifier.py` + `data/tts_blocklist.json`
-- `analysis.py`
-- `telemetry.py`
-- New API: `GET /api/harness/telemetry`
-- New WS events: `backend_fallback`, `tts_blocked`
+Cycle #3 added/changed:
+- `harness_evolve.py` — new module (`propose_next_cycle`, `MIN_TURNS=10`).
+- `web/harness/dashboard.html` — new SPA (Bearer-only auth, 5s polling, Evolve button).
+- `brain.py` — `regenerate_safe_tts()`, module-level `_ollama_healthcheck()` + `_client_for("ollama")`.
+- `audio_io.py` — `synthesize_bytes_verified(text, regen_callback=None)` returns `(audio_bytes, blocked, reasons, regenerated)`.
+- `server.py` — `respond_compare` telemetry, `POST /api/harness/evolve`, shared `_harness_auth_check()`, evolve `min_turns` upward-only clamp.
+- `telemetry.py` — added `recent(n)` helper for evolve sampling.
 
-Remaining work (cycle #3 candidates) is tracked in `harness/sarvis/validation.md` §7.
+Remaining work (cycle #4 candidates) is tracked in `harness/sarvis/validation.md` §8.
 
 Key locations:
 - `harness/` — Original Harness plugin assets (READMEs EN/KO/JA, CHANGELOG, landing page source, banner images, plus `harness/sarvis/` SARVIS-specific Phase outputs). **Repo-internal — not publicly served.**

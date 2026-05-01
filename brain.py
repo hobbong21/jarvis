@@ -1,10 +1,15 @@
 """두뇌 — Claude tool_use 루프 / Ollama 단순 채팅. 감정 태그 파싱 포함."""
 import re
+import time
 import traceback
 from typing import Generator, Iterator, Optional, Tuple
 
 from config import cfg
 from emotion import Emotion, parse_emotion
+
+# Ollama 헬스체크 캐시 (TTL 60s) — 사이클 #3 #2: 항상 후보화
+_OLLAMA_HEALTH_TTL = 60.0
+_ollama_health_cache: dict = {"checked_at": 0.0, "ok": False, "client": None}
 
 _EMOTION_PREFIX_RE = re.compile(r"^\s*\[emotion:\w+\]\s*", re.IGNORECASE)
 
@@ -713,19 +718,20 @@ class Brain:
     # Expert Pool — 자동 폴백 체인
     # ============================================================
     def available_backends(self) -> list:
-        """현재 사용 가능한 백엔드 목록 (키/클라이언트 보유 기준)."""
+        """현재 사용 가능한 백엔드 목록 (키/클라이언트 보유 기준).
+
+        사이클 #3 #2: Ollama 는 헬스체크 (60초 캐시) 통과 시 항상 후보 포함.
+        """
         out = []
         if self.anthropic_client is not None:
             out.append("claude")
         if self.openai_client is not None:
             out.append("openai")
-        # ollama 는 client 보유 여부로 판단
+        # ollama: 현재 backend 가 ollama 면 client 직접, 아니면 헬스체크
         if cfg.llm_backend == "ollama" and self.client is not None:
             out.append("ollama")
-        else:
-            # ollama 클라이언트는 init_backend("ollama") 시점에만 생성됨 →
-            # 다른 백엔드 모드일 때는 폴백 후보에서 제외 (네트워크 의존성 방어)
-            pass
+        elif _ollama_healthcheck():
+            out.append("ollama")
         return out
 
     def _fallback_chain(self, primary: str) -> list:
@@ -819,14 +825,21 @@ class Brain:
             self.client = original_client
 
     def _client_for(self, backend: str):
-        """backend 이름 → 해당 클라이언트. 없으면 None."""
+        """backend 이름 → 해당 클라이언트. 없으면 None.
+
+        사이클 #3 #2: ollama 가 다른 모드에서도 후보일 때 즉석 client 반환 (캐시).
+        """
         if backend == "claude":
             return self.anthropic_client
         if backend == "openai":
             return self.openai_client
         if backend == "ollama":
-            # ollama 는 cfg.llm_backend == "ollama" 일 때만 _init_backend 가 client 를 만듦
-            return self.client if cfg.llm_backend == "ollama" else None
+            if cfg.llm_backend == "ollama" and self.client is not None:
+                return self.client
+            # 헬스체크 캐시에 client 가 있으면 재사용
+            if _ollama_health_cache.get("ok") and _ollama_health_cache.get("client") is not None:
+                return _ollama_health_cache["client"]
+            return None
         return None
 
     def _dispatch_stream(self, backend: str):
@@ -844,3 +857,93 @@ class Brain:
             yield from self._stream_ollama()
         else:
             raise ValueError(f"지원하지 않는 백엔드: {backend}")
+
+    # ============================================================
+    # Generate-Verify 보강 — TTS 차단 시 안전 재작성 (사이클 #3 #1)
+    # ============================================================
+    def regenerate_safe_tts(self, original: str, reason: str) -> str:
+        """TTS 차단 응답을 안전·간결하게 재작성. 1회 호출, 짧은 응답.
+
+        - 히스토리/도구를 우회하고 직접 LLM 1회 호출 (재귀 폴백 없음).
+        - 가용 backend (anthropic 우선, 없으면 openai) 선택.
+        - 실패 시 빈 문자열 → 호출자 (audio_io) 가 합성 포기.
+        """
+        if not original or not original.strip():
+            return ""
+
+        prompt = (
+            "다음 한국어 응답을 음성 합성에 적합하도록 다시 써줘. 규칙:\n"
+            "1) 핵심 의미는 유지하되 더 짧고 간결하게 (3문장 이내)\n"
+            "2) 민감정보·시크릿·URL·제어문자 제거\n"
+            "3) 마크다운/코드블록/이모지 제거, 일반 한국어 문장만\n"
+            f"4) 차단 사유: {reason}\n\n"
+            f"원본:\n{original[:1500]}\n\n재작성:"
+        )
+
+        try:
+            if self.anthropic_client is not None:
+                msg = self.anthropic_client.messages.create(
+                    model=cfg.claude_model,
+                    max_tokens=400,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                parts = []
+                for b in msg.content:
+                    if hasattr(b, "text"):
+                        parts.append(b.text)
+                return "".join(parts).strip()
+
+            if self.openai_client is not None:
+                resp = self.openai_client.chat.completions.create(
+                    model=cfg.openai_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=400,
+                )
+                return (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            print(f"[Brain.regenerate_safe_tts] 실패: {type(e).__name__}: {e}")
+        return ""
+
+
+# ============================================================
+# 모듈 레벨 — Ollama 헬스체크 (캐시 60s) — 사이클 #3 #2
+# ============================================================
+def _ollama_healthcheck() -> bool:
+    """Ollama 호스트 도달 여부 (60s 캐시). 성공 시 client 도 캐시.
+
+    cfg.ollama_host (예: http://localhost:11434) 의 /api/tags 를 호출.
+    네트워크/모듈 미설치/타임아웃 모두 False 반환 (절대 raise 하지 않음).
+
+    architect 사이클 #3 P2 피드백: timeout 0.3 → 1.2초 + 1회 재시도로 false-negative 감소.
+    캐시 TTL 60s 라 1.2s × 2 = 최대 2.4초 비용은 60초마다 1회만 발생.
+    """
+    now = time.time()
+    if (now - _ollama_health_cache["checked_at"]) < _OLLAMA_HEALTH_TTL:
+        return _ollama_health_cache["ok"]
+
+    _ollama_health_cache["checked_at"] = now
+    last_err = None
+    for attempt in (1, 2):
+        try:
+            import ollama
+            client = ollama.Client(host=cfg.ollama_host, timeout=1.2)
+            # /api/tags — 빠른 ping. 모델 미존재여도 200 반환.
+            client.list()
+            _ollama_health_cache["ok"] = True
+            _ollama_health_cache["client"] = client
+            return True
+        except Exception as e:
+            last_err = e
+            if attempt == 1:
+                time.sleep(0.1)  # 짧은 backoff 후 1회 재시도
+                continue
+    _ollama_health_cache["ok"] = False
+    _ollama_health_cache["client"] = None
+    return False
+
+
+def reset_ollama_health_cache() -> None:
+    """관리/테스트용 — 다음 호출 시 강제 재체크."""
+    _ollama_health_cache["checked_at"] = 0.0
+    _ollama_health_cache["ok"] = False
+    _ollama_health_cache["client"] = None

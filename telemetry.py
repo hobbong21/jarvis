@@ -102,6 +102,12 @@ def _load_all() -> List[Dict]:
     return out
 
 
+def recent(n: int = 50) -> List[Dict]:
+    """최근 N개 턴 메타 반환 (Harness Evolve 입력용)."""
+    rows = _load_all()
+    return rows[-n:] if n > 0 else rows
+
+
 def summarize(limit: Optional[int] = None) -> Dict:
     """전체 (또는 최근 N개) 턴 집계.
 

@@ -237,28 +237,67 @@ class EdgeTTS:
         result = self.synthesize_bytes_verified(text)
         return result["audio"]
 
-    def synthesize_bytes_verified(self, text: str) -> dict:
+    def synthesize_bytes_verified(self, text: str, regen_callback=None) -> dict:
         """Generate-Verify 게이트 적용 합성.
 
+        Args:
+          text          : 합성할 원본 텍스트
+          regen_callback: Optional[Callable[[str, str], str]] —
+                          차단 시 1회만 호출. (original_text, reason) → 안전 재작성 텍스트.
+                          반환값이 비어있거나 다시 차단되면 최종 실패.
+
         반환:
-          audio   : bytes  — MP3 (실패 시 b"")
-          ok      : bool
-          reason  : str    — verifier slug ("ok"/"empty"/"too_long"/"blocklist:..." 등)
-          warnings: list[str]
-          length  : int    — 실제 합성에 사용된 텍스트 길이
+          audio    : bytes  — MP3 (실패 시 b"")
+          ok       : bool
+          reason   : str    — verifier slug ("ok"/"empty"/"too_long"/"blocklist:..." 등)
+          warnings : list[str]
+          length   : int    — 실제 합성에 사용된 텍스트 길이
+          regenerated: bool — regen_callback 으로 재작성된 텍스트가 사용됐는지
         """
         from tts_verifier import verify_tts_candidate
 
         verdict = verify_tts_candidate(text or "")
+        regenerated = False
+
         if not verdict["ok"]:
-            print(f"[TTS-Verify] 차단: {verdict['reason']} (len={len(text or '')})")
-            return {
-                "audio": b"",
-                "ok": False,
-                "reason": verdict["reason"],
-                "warnings": verdict.get("warnings", []),
-                "length": 0,
-            }
+            original_reason = verdict["reason"]
+            print(f"[TTS-Verify] 차단: {original_reason} (len={len(text or '')})")
+
+            # 재생성 폴백 시도 (1회) — architect 사이클 #2 P2 → 사이클 #3 #1 처리
+            if regen_callback is not None:
+                try:
+                    regen_text = regen_callback(text or "", original_reason)
+                except Exception as e:
+                    print(f"[TTS-Verify] 재생성 콜백 예외: {type(e).__name__}: {e}")
+                    regen_text = ""
+
+                if regen_text and regen_text.strip():
+                    regen_verdict = verify_tts_candidate(regen_text)
+                    if regen_verdict["ok"]:
+                        print(f"[TTS-Verify] 재생성 성공 ({original_reason} → ok, "
+                              f"len {len(text or '')} → {len(regen_text)})")
+                        verdict = regen_verdict
+                        regenerated = True
+                    else:
+                        print(f"[TTS-Verify] 재생성도 차단: {regen_verdict['reason']}")
+                        return {
+                            "audio": b"",
+                            "ok": False,
+                            "reason": f"regen_failed:{original_reason}->{regen_verdict['reason']}",
+                            "warnings": verdict.get("warnings", []),
+                            "length": 0,
+                            "regenerated": True,
+                        }
+
+            if not verdict["ok"]:
+                return {
+                    "audio": b"",
+                    "ok": False,
+                    "reason": original_reason,
+                    "warnings": verdict.get("warnings", []),
+                    "length": 0,
+                    "regenerated": False,
+                }
 
         sanitized = verdict["sanitized"]
         if verdict.get("warnings"):
@@ -280,4 +319,5 @@ class EdgeTTS:
             "reason": "ok",
             "warnings": verdict.get("warnings", []),
             "length": len(sanitized),
+            "regenerated": regenerated,
         }

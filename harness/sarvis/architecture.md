@@ -13,15 +13,16 @@
 |-----|---------|------|------|
 | 메인 조율 | **Supervisor** | ✅ | `brain.py` 가 의도 분류 후 도구/응답을 분배. |
 | 핵심 경로 | **Pipeline** | ✅ | STT → 의도 분석 → LLM → TTS 는 코드상 단방향. |
-| 백엔드 선택 | **Expert Pool** | ✅ | `Brain.think_stream_with_fallback()` — 1차 백엔드 실패 시 가용 백엔드로 자동 재시도. 사용자에게 `backend_fallback` WS 이벤트로 투명 알림. 친절 한국어 에러 + 수동 전환 버튼은 그대로 유지(체인 모두 실패 시). |
-| 부가 분석 | **Fan-out / Fan-in** | ✅ | `analysis.parallel_analyze()` — intent/emotion/face/memory 4개 분석을 `asyncio.gather` 로 동시 실행 (각 200ms 타임아웃). 결과는 LLM 컨텍스트에 합류. |
-| TTS 직전 | **Generate-Verify** | ✅ | `tts_verifier.verify_tts_candidate()` — 길이/한국어 비율/금칙어/제어문자 검증 + 자동 sanitize. 차단 시 `tts_blocked` WS 이벤트로 알림. `data/tts_blocklist.json` 사전 분리. |
-| 진화 관측 | **Telemetry & Feedback** | ✅ | `telemetry.log_turn()` — 턴별 메타(백엔드/폴백/지연/intent/TTS결과) JSONL 저장. `GET /api/harness/telemetry` 로 집계 조회. PII(본문) 미수집. |
+| 백엔드 선택 | **Expert Pool** | ✅ | `Brain.think_stream_with_fallback()` — 1차 백엔드 실패 시 가용 백엔드로 자동 재시도. 사용자에게 `backend_fallback` WS 이벤트로 투명 알림. 친절 한국어 에러 + 수동 전환 버튼은 그대로 유지(체인 모두 실패 시). **사이클 #3 #2**: Ollama 헬스체크(60s 캐시, timeout 1.2s + 1회 재시도) 통과 시 항상 후보 포함. |
+| 부가 분석 | **Fan-out / Fan-in** | ✅ | `analysis.parallel_analyze()` — intent/emotion/face/memory 4개 분석을 `asyncio.gather` 로 동시 실행 (각 200ms 타임아웃). 결과는 LLM 컨텍스트에 합류. **사이클 #3 #4**: compare 모드도 동일 fan-out 실행 + 텔레메트리 기록. |
+| TTS 직전 | **Generate-Verify** | ✅ | `tts_verifier.verify_tts_candidate()` — 길이/한국어 비율/금칙어/제어문자 검증 + 자동 sanitize. 차단 시 `tts_blocked` WS 이벤트로 알림. `data/tts_blocklist.json` 사전 분리. **사이클 #3 #1**: 차단 시 `Brain.regenerate_safe_tts()` 1회 LLM 재작성 → 재검증 → 통과 시 합성. |
+| 진화 관측 | **Telemetry & Feedback** | ✅ | `telemetry.log_turn()` — 턴별 메타(백엔드/폴백/지연/intent/TTS결과) JSONL 저장. `GET /api/harness/telemetry` 로 집계 조회. PII(본문) 미수집. **사이클 #3 #3**: `web/harness/dashboard.html` SPA — 토큰 입력(Bearer 헤더 only) + 5초 자동 새로고침 + Evolve 버튼. |
+| 진화 자동 제안 | **Self-Evolution** | ✅ | **사이클 #3 #5**: `harness_evolve.propose_next_cycle()` + `POST /api/harness/evolve` — 누적 텔레메트리 (≥`MIN_TURNS`) 를 LLM 에 보내 차세대 사이클 markdown 초안 자동 생성, `harness/sarvis/proposals/cycle-{n}.md` 저장. min_turns 외부 입력은 상향만 허용. |
 | 신규 기능 추가 (개발 시) | **Hierarchical Delegation** | ✅ | `architect` → 7개 leaf 에이전트 위임 트리는 본 저장소에 정의됨. |
 
-**목표 합성형 (달성)**: `Supervisor[Pipeline(Fan-out/Fan-in → Expert-Pool → Generate-Verify)] + Telemetry feedback loop`.
+**목표 합성형 (달성)**: `Supervisor[Pipeline(Fan-out/Fan-in → Expert-Pool → Generate-Verify(+regen))] + Telemetry feedback loop + Self-Evolution proposer`.
 
-모든 핵심 패턴 ✅. 추가 개선 항목은 §5 와 `validation.md` 의 open items 참조.
+모든 핵심 패턴 ✅ + 자기진화 루프 ✅. 추가 개선 항목은 §5 와 `validation.md` 의 open items 참조.
 
 ## 2. 팀 구성도
 

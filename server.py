@@ -372,12 +372,18 @@ async def websocket_endpoint(ws: WebSocket):
             await emit(type="emotion", emotion=final_emotion)
             await emit(type="state", state="speaking")
 
-            # ── Generate-Verify TTS 게이트 ──────────────────────────
+            # ── Generate-Verify TTS 게이트 (regen 폴백 포함, 사이클 #3 #1) ─
             t_tts_start = time.monotonic()
-            tts_result = await asyncio.to_thread(TTS.synthesize_bytes_verified, final_text)
+            def _tts_regen(orig: str, reason: str) -> str:
+                # 별도 스레드에서 호출됨 → brain 재호출은 sync OK
+                return session.brain.regenerate_safe_tts(orig, reason)
+            tts_result = await asyncio.to_thread(
+                TTS.synthesize_bytes_verified, final_text, _tts_regen,
+            )
             turn_meta["tts_ms"] = (time.monotonic() - t_tts_start) * 1000.0
             turn_meta["tts_ok"] = tts_result["ok"]
             turn_meta["tts_reason"] = tts_result["reason"]
+            turn_meta["tts_regenerated"] = bool(tts_result.get("regenerated"))
 
             if tts_result["audio"]:
                 await emit_bytes(tts_result["audio"])
@@ -400,12 +406,44 @@ async def websocket_endpoint(ws: WebSocket):
                 traceback.print_exc()
 
     async def respond_compare(prompt: str):
-        """A/B 비교 모드 — Claude + OpenAI 동시 스트리밍, TTS 자동재생 안 함."""
+        """A/B 비교 모드 — Claude + OpenAI 동시 스트리밍, TTS 자동재생 안 함.
+
+        사이클 #3 #4: 텔레메트리 기록 추가 (backend="compare", source 별 reply_len 합산).
+        """
         await emit(type="state", state="thinking")
         await emit(type="emotion", emotion="thinking")
         await emit(type="message", role="user", text=prompt)
+
+        # 텔레메트리 메타 — compare 모드 별도 기록
+        turn_meta = {
+            "turn_id": telemetry.new_turn_id(),
+            "ts": time.time(),
+            "backend": "compare",
+            "fallback_used": False,
+            "fallback_chain": ["compare:claude+openai"],
+            "intent": None,
+            "emotion": None,
+            "tools_used": 0,
+            "fanout_ms": 0.0,
+            "llm_ms": 0.0,
+            "tts_ms": 0.0,
+            "tts_ok": None,
+            "tts_reason": "compare_no_tts",
+            "prompt_len": len(prompt or ""),
+            "reply_len": 0,
+            "compare_sources": [],
+        }
+        t_llm_start = time.monotonic()
+
         try:
-            ctx = build_context()
+            # Fan-out 분석 — compare 도 동일하게 실행 (intent 분포 통계용)
+            base_ctx = build_context()
+            analysis = await parallel_analyze(prompt, session)
+            turn_meta["fanout_ms"] = analysis.get("ms", 0.0)
+            turn_meta["intent"] = analysis.get("intent")
+            extra_ctx = analysis_to_context(analysis)
+            ctx = ", ".join(p for p in (base_ctx, extra_ctx) if p)
+
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
 
@@ -434,6 +472,8 @@ async def websocket_endpoint(ws: WebSocket):
                 source, chunk, emo, body = item
                 if emo is not None:
                     finals[source] = {"text": body or "", "emotion": emo.value}
+                    if source not in turn_meta["compare_sources"]:
+                        turn_meta["compare_sources"].append(source)
                     await emit(
                         type="compare_end",
                         source=source,
@@ -445,11 +485,23 @@ async def websocket_endpoint(ws: WebSocket):
 
             await emit(type="compare_done")
             await emit(type="emotion", emotion="neutral")
+
+            # reply_len = 두 응답 길이의 합 (PII 본문은 저장 안 함)
+            turn_meta["reply_len"] = sum(len(v.get("text", "")) for v in finals.values())
+            # emotion = 첫 번째 소스 기준 (대표값)
+            for v in finals.values():
+                turn_meta["emotion"] = v.get("emotion")
+                break
+            turn_meta["llm_ms"] = (time.monotonic() - t_llm_start) * 1000.0
         except Exception as e:
             traceback.print_exc()
             await emit(type="error", message=str(e))
         finally:
             await emit(type="state", state="idle")
+            try:
+                telemetry.log_turn(turn_meta)
+            except Exception:
+                traceback.print_exc()
 
     def build_context() -> str:
         parts = []
@@ -638,7 +690,11 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
         await emit(type="emotion", emotion=emotion.value)
         await emit(type="state", state="speaking")
 
-        tts_result = await asyncio.to_thread(TTS.synthesize_bytes_verified, reply)
+        def _tts_regen_audio(orig: str, reason: str) -> str:
+            return session.brain.regenerate_safe_tts(orig, reason)
+        tts_result = await asyncio.to_thread(
+            TTS.synthesize_bytes_verified, reply, _tts_regen_audio,
+        )
         if tts_result["audio"]:
             await emit_bytes(tts_result["audio"])
         elif not tts_result["ok"]:
@@ -673,45 +729,97 @@ async def health():
 
 
 # ============================================================
-# Harness Evolution — 텔레메트리 요약 엔드포인트
+# Harness Evolution — 텔레메트리 요약 + Evolve 엔드포인트
 # ============================================================
-@app.get("/api/harness/telemetry")
-async def harness_telemetry_summary(
-    request: Request,
-    limit: Optional[int] = None,
-    token: Optional[str] = None,
-):
-    """Harness Evolution — 라우팅/지연/품질 집계. PII 없음.
+def _harness_auth_check(request: Request, token: Optional[str]) -> None:
+    """공통 인증 게이트 — telemetry/evolve 양쪽에서 사용.
 
-    /harness/* 는 정적 파일 마운트가 점유하므로 API 는 /api/harness/* 사용.
-
-    인증 (architect P2 피드백):
-      - HARNESS_TELEMETRY_TOKEN 환경변수가 설정된 경우: ?token=... 또는 Authorization: Bearer ... 일치 필요
-      - 미설정 시: 127.0.0.1 / ::1 (loopback) 만 허용 (개발 모드)
+    HARNESS_TELEMETRY_TOKEN 설정 시: 토큰 검증 (query 또는 Bearer)
+    미설정 시: loopback 만 허용 (개발 모드)
     """
+    from fastapi import HTTPException
     expected = os.environ.get("HARNESS_TELEMETRY_TOKEN", "").strip()
-
     if expected:
-        # 토큰 모드: query param 또는 Bearer header
         provided = token or ""
         if not provided:
             auth = request.headers.get("authorization", "")
             if auth.lower().startswith("bearer "):
                 provided = auth[7:].strip()
         if not secrets.compare_digest(provided, expected):
-            from fastapi import HTTPException
             raise HTTPException(status_code=401, detail="invalid token")
     else:
-        # 개발 모드: loopback 만
         client_host = (request.client.host if request.client else "") or ""
         if client_host not in ("127.0.0.1", "::1", "localhost"):
-            from fastapi import HTTPException
             raise HTTPException(
                 status_code=403,
                 detail="HARNESS_TELEMETRY_TOKEN 미설정 — loopback 외 접근 차단. 환경변수를 설정하세요.",
             )
 
+
+@app.get("/api/harness/telemetry")
+async def harness_telemetry_summary(
+    request: Request,
+    limit: Optional[int] = None,
+    token: Optional[str] = None,
+):
+    """Harness Evolution — 라우팅/지연/품질 집계. PII 없음."""
+    _harness_auth_check(request, token)
     return telemetry.summarize(limit=limit)
+
+
+@app.post("/api/harness/evolve")
+async def harness_evolve_endpoint(
+    request: Request,
+    token: Optional[str] = None,
+    min_turns: Optional[int] = None,
+):
+    """/harness:evolve — 누적 텔레메트리로 차세대 Harness 사이클 초안 자동 제안.
+
+    트리거 조건: telemetry total >= MIN_TURNS (기본 10, 운영은 100+ 권장).
+    Anthropic 또는 OpenAI 클라이언트가 있어야 함.
+    결과 markdown 은 harness/sarvis/proposals/cycle-{n}.md 에 저장.
+
+    보안 (사이클 #3 architect P2): min_turns 파라미터는 **상향만 허용**.
+    하향 우회로 트리거 조건을 약화시킬 수 없음.
+    """
+    _harness_auth_check(request, token)
+
+    import harness_evolve
+
+    # min_turns clamp: 외부 입력은 절대 MIN_TURNS 미만으로 못 내림.
+    effective_min = harness_evolve.MIN_TURNS
+    if min_turns is not None and min_turns > effective_min:
+        effective_min = int(min_turns)
+
+    # 임시 Brain 인스턴스에서 클라이언트만 차용 (또는 활성 세션 중 첫 번째)
+    anthropic_client = None
+    openai_client = None
+    if ACTIVE:
+        first_session = next(iter(ACTIVE.values()), None)
+        if first_session and getattr(first_session, "brain", None):
+            anthropic_client = first_session.brain.anthropic_client
+            openai_client = first_session.brain.openai_client
+
+    # 활성 세션이 없으면 새 Brain 인스턴스 생성 (도구 없음)
+    if anthropic_client is None and openai_client is None:
+        from brain import Brain
+        try:
+            tmp = Brain()
+            anthropic_client = tmp.anthropic_client
+            openai_client = tmp.openai_client
+        except Exception as e:
+            traceback.print_exc()
+            from fastapi import HTTPException
+            raise HTTPException(status_code=500, detail=f"brain_init_failed: {e}")
+
+    result = await asyncio.to_thread(
+        harness_evolve.propose_next_cycle,
+        anthropic_client,
+        openai_client,
+        effective_min,
+    )
+    # markdown 본문은 응답에 포함하되, 파일 경로도 안내
+    return result
 
 
 if __name__ == "__main__":

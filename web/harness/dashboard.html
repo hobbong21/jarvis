@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SARVIS Harness — Telemetry Dashboard</title>
+<style>
+:root{
+  --bg:#0b0d10; --surface:#14181d; --border:#222831; --text:#e4e7eb;
+  --muted:#8a93a0; --accent:#4dd0e1; --warn:#ffb74d; --ok:#81c784; --err:#e57373;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:24px}
+h1{margin:0 0 4px;font-size:20px;letter-spacing:-0.01em}
+h2{margin:24px 0 8px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em}
+.sub{color:var(--muted);font-size:12px;margin-bottom:18px}
+.bar{display:flex;gap:8px;align-items:center;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:18px;flex-wrap:wrap}
+.bar input,.bar button,.bar select{padding:8px 10px;background:#1c2128;border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px}
+.bar input{flex:1;min-width:200px}
+.bar button{cursor:pointer;background:#1f2937;font-weight:500}
+.bar button:hover{background:#2c3849}
+.bar button.primary{background:var(--accent);color:#0b0d10}
+.bar label{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:18px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px}
+.card .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em}
+.card .value{font-size:24px;font-weight:600;margin-top:4px}
+.card .value.ok{color:var(--ok)} .card .value.warn{color:var(--warn)} .card .value.err{color:var(--err)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:700px){.grid2{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);font-size:13px}
+th{color:var(--muted);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;background:#1a1f26}
+tr:last-child td{border-bottom:none}
+.barbar{height:6px;background:#1a1f26;border-radius:3px;overflow:hidden;margin-top:4px}
+.barbar>div{height:100%;background:var(--accent);transition:width 0.3s}
+.status{padding:6px 10px;border-radius:6px;font-size:12px;background:#1a1f26;color:var(--muted)}
+.status.ok{background:rgba(129,199,132,0.15);color:var(--ok)}
+.status.err{background:rgba(229,115,115,0.15);color:var(--err)}
+pre{background:#0a0d12;padding:12px;border-radius:6px;overflow:auto;font-size:12px}
+.evolve-result{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:12px;white-space:pre-wrap;line-height:1.6}
+.evolve-result h1,.evolve-result h2,.evolve-result h3{color:var(--accent);margin:16px 0 6px}
+</style>
+</head>
+<body>
+<h1>SARVIS Harness — Telemetry Dashboard</h1>
+<p class="sub">실시간 라우팅·지연·품질 집계. PII 없음. (사이클 #3 #3)</p>
+
+<div class="bar">
+  <input id="token" type="password" placeholder="HARNESS_TELEMETRY_TOKEN (loopback 외에서 필수)">
+  <label><input id="auto" type="checkbox" checked> 5초 자동 새로고침</label>
+  <button id="refreshBtn">새로고침</button>
+  <button id="evolveBtn" class="primary">/harness:evolve 실행</button>
+  <span id="status" class="status">대기</span>
+</div>
+
+<div class="cards" id="cards"></div>
+
+<div class="grid2">
+  <div>
+    <h2>백엔드 분포</h2>
+    <table id="backendTable"><thead><tr><th>Backend</th><th>Count</th><th>비중</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div>
+    <h2>Intent 분포</h2>
+    <table id="intentTable"><thead><tr><th>Intent</th><th>Count</th><th>비중</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<h2>TTS 차단 사유</h2>
+<table id="ttsTable"><thead><tr><th>Reason</th><th>Count</th><th>비중</th></tr></thead><tbody></tbody></table>
+
+<h2>Evolve 결과</h2>
+<div id="evolveResult" class="evolve-result" style="display:none"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let timer = null;
+
+function fmtPct(x){ return (x*100).toFixed(1) + '%'; }
+function fmtMs(x){ return x ? x.toFixed(1) + 'ms' : '0ms'; }
+function fmtTs(x){ return x ? new Date(x*1000).toLocaleTimeString('ko-KR') : '-'; }
+
+async function fetchJSON(url, opts){
+  // 보안 (사이클 #3 architect P1): 토큰은 Authorization Bearer 헤더로만 전송.
+  // query param 으로 보내면 액세스 로그/프록시 로그/브라우저 히스토리에 평문 노출됨.
+  const tok = $('token').value.trim();
+  const headers = opts && opts.headers ? {...opts.headers} : {};
+  if(tok) headers['Authorization'] = 'Bearer ' + tok;
+  const res = await fetch(url, {...(opts||{}), headers});
+  if(!res.ok) throw new Error(res.status + ' ' + (await res.text()).slice(0,200));
+  return res.json();
+}
+
+function renderCards(s){
+  const cards = [
+    {label:'총 턴', value: s.total},
+    {label:'폴백률', value: fmtPct(s.fallback_rate), cls: s.fallback_rate > 0.1 ? 'warn' : 'ok'},
+    {label:'TTS 실패율', value: fmtPct(s.tts_failure_rate), cls: s.tts_failure_rate > 0.05 ? 'err' : 'ok'},
+    {label:'평균 Fan-out', value: fmtMs(s.avg_fanout_ms)},
+    {label:'평균 LLM', value: fmtMs(s.avg_llm_ms)},
+    {label:'평균 TTS', value: fmtMs(s.avg_tts_ms)},
+    {label:'마지막 턴', value: fmtTs(s.last_ts)},
+  ];
+  $('cards').innerHTML = cards.map(c =>
+    `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls||''}">${c.value}</div></div>`
+  ).join('');
+}
+
+function renderTable(tableId, dict, total){
+  const tbody = $(tableId).querySelector('tbody');
+  const entries = Object.entries(dict || {}).sort((a,b)=>b[1]-a[1]);
+  if(entries.length === 0){
+    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center">데이터 없음</td></tr>';
+    return;
+  }
+  tbody.innerHTML = entries.map(([k,v]) => {
+    const pct = total > 0 ? v/total : 0;
+    return `<tr><td>${k}</td><td>${v}</td><td><div>${fmtPct(pct)}</div><div class="barbar"><div style="width:${pct*100}%"></div></div></td></tr>`;
+  }).join('');
+}
+
+async function refresh(){
+  $('status').textContent = '로딩…'; $('status').className = 'status';
+  try {
+    const s = await fetchJSON('/api/harness/telemetry');
+    renderCards(s);
+    renderTable('backendTable', s.backends, s.total);
+    renderTable('intentTable', s.intents, s.total);
+    renderTable('ttsTable', s.tts_reasons, s.total);
+    $('status').textContent = '갱신 완료 ' + new Date().toLocaleTimeString('ko-KR');
+    $('status').className = 'status ok';
+  } catch(e){
+    $('status').textContent = '오류: ' + e.message;
+    $('status').className = 'status err';
+  }
+}
+
+async function evolve(){
+  $('status').textContent = '/harness:evolve 실행 중…'; $('status').className = 'status';
+  $('evolveBtn').disabled = true;
+  try {
+    const r = await fetchJSON('/api/harness/evolve', {method:'POST'});
+    const div = $('evolveResult');
+    div.style.display = 'block';
+    if(r.ok){
+      div.innerHTML = `<strong>✓ 사이클 #${r.cycle} 제안서 생성됨</strong><br>
+        파일: <code>${r.path}</code> (backend: ${r.used_backend}, total turns: ${r.total})<br><br>
+        <hr style="border-color:var(--border)">
+        <pre>${(r.markdown||'').replace(/[<>&]/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</pre>`;
+      $('status').textContent = '✓ Evolve 완료'; $('status').className = 'status ok';
+    } else {
+      div.innerHTML = `<strong>✗ 트리거 조건 미충족</strong><br>사유: ${r.reason}<br>현재 누적: ${r.total} 턴`;
+      $('status').textContent = '✗ ' + r.reason; $('status').className = 'status err';
+    }
+  } catch(e){
+    $('status').textContent = '오류: ' + e.message; $('status').className = 'status err';
+  } finally {
+    $('evolveBtn').disabled = false;
+  }
+}
+
+function setupAuto(){
+  if(timer) clearInterval(timer);
+  if($('auto').checked) timer = setInterval(refresh, 5000);
+}
+
+$('refreshBtn').addEventListener('click', refresh);
+$('evolveBtn').addEventListener('click', evolve);
+$('auto').addEventListener('change', setupAuto);
+$('token').addEventListener('change', refresh);
+
+refresh();
+setupAuto();
+</script>
+</body>
+</html>

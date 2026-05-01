@@ -87,11 +87,36 @@
 | 히스토리 롤백 로직 검증 | OK | user 턴은 1회만 추가, 후보 실패 시 assistant 부분 추가분만 pop |
 | finally 텔레메트리 보장 | OK | `turn_meta` try 이전 초기화 + finally `log_turn()` |
 
-## 7. 다음 단계 (open items, 사이클 #3 후보)
+## 7. Phase 5 — 사이클 #3 결과 (TTS regen / Ollama 헬스 / Dashboard / Compare 텔레 / Evolve)
 
-1. **TTS 재생성 폴백** — 현재는 차단 시 텍스트만 표시. 향후 LLM 에 "더 짧게" 재요청해서 재시도 옵션 추가.
-2. **Ollama 폴백 후보화** — 현재 `available_backends()` 는 cfg.llm_backend == "ollama" 일 때만 ollama 포함. Ollama 호스트 헬스체크 + 항상 후보화 옵션.
-3. **Telemetry 대시보드 UI** — 현재는 JSON 만. `/harness/dashboard.html` 같은 SPA 페이지 추가.
-4. **A/B 비교 모드 텔레메트리** — `respond_compare` 경로에도 동일 로깅 적용.
-5. `/harness:evolve` 슬래시 커맨드 — 텔레메트리 N건 누적 시 자동으로 차기 세대 Harness 초안 제안.
+| 항목 | 결과 | 비고 |
+|------|------|------|
+| `audio_io.synthesize_bytes_verified(text, regen_callback)` | ✅ | 차단 시 1회 콜백 호출 → 재검증 → 통과 시 합성. `regenerated` 플래그 반환. |
+| `Brain.regenerate_safe_tts(original, reason)` | ✅ | Anthropic 우선, OpenAI 폴백. 짧고 안전한 재작성 LLM 호출. |
+| `_ollama_healthcheck()` 60s 캐시 + 1회 재시도 | ✅ | timeout 1.2s × 2 = 최대 2.4초 / 60s. ollama 미설치 환경에서는 ok=False (정상). |
+| `available_backends()` ollama 후보 포함 | ✅ | 헬스체크 통과 시 `cfg.llm_backend != "ollama"` 여도 폴백 후보. |
+| `web/harness/dashboard.html` SPA | ✅ | 토큰 Bearer-only, 5초 자동 새로고침, Evolve 버튼. 외부 라이브러리 0. |
+| `respond_compare` 텔레메트리 | ✅ | `backend="compare"`, `compare_sources` 키, `reply_len` 합산, fan-out 분석 포함. |
+| `POST /api/harness/evolve` | ✅ | total < MIN_TURNS 시 거부. `min_turns` 외부 입력 **상향만** 허용 (clamp). |
+| `harness_evolve.propose_next_cycle()` | ✅ 실측 | OpenAI 호출 → cycle-N.md markdown 생성 (생성 백엔드/시각/total 헤더 자동 추가). |
+| `python -c "import server"` smoke | ✅ | 모든 import 정상. |
+
+## 7.1 Architect 코드 리뷰 결과 (사이클 #3 종료시)
+
+| 항목 | 등급 | 처리 |
+|------|------|------|
+| `dashboard.html` 가 토큰을 query param + Bearer 양쪽에 전송 → URL/액세스 로그에 평문 노출 | P1 | ✅ 수정 — Bearer 헤더만 사용, query param 송신 제거. |
+| `/api/harness/evolve` 의 `min_turns` 외부 입력 하향 허용 → 트리거 조건 우회 | P2 | ✅ 수정 — `effective_min = max(MIN_TURNS, 외부값)` clamp. 하향 불가 검증 (`?min_turns=0` → 응답에 `min_turns=10` 반영). |
+| `_ollama_healthcheck` timeout 0.3s → false-negative | P2 | ✅ 수정 — 1.2s + 1회 재시도 (총 최대 2.4s, 60s 1회만). |
+| TTS regen 콜백 별도 스레드 호출 안전성 | OK | `regenerate_safe_tts` 는 history 미사용 / 도구 미사용 / 1회 호출 → 재진입 안전. |
+| Compare 모드 fan-out 부작용 | OK | parallel_analyze 200ms 타임아웃 + 실패 시 빈 dict → compare 응답 흐름에 영향 없음. |
+| dashboard innerHTML XSS | OK | markdown 출력은 `<pre>` 내 `&lt;/&gt;/&amp;` escape 적용. 통계 데이터는 모두 백엔드 통제. |
+
+## 8. 다음 단계 (open items, 사이클 #4 후보)
+
+1. **Ollama 자동 모델 풀** — 헬스체크 통과 시 미설치 모델 자동 pull (백그라운드).
+2. **Telemetry export to GitHub Issue** — 사이클 #N+1 제안서를 자동으로 PR/Issue 로 생성.
+3. **WebSocket 텔레메트리 스트림** — 대시보드가 polling 대신 WS 로 실시간 갱신.
+4. **regen 폴백 통계** — `tts_regenerated` 플래그를 summarize 에 추가 (재생성률 메트릭).
+5. **proposals 자동 적용** — 승인된 cycle-N.md 의 acceptance 항목을 task 트리로 변환.
 6. `references/orchestrator-template.md`, `references/team-examples.md` 등 나머지 참조 문서.
