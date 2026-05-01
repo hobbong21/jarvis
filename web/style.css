@@ -959,24 +959,20 @@ input, select { outline: none; }
   .quick-keys .ghost { padding: 8px 14px; min-height: 40px; }
 }
 
-/* ===== Mobile (≤ 640px) ===== */
+/* ===== Mobile (≤ 640px) — 자비스 풀스크린 + 음성 전용 ===== */
 @media (max-width: 640px) {
   :root { --topbar-h: 48px; }
 
-  /* Topbar: compact */
-  .topbar {
-    padding: 0 10px;
-    gap: 6px;
-  }
+  /* Topbar: compact, 패널 토글 / 탭바 / 텍스트 입력 모두 숨김 */
+  .topbar { padding: 0 10px; gap: 6px; }
   .brand-sm { font-size: 13px; letter-spacing: 0.12em; }
   .state-pill { font-size: 10px; padding: 3px 8px; letter-spacing: 0.08em; }
   .meta .dot { display: none; }
   .meta span[id="clock"] { display: none; }
-
-  /* 모바일: topbar 패널 토글 숨김 (대신 하단 탭바 사용) */
   .panel-toggles { display: none; }
+  .mobile-tabs { display: none !important; }
 
-  /* Hide desktop layout, show mobile panels */
+  /* 레이아웃: 자비스 오브 패널만 풀스크린 */
   .layout {
     display: block;
     height: calc(100dvh - var(--topbar-h));
@@ -984,101 +980,58 @@ input, select { outline: none; }
     position: relative;
     grid-template-columns: none !important;
   }
+  .chat-main, .side-pane { display: none !important; }
+  .mode-panel { display: none !important; }
 
-  /* Tab panels — bottom 은 탭바(56) + 입력바(62) = 118px */
-  .orb-pane,
-  .side-pane,
-  .chat-main {
+  /* 오브 풀스크린 */
+  .orb-pane {
     position: absolute;
     inset: 0;
-    bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 62px);
+    bottom: calc(var(--safe-bottom) + 110px);  /* 하단 마이크 영역 확보 */
     border: none;
-    padding: 12px 14px;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.2s;
+    padding: 8px 14px 0;
+    overflow: hidden;
     display: flex;
-  }
-
-  .orb-pane.tab-active,
-  .side-pane.tab-active,
-  .chat-main.tab-active {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  /* 모바일에서 chat-main 의 데스크톱 입력바 숨김 (하단 mobile-input-bar 사용) */
-  .chat-main { padding: 0; flex-direction: column; }
-  .chat-main .text-input { display: none; }
-  .chat-main .log-pane { border-bottom: none; }
-  .chat-main .log-header { padding: 12px 14px; }
-  .chat-main .log-body { padding: 12px 14px; font-size: 14px; }
-  .mode-panel { left: 12px; right: 12px; transform: none; max-width: calc(100% - 24px); }
-  @keyframes mode-fade {
-    from { opacity: 0; transform: translateY(-6px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-
-  /* Orb tab */
-  .orb-pane {
     flex-direction: column;
     align-items: center;
-    justify-content: flex-start;
-    padding-top: 16px;
-    gap: 0;
+    justify-content: center;
+    gap: 12px;
+    opacity: 1 !important;
+    pointer-events: auto !important;
   }
+  .orb-stack { width: 100%; display: flex; justify-content: center; }
   #orb {
-    width: min(280px, 75vw);
-    height: min(280px, 75vw);
+    width: min(78vw, 70dvh);
+    height: min(78vw, 70dvh);
     max-height: none;
     flex-shrink: 0;
   }
-  .orb-label { margin-top: 4px; }
-  #emotion-label { font-size: 17px; letter-spacing: 0.2em; }
-  #hint-label { font-size: 11px; margin-top: 6px; }
-  .tool-badge { margin-top: 6px; font-size: 11px; padding: 5px 12px; }
-
-  /* Hide desktop controls on orb pane */
+  .orb-tag { font-size: 10px; }
+  .orb-label { margin-top: 0; text-align: center; }
+  #emotion-label { font-size: 14px; letter-spacing: 0.25em; }
+  #hint-label { font-size: 11px; margin-top: 4px; opacity: 0.7; }
+  .tool-badge { margin-top: 4px; font-size: 10px; padding: 4px 10px; }
+  .orb-style-picker { display: none !important; }   /* 음성 전용이므로 숨김 */
   .controls { display: none; }
   .text-input { display: none; }
-  .quick-keys {
-    margin-top: 12px;
-    gap: 6px;
-    justify-content: center;
-  }
-  .quick-keys .ghost { padding: 8px 14px; min-height: 40px; font-size: 11px; }
 
-  /* Side tab */
-  .side-pane {
-    flex-direction: column;
-    gap: 10px;
-    overflow-y: auto;
-  }
-  .cam-wrap { flex-shrink: 0; }
-  .log-pane { min-height: 200px; }
-
-  /* Show mobile UI */
-  .mobile-tabs { display: flex; flex-direction: column; }
-  .mobile-input-bar { display: flex; }
-
-  /* ORB 탭 응답 표시 영역 */
+  /* ORB 응답 텍스트 (오브 아래) — 음성과 함께 자막 역할 */
   .orb-reply {
     display: block;
     width: 100%;
+    max-width: 480px;
     max-height: 0;
     overflow: hidden;
     background: rgba(0, 217, 255, 0.04);
     border: 0px solid rgba(0, 217, 255, 0.18);
-    border-radius: 8px;
+    border-radius: 10px;
     padding: 0 14px;
     margin-top: 0;
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.55;
     color: var(--text);
     word-break: break-word;
+    text-align: center;
     flex-shrink: 0;
     opacity: 0;
     pointer-events: none;
@@ -1086,37 +1039,70 @@ input, select { outline: none; }
     -webkit-overflow-scrolling: touch;
   }
   .orb-reply.visible {
-    max-height: 110px;
+    max-height: 30dvh;
     overflow-y: auto;
     opacity: 1;
     pointer-events: auto;
     padding: 10px 14px;
-    margin-top: 10px;
+    margin-top: 4px;
     border-width: 1px;
   }
-  .orb-reply.streaming {
-    border-color: rgba(0, 217, 255, 0.45);
-  }
+  .orb-reply.streaming { border-color: rgba(0, 217, 255, 0.45); }
   .orb-reply.streaming::after {
     content: " ▌";
     color: var(--accent);
     animation: blink-cursor 0.7s step-end infinite;
   }
 
-  /* Scrollbar minimal on mobile */
-  .log-body::-webkit-scrollbar { width: 0; }
+  /* 하단 입력바: 큰 마이크 버튼 하나만 (텍스트 입력 + 전송 숨김) */
+  .mobile-input-bar {
+    display: flex;
+    position: fixed;
+    bottom: var(--safe-bottom);
+    left: 0; right: 0;
+    padding: 12px 14px calc(12px + var(--safe-bottom));
+    background: linear-gradient(to top, rgba(8,17,28,0.98) 60%, rgba(8,17,28,0));
+    border-top: none;
+    z-index: 98;
+    gap: 0;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(8px);
+  }
+  .mobile-input-bar input { display: none; }    /* 텍스트 입력 숨김 */
+  .mobile-send-btn { display: none; }            /* 전송 버튼 숨김 */
+  .mobile-mic-btn {
+    width: 78px; height: 78px;
+    border-radius: 50%;
+    border: 2px solid var(--accent);
+    background: radial-gradient(circle at 30% 30%,
+      rgba(0, 217, 255, 0.28), rgba(0, 60, 90, 0.65));
+    color: var(--accent);
+    box-shadow:
+      0 0 24px rgba(0, 217, 255, 0.35),
+      inset 0 0 12px rgba(0, 217, 255, 0.2);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .mobile-mic-btn svg { width: 32px; height: 32px; }
+  .mobile-mic-btn.recording {
+    border-color: var(--red);
+    color: var(--red);
+    background: radial-gradient(circle at 30% 30%,
+      rgba(255, 80, 100, 0.35), rgba(120, 20, 30, 0.6));
+    box-shadow:
+      0 0 32px rgba(255, 80, 100, 0.55),
+      inset 0 0 14px rgba(255, 80, 100, 0.3);
+  }
+
+  /* Scrollbar minimal */
   .orb-pane::-webkit-scrollbar { width: 0; }
-  .side-pane::-webkit-scrollbar { width: 0; }
+  .orb-reply::-webkit-scrollbar { width: 0; }
 
   /* Bigger touch targets */
   .ghost { min-height: 40px; padding: 8px 12px; }
   #logout-btn { padding: 6px 10px; font-size: 10px; }
 
-  /* Camera controls on mobile */
-  .cam-controls { gap: 6px; }
-  .cam-controls select { font-size: 13px; padding: 8px 10px; min-height: 40px; }
-  #cam-toggle { min-height: 40px; }
-  .toggle { min-height: 40px; }
+  /* (구) 카메라 컨트롤 - 모바일에서 비전 패널 자체가 숨겨지므로 무관 */
 }
 
 /* ===== Very small (≤ 380px) ===== */

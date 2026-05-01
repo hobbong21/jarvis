@@ -503,16 +503,20 @@
     const modePanel = document.getElementById('mode-panel');
     if (!layout) return;
 
-    // 모바일은 하단 탭바 시스템을 사용하므로 데스크톱 패널 클래스가 끼어들지 않도록 정리.
+    // 모바일은 별도 풀스크린 자비스 뷰를 쓰므로 데스크톱 패널 클래스 정리.
     const applyDesktopState = () => {
       if (isMobile()) {
         layout.classList.remove('show-orb', 'show-vision');
         return;
       }
-      // 저장된 패널 상태 복원 (데스크톱에서만)
+      // 저장된 패널 상태 복원 (데스크톱에서만).
+      // 첫 방문 시점에는 감정 오브가 보이도록 orb=true 를 기본값으로 적용.
       const saved = (() => {
-        try { return JSON.parse(localStorage.getItem('panelState') || '{}'); }
-        catch { return {}; }
+        try {
+          const raw = localStorage.getItem('panelState');
+          if (!raw) return { orb: true, vision: false };  // 최초 방문 기본값
+          return JSON.parse(raw) || { orb: true, vision: false };
+        } catch { return { orb: true, vision: false }; }
       })();
       layout.classList.toggle('show-orb', !!saved.orb);
       layout.classList.toggle('show-vision', !!saved.vision);
