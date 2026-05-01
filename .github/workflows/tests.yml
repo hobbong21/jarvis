@@ -52,11 +52,12 @@ jobs:
           coverage report
           coverage xml
 
-      # 초기 baseline: 28% (branch coverage 포함). 현재 약 30%.
-      # 커버리지 개선에 따라 단계적으로 이 값을 상향 조정할 것.
+      # 사이클 #7: untested core modules (auth/tts_verifier/tools/audio_io/
+      # vision/brain/server/analysis) 에 단위 테스트를 추가하여 51%+ 달성.
+      # 다음 사이클에서 60% → 70% 로 상향 조정 예정.
       - name: Enforce coverage threshold
         run: |
-          coverage report --fail-under=28
+          coverage report --fail-under=50
 
       - name: Upload test results artifact
         if: always()
