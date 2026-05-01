@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from audio_io import EdgeTTS, WhisperSTT
-from brain import Brain
+from brain import Brain, _friendly_error
 from config import cfg
 from emotion import Emotion
 from tools import ToolExecutor
@@ -358,8 +358,10 @@ async def websocket_endpoint(ws: WebSocket):
                 except Exception as exc:
                     traceback.print_exc()
                     from emotion import Emotion as _E
+                    # 사이클 #6 핫픽스: raw 영문 예외 대신 친절 한국어 안내
                     loop.call_soon_threadsafe(
-                        queue.put_nowait, (None, _E.CONCERNED, f"오류: {exc}")
+                        queue.put_nowait,
+                        (None, _E.CONCERNED, _friendly_error(exc, cfg.llm_backend)),
                     )
                 finally:
                     loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
@@ -429,7 +431,8 @@ async def websocket_endpoint(ws: WebSocket):
                 )
         except Exception as e:
             traceback.print_exc()
-            await emit(type="error", message=str(e))
+            turn_meta["error"] = type(e).__name__
+            await emit(type="error", message=_friendly_error(e, cfg.llm_backend))
         finally:
             await emit(type="state", state="idle")
             await emit(type="emotion", emotion="neutral")
@@ -491,8 +494,10 @@ async def websocket_endpoint(ws: WebSocket):
                 except Exception as exc:
                     traceback.print_exc()
                     from emotion import Emotion as _E
+                    # 사이클 #6 핫픽스: compare 모드도 raw 예외 대신 친절 안내
                     loop.call_soon_threadsafe(
-                        queue.put_nowait, ("system", None, _E.CONCERNED, f"오류: {exc}")
+                        queue.put_nowait,
+                        ("system", None, _E.CONCERNED, _friendly_error(exc, "claude")),
                     )
                 finally:
                     loop.call_soon_threadsafe(queue.put_nowait, None)
@@ -532,7 +537,9 @@ async def websocket_endpoint(ws: WebSocket):
             turn_meta["llm_ms"] = (time.monotonic() - t_llm_start) * 1000.0
         except Exception as e:
             traceback.print_exc()
-            await emit(type="error", message=str(e))
+            turn_meta["error"] = type(e).__name__
+            # compare 모드는 두 백엔드 동시 — 일반 안내로 변환 (compare 라벨)
+            await emit(type="error", message=_friendly_error(e, "claude"))
         finally:
             await emit(type="state", state="idle")
             try:
@@ -644,9 +651,12 @@ async def websocket_endpoint(ws: WebSocket):
                         warnings=warnings,
                     )
                     for w in warnings:
-                        await emit(type="error", message=f"⚠ {w}")
+                        # w 는 항상 한국어 정적 문자열 (위에서 append) — 안전
+                        await emit(type="error", message="⚠ " + w)
                 except Exception as e:
-                    await emit(type="error", message=f"전환 실패: {e}")
+                    # 사이클 #6 핫픽스: 백엔드 전환 실패도 raw 영문 예외 대신
+                    # 친절 한국어 안내 (전환 대상 백엔드 라벨로 분기).
+                    await emit(type="error", message=_friendly_error(e, target))
 
             elif mtype == "reset":
                 session.brain.reset_history()
@@ -731,10 +741,14 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
         path = f.name
 
     # 사이클 #4 T001: 음성 경로 텔레메트리
+    # 사이클 #6 핫픽스: Brain 인스턴스에는 .cfg 속성이 존재하지 않으므로
+    # session/brain 객체 체이닝으로 백엔드 라벨을 얻으면 dict literal 평가 중
+    # AttributeError 가 try 진입 전에 raise 되어 핸들러가 죽고 WS 가 끊긴다.
+    # 모듈 레벨 cfg 를 직접 사용한다.
     turn_meta = {
         "turn_id": telemetry.new_turn_id(),
         "input_channel": "audio",
-        "backend": getattr(session.brain.cfg, "llm_backend", None),
+        "backend": cfg.llm_backend,
         "fallback_used": False,
         "fallback_chain": [],
     }
@@ -795,7 +809,7 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
     except Exception as e:
         traceback.print_exc()
         turn_meta["error"] = type(e).__name__
-        await emit(type="error", message=str(e))
+        await emit(type="error", message=_friendly_error(e, cfg.llm_backend))
     finally:
         try:
             Path(path).unlink(missing_ok=True)

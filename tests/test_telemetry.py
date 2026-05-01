@@ -239,5 +239,107 @@ class ZhipuAIBackendTests(unittest.TestCase):
                          f"키셋 불일치: 누락={empty_keys - zhipuai_keys}, 추가={zhipuai_keys - empty_keys}")
 
 
+class FriendlyErrorTests(unittest.TestCase):
+    """사이클 #6 핫픽스: server.py 가 raw 영문 예외(`Internal Server Error`,
+    `Connection error` 등)를 사용자에게 그대로 노출하던 회귀를 막기 위한
+    `brain._friendly_error` 분기 검증.
+    """
+
+    def test_credit_message_in_korean(self):
+        from brain import _friendly_error
+        msg = _friendly_error(Exception("Your credit balance is too low"), "claude")
+        self.assertIn("크레딧", msg)
+        self.assertIn("Claude", msg.title()) if False else self.assertTrue(
+            "CLAUDE" in msg or "Claude" in msg
+        )
+
+    def test_zhipuai_auth_message(self):
+        from brain import _friendly_error
+        msg = _friendly_error(Exception("身份验证失败 1000"), "zhipuai")
+        self.assertIn("ZhipuAI", msg)
+        self.assertIn("키", msg)
+
+    def test_network_message_generic(self):
+        from brain import _friendly_error
+        msg = _friendly_error(Exception("Connection timed out"), "openai")
+        self.assertIn("연결", msg)
+        self.assertNotIn("Connection timed out", msg)  # raw 영문 노출 금지
+
+    def test_unknown_falls_back_to_generic_korean(self):
+        from brain import _friendly_error
+        msg = _friendly_error(Exception("Some weird internal server error xyz"), "claude")
+        # raw 영문이 그대로 노출되면 안 됨
+        self.assertNotIn("xyz", msg)
+        self.assertIn("⚠", msg)
+
+
+class BrainCfgRegressionTests(unittest.TestCase):
+    """사이클 #6 핫픽스: handle_audio() 의 turn_meta 초기화에서
+    `session.brain.cfg` 접근 시 AttributeError 가 dict literal 평가 중
+    raise 되어 try 진입 전에 핸들러가 죽고 WS 가 끊기던 회귀.
+    Brain 인스턴스에는 .cfg 속성이 존재하지 않아야 — 그리고 server.py 는
+    모듈 레벨 cfg 를 직접 사용해야 한다.
+    """
+
+    def test_brain_instance_has_no_cfg_attr(self):
+        # Brain 을 실제 초기화하지 않고 클래스 차원에서 검증
+        # (init 은 외부 키에 의존하므로 import 만)
+        from brain import Brain
+        # 클래스 정의 또는 __init__ 의 self 할당에 cfg 가 없어야
+        # (이 회귀 패턴이 다시 들어오면 이 테스트가 실패하도록 명시)
+        import inspect
+        src = inspect.getsource(Brain.__init__)
+        self.assertNotIn("self.cfg", src,
+                         "Brain.__init__ 에 self.cfg 가 도입되면 server.py 의 "
+                         "session.brain.cfg 접근이 다시 가능해져 회귀 위험이 있습니다.")
+
+    def test_server_handle_audio_uses_module_cfg(self):
+        # server.py 가 session.brain.cfg 가 아니라 cfg.llm_backend 를 쓰는지
+        from pathlib import Path as _P
+        src = _P(__file__).resolve().parent.parent.joinpath("server.py").read_text(encoding="utf-8")
+        self.assertNotIn("session.brain.cfg", src,
+                         "session.brain.cfg 접근은 AttributeError 를 일으킵니다 "
+                         "(Brain 에는 cfg 속성이 없음). cfg.llm_backend 를 사용하세요.")
+
+    def test_server_never_emits_raw_str_exception(self):
+        """사이클 #6 핫픽스 회귀 방지: server.py 가 사용자에게 보내는 error
+        emit 에서 raw `str(e)` 를 그대로 노출하면 안 된다 (반드시 _friendly_error
+        를 거쳐야 함). 정확한 한국어 친절 메시지가 보장되도록 호출 지점 자체를
+        AST 로 검사한다.
+        """
+        import ast
+        from pathlib import Path as _P
+        src_path = _P(__file__).resolve().parent.parent.joinpath("server.py")
+        tree = ast.parse(src_path.read_text(encoding="utf-8"))
+
+        offending = []
+        for node in ast.walk(tree):
+            # await emit(type="error", message=...) 형태 호출만 검사
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            is_emit = (isinstance(func, ast.Name) and func.id == "emit")
+            if not is_emit:
+                continue
+            kw = {k.arg: k.value for k in node.keywords if k.arg}
+            t = kw.get("type")
+            if not (isinstance(t, ast.Constant) and t.value == "error"):
+                continue
+            msg = kw.get("message")
+            # message=str(e) 또는 f"오류: {e}" 등 raw 노출 패턴 차단
+            if isinstance(msg, ast.Call) and isinstance(msg.func, ast.Name) and msg.func.id == "str":
+                offending.append(ast.dump(node))
+            if isinstance(msg, ast.JoinedStr):
+                # f-string 안에 FormattedValue 가 있고 _friendly_error 가 아니면 의심
+                has_format = any(isinstance(v, ast.FormattedValue) for v in msg.values)
+                if has_format:
+                    offending.append(ast.dump(node))
+
+        self.assertEqual(offending, [],
+                         "server.py 가 사용자 에러 토스트로 raw 예외/포맷팅 문자열을 "
+                         "직접 노출하고 있습니다. _friendly_error(e, backend) 를 사용하세요:\n"
+                         + "\n".join(offending))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
