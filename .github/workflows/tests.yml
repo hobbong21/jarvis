@@ -52,12 +52,13 @@ jobs:
           coverage report
           coverage xml
 
-      # 사이클 #7: untested core modules (auth/tts_verifier/tools/audio_io/
-      # vision/brain/server/analysis) 에 단위 테스트를 추가하여 51%+ 달성.
-      # 다음 사이클에서 60% → 70% 로 상향 조정 예정.
+      # 사이클 #8: tests/test_server_endpoints.py 추가 — server.py 커버리지를
+      # 14.7% → 56.5% 로 끌어올려 전체 라인/브랜치 커버 62.4% 달성. 임계값을
+      # 50 → 60 으로 상향. 다음 사이클은 70% 목표 (streaming 백엔드 분기 + voice
+      # synthesize() 파이프라인 보강).
       - name: Enforce coverage threshold
         run: |
-          coverage report --fail-under=50
+          coverage report --fail-under=60
 
       - name: Upload test results artifact
         if: always()
