@@ -7,7 +7,7 @@ from typing import List
 @dataclass
 class Config:
     # ============ LLM 백엔드 ============
-    # "claude" | "openai" | "ollama" | "compare" (Claude + OpenAI 병렬 A/B)
+    # "claude" | "openai" | "ollama" | "zhipuai" | "compare" (Claude + OpenAI 병렬 A/B)
     llm_backend: str = os.getenv("SARVIS_BACKEND", "openai")
 
     # Claude API
@@ -24,6 +24,12 @@ class Config:
     # 모델 변경: OLLAMA_MODEL 환경변수로 (예: llama3.2:3b, qwen2.5:14b, gemma2:9b)
     ollama_host: str = os.getenv("OLLAMA_HOST") or "http://localhost:11434"
     ollama_model: str = os.getenv("OLLAMA_MODEL") or "qwen2.5:7b"
+
+    # ZhipuAI (智谱 GLM, OpenAI 호환). 키는 ZHIPUAI_API_KEY 우선,
+    # 없으면 OLLAMA_API_KEY 폴백 (초기 설정 시 잘못된 이름으로 저장된 경우 호환).
+    zhipuai_api_key: str = os.getenv("ZHIPUAI_API_KEY") or os.getenv("OLLAMA_API_KEY") or ""
+    zhipuai_base_url: str = os.getenv("ZHIPUAI_BASE_URL") or "https://open.bigmodel.cn/api/paas/v4"
+    zhipuai_model: str = os.getenv("ZHIPUAI_MODEL") or "glm-4-flash"
 
     # ============ 호출어 ============
     porcupine_access_key: str = os.getenv("PORCUPINE_ACCESS_KEY", "")

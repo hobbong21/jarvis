@@ -437,6 +437,8 @@
       } else if (e.key === '3') {
         send({ type: 'switch_backend', backend: 'ollama' });
       } else if (e.key === '4') {
+        send({ type: 'switch_backend', backend: 'zhipuai' });
+      } else if (e.key === '5') {
         send({ type: 'switch_backend', backend: 'compare' });
       } else if (e.key === 'r' || e.key === 'R') {
         send({ type: 'reset' });

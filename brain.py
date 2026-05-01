@@ -15,9 +15,10 @@ _EMOTION_PREFIX_RE = re.compile(r"^\s*\[emotion:\w+\]\s*", re.IGNORECASE)
 
 
 _ALT_BUTTONS = {
-    "claude": "[2·OPENAI] 또는 [3·OLLAMA]",
-    "openai": "[1·CLAUDE] 또는 [3·OLLAMA]",
+    "claude": "[2·OPENAI] 또는 [4·GLM]",
+    "openai": "[1·CLAUDE] 또는 [4·GLM]",
     "ollama": "[1·CLAUDE] 또는 [2·OPENAI]",
+    "zhipuai": "[1·CLAUDE] 또는 [2·OPENAI]",
 }
 
 
@@ -85,6 +86,7 @@ class Brain:
         self.client = None              # 현재 활성 백엔드 클라이언트
         self.anthropic_client = None    # 비전 도구용 (항상 보유 시도)
         self.openai_client = None       # OpenAI 용 (compare/openai 모드용)
+        self.zhipuai_client = None      # ZhipuAI(GLM, OpenAI 호환) 용
         self.tools = tool_executor
         self._init_backend()
 
@@ -120,6 +122,13 @@ class Brain:
             except Exception:
                 print(f"[Brain] Ollama 모델 '{cfg.ollama_model}' 다운로드 중...")
                 self.client.pull(cfg.ollama_model)
+        elif backend == "zhipuai":
+            self._ensure_zhipuai()
+            self.client = self.zhipuai_client
+            # 비전 도구는 Claude 가 처리하므로 가능하면 Anthropic 도 로드
+            self._ensure_anthropic()
+            if self.client is None:
+                print("[Brain] 경고: ZHIPUAI_API_KEY (또는 OLLAMA_API_KEY 폴백) 가 없습니다.")
         else:
             raise ValueError(f"알 수 없는 백엔드: {backend}")
 
@@ -144,6 +153,22 @@ class Brain:
             self.openai_client = OpenAI(api_key=cfg.openai_api_key)
         except Exception as e:
             print(f"[Brain] OpenAI 클라이언트 초기화 실패: {e}")
+
+    def _ensure_zhipuai(self):
+        """ZhipuAI(智谱 GLM) 는 OpenAI 호환 API 를 제공하므로 OpenAI SDK 의
+        base_url 만 교체해서 사용한다. 별도 패키지 설치 불필요."""
+        if self.zhipuai_client is not None:
+            return
+        if not cfg.zhipuai_api_key:
+            return
+        try:
+            from openai import OpenAI
+            self.zhipuai_client = OpenAI(
+                api_key=cfg.zhipuai_api_key,
+                base_url=cfg.zhipuai_base_url,
+            )
+        except Exception as e:
+            print(f"[Brain] ZhipuAI 클라이언트 초기화 실패: {e}")
 
     def get_client(self):
         """비전 도구는 항상 Anthropic 사용 (있으면)."""
@@ -181,6 +206,8 @@ class Brain:
                 return self._think_claude_simple()
             elif backend == "openai":
                 return self._think_openai_simple()
+            elif backend == "zhipuai":
+                return self._think_zhipuai_simple()
             else:
                 return self._think_ollama()
         except Exception as e:
@@ -188,9 +215,9 @@ class Brain:
             return Emotion.CONCERNED, f"AI 통신 오류가 발생했어요. {e}"
 
     # ============================================================
-    # OpenAI 단순 채팅 (도구 없음)
+    # OpenAI 호환 단순 채팅 헬퍼 (OpenAI / ZhipuAI 공용)
     # ============================================================
-    def _think_openai_simple(self) -> Tuple[Emotion, str]:
+    def _think_openai_compatible(self, client, model: str) -> Tuple[Emotion, str]:
         messages = [{"role": "system", "content": cfg.system_prompt}]
         for h in self.history:
             content = h["content"]
@@ -205,8 +232,8 @@ class Brain:
                 if parts:
                     messages.append({"role": h["role"], "content": " ".join(parts)})
 
-        resp = self.openai_client.chat.completions.create(
-            model=cfg.openai_model,
+        resp = client.chat.completions.create(
+            model=model,
             messages=messages,
             max_tokens=400,
             temperature=0.7,
@@ -216,6 +243,12 @@ class Brain:
         emotion, body = parse_emotion(raw)
         self._trim_history()
         return emotion, body
+
+    def _think_openai_simple(self) -> Tuple[Emotion, str]:
+        return self._think_openai_compatible(self.openai_client, cfg.openai_model)
+
+    def _think_zhipuai_simple(self) -> Tuple[Emotion, str]:
+        return self._think_openai_compatible(self.zhipuai_client, cfg.zhipuai_model)
 
     # ============================================================
     # Claude + Tool Use (메인 경로)
@@ -392,6 +425,8 @@ class Brain:
                 yield from self._stream_claude()
             elif backend == "openai":
                 yield from self._stream_openai()
+            elif backend == "zhipuai":
+                yield from self._stream_zhipuai()
             else:
                 yield from self._stream_ollama()
         except Exception as e:
@@ -400,7 +435,13 @@ class Brain:
             yield None, Emotion.CONCERNED, _friendly_error(e, backend)
 
     def _stream_openai(self):
-        """OpenAI ChatCompletion 스트리밍 — 도구 없이 단순 응답."""
+        yield from self._stream_openai_compatible(self.openai_client, cfg.openai_model)
+
+    def _stream_zhipuai(self):
+        yield from self._stream_openai_compatible(self.zhipuai_client, cfg.zhipuai_model)
+
+    def _stream_openai_compatible(self, client, model: str):
+        """OpenAI ChatCompletion 스트리밍 (OpenAI / ZhipuAI 공용) — 도구 없이 단순 응답."""
         messages = [{"role": "system", "content": cfg.system_prompt}]
         for h in self.history:
             content = h["content"]
@@ -419,8 +460,8 @@ class Brain:
         prefix_cleared = False
         MAX_PREFIX = 30
 
-        stream = self.openai_client.chat.completions.create(
-            model=cfg.openai_model,
+        stream = client.chat.completions.create(
+            model=model,
             messages=messages,
             max_tokens=600,
             temperature=0.7,
@@ -706,7 +747,7 @@ class Brain:
             self.history = self.history[-60:]
 
     def switch_backend(self, backend: str):
-        if backend not in ("claude", "openai", "ollama", "compare"):
+        if backend not in ("claude", "openai", "ollama", "zhipuai", "compare"):
             raise ValueError(f"지원하지 않는 백엔드: {backend}")
         cfg.llm_backend = backend
         self._init_backend()
@@ -727,6 +768,8 @@ class Brain:
             out.append("claude")
         if self.openai_client is not None:
             out.append("openai")
+        if self.zhipuai_client is not None:
+            out.append("zhipuai")
         # ollama: 현재 backend 가 ollama 면 client 직접, 아니면 헬스체크
         if cfg.llm_backend == "ollama" and self.client is not None:
             out.append("ollama")
@@ -833,6 +876,8 @@ class Brain:
             return self.anthropic_client
         if backend == "openai":
             return self.openai_client
+        if backend == "zhipuai":
+            return self.zhipuai_client
         if backend == "ollama":
             if cfg.llm_backend == "ollama" and self.client is not None:
                 return self.client
@@ -853,6 +898,8 @@ class Brain:
             yield from self._stream_claude()
         elif backend == "openai":
             yield from self._stream_openai()
+        elif backend == "zhipuai":
+            yield from self._stream_zhipuai()
         elif backend == "ollama":
             yield from self._stream_ollama()
         else:
