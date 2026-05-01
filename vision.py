@@ -14,14 +14,43 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-try:
-    import cv2
-    import numpy as np
-    HAS_CV2 = True
-except (ImportError, Exception):
-    cv2 = None  # type: ignore
-    np = None   # type: ignore
-    HAS_CV2 = False
+cv2 = None  # type: ignore
+np = None   # type: ignore
+HAS_CV2: Optional[bool] = None  # None=미시도, True=사용가능, False=실패
+_cv2_lock = threading.Lock()
+
+def _ensure_cv2() -> bool:
+    """cv2/numpy 를 호출 시점에 지연 로드 (배포 cold start 60초 제한 회피).
+
+    cv2(opencv-python) 는 ~80MB 이고 import 만으로 5~15초 소요되어,
+    모듈 로드 시점에 import 하면 uvicorn 이 포트를 열기 전에
+    Replit 의 60초 헬스체크가 타임아웃됨.
+    동시 호출 안전: double-check + Lock 으로 상태 전이 원자화.
+    """
+    global cv2, np, HAS_CV2
+    if HAS_CV2 is not None:
+        return bool(HAS_CV2)
+    with _cv2_lock:
+        if HAS_CV2 is not None:
+            return bool(HAS_CV2)
+        try:
+            import cv2 as _cv2
+            import numpy as _np
+            cv2 = _cv2
+            np = _np
+            HAS_CV2 = True
+        except Exception as e:
+            print(f"[vision] cv2 로드 실패: {e}")
+            HAS_CV2 = False
+    return bool(HAS_CV2)
+
+
+def _bg_preload_cv2():
+    """백그라운드에서 미리 cv2 로드 (첫 사용자 액션이 도착하기 전 준비)."""
+    _ensure_cv2()
+
+
+threading.Thread(target=_bg_preload_cv2, daemon=True, name="cv2-loader").start()
 
 from config import cfg
 
@@ -43,8 +72,7 @@ def _get_face_recognition():
             print("[Vision] face_recognition 미설치. pip install face_recognition")
     return _face_recognition_mod
 
-if not HAS_CV2:
-    print("[Vision] cv2 미설치 또는 로드 실패. 카메라 기능 비활성화.")
+# cv2 상태 로그는 백그라운드 로더에서 실패 시에만 출력 (_ensure_cv2 내부)
 
 
 # ============================================================
@@ -79,7 +107,7 @@ class FaceMemory:
 
     def identify(self, face_encoding) -> Optional[str]:
         fr = _get_face_recognition()
-        if not self.encodings or not HAS_CV2 or np is None or fr is None:
+        if not self.encodings or not _ensure_cv2() or fr is None:
             return None
         distances = fr.face_distance(self.encodings, face_encoding)
         best_idx = int(np.argmin(distances))
@@ -93,7 +121,7 @@ class FaceMemory:
 # ============================================================
 class VisionSystem:
     def __init__(self):
-        if not HAS_CV2:
+        if not _ensure_cv2():
             raise RuntimeError("cv2 미설치. 카메라 사용 불가.")
         self.cap = cv2.VideoCapture(cfg.camera_index)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.camera_width)
@@ -107,7 +135,7 @@ class VisionSystem:
         self._last_face_check = 0.0
 
     def read(self):
-        if not HAS_CV2:
+        if not _ensure_cv2():
             return None
         ok, frame = self.cap.read()
         if not ok:
@@ -116,7 +144,7 @@ class VisionSystem:
 
     def update_face_recognition(self, frame):
         fr = _get_face_recognition()
-        if not fr or not HAS_CV2 or np is None:
+        if not fr or not _ensure_cv2():
             return
         now = time.time()
         if now - self._last_face_check < cfg.face_check_interval:
@@ -142,7 +170,7 @@ class VisionSystem:
         ]
 
     def release(self):
-        if HAS_CV2 and self.cap:
+        if _ensure_cv2() and self.cap:
             self.cap.release()
 
 
@@ -159,7 +187,7 @@ class WebVision:
 
     @classmethod
     def _get_cascade(cls):
-        if not HAS_CV2:
+        if not _ensure_cv2():
             return None
         if cls._cascade is None:
             path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -178,7 +206,7 @@ class WebVision:
 
     def push_jpeg(self, data: bytes) -> bool:
         """브라우저가 WebSocket으로 보낸 JPEG 바이트를 디코드해 저장."""
-        if not HAS_CV2 or np is None:
+        if not _ensure_cv2():
             return False
         arr = np.frombuffer(data, dtype=np.uint8)
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -200,7 +228,7 @@ class WebVision:
 
     def _detect_faces(self, frame, fw: int, fh: int):
         """OpenCV Haar cascade 얼굴 감지."""
-        if not HAS_CV2:
+        if not _ensure_cv2():
             return
         try:
             cascade = self._get_cascade()
@@ -254,7 +282,7 @@ class WebVision:
         require_face=True 면 얼굴이 명확히 감지될 때만 반환 (등록용).
         require_face=False 면 얼굴이 없을 때 전체 프레임 반환 (식별용 폴백).
         """
-        if not HAS_CV2 or cv2 is None:
+        if not _ensure_cv2():
             return None
         with self._lock:
             frame = None if self._frame is None else self._frame.copy()

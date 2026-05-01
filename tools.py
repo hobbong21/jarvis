@@ -11,12 +11,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-try:
-    import cv2
-    HAS_CV2 = True
-except ImportError:
-    cv2 = None  # type: ignore
-    HAS_CV2 = False
+# cv2 는 vision 모듈의 lazy 로더를 재사용 (배포 cold start 60초 제한 회피).
+# 모듈 import 시 cv2 를 즉시 로드하면 uvicorn 이 포트 열기 전에 헬스체크 실패.
+from vision import _ensure_cv2
+
+def _get_cv2():
+    """cv2 모듈 객체를 lazy 로 반환 (없으면 None)."""
+    if _ensure_cv2():
+        import cv2 as _cv2
+        return _cv2
+    return None
 
 from config import cfg
 
@@ -199,7 +203,8 @@ class ToolExecutor:
             return "카메라 프레임을 가져올 수 없습니다."
 
         # JPEG 압축 (속도/대역폭)
-        if not HAS_CV2 or cv2 is None:
+        cv2 = _get_cv2()
+        if cv2 is None:
             return "카메라 기능을 사용할 수 없습니다 (cv2 미설치)."
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:
@@ -320,7 +325,8 @@ class ToolExecutor:
         if frame is None:
             return "카메라에 사람이 보이지 않거나 프레임을 가져올 수 없습니다."
 
-        if not HAS_CV2 or cv2 is None:
+        cv2 = _get_cv2()
+        if cv2 is None:
             return "카메라 기능을 사용할 수 없습니다 (cv2 미설치)."
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if not ok:
@@ -376,7 +382,8 @@ class ToolExecutor:
         if crop_jpeg is None:
             # 폴백: 전체 프레임
             frame = self.vision.read()
-            if frame is None or not HAS_CV2 or cv2 is None:
+            cv2 = _get_cv2()
+            if frame is None or cv2 is None:
                 return "카메라에 사람이 보이지 않거나 프레임을 가져올 수 없습니다."
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if not ok:
