@@ -157,6 +157,31 @@ input, select { outline: none; }
 
 #logout-btn { margin-left: 4px; }
 
+/* Harness 제어판 버튼 (topbar 내) */
+.control-panel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  text-decoration: none;
+  background: transparent;
+  border: 1px solid var(--accent-d);
+  border-radius: 2px;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.control-panel-btn:hover { color: var(--accent); border-color: var(--accent); }
+.control-panel-btn:active { background: rgba(0,217,255,0.08); }
+.control-panel-btn svg { flex-shrink: 0; opacity: 0.85; }
+@media (max-width: 720px) {
+  .control-panel-btn span { display: none; }
+  .control-panel-btn { padding: 4px 7px; }
+}
+
 /* ===== Desktop layout (≥ 769px) ===== */
 .layout {
   position: relative;
