@@ -37,18 +37,22 @@ tr:last-child td{border-bottom:none}
 .status{padding:6px 10px;border-radius:6px;font-size:12px;background:#1a1f26;color:var(--muted)}
 .status.ok{background:rgba(129,199,132,0.15);color:var(--ok)}
 .status.err{background:rgba(229,115,115,0.15);color:var(--err)}
+.status.live{background:rgba(77,208,225,0.18);color:var(--accent);animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.55}}
 pre{background:#0a0d12;padding:12px;border-radius:6px;overflow:auto;font-size:12px}
 .evolve-result{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:12px;white-space:pre-wrap;line-height:1.6}
 .evolve-result h1,.evolve-result h2,.evolve-result h3{color:var(--accent);margin:16px 0 6px}
+.flash{animation:flash 1.2s ease-out}
+@keyframes flash{0%{background:rgba(77,208,225,0.25)}100%{background:transparent}}
 </style>
 </head>
 <body>
 <h1>SARVIS Harness — Telemetry Dashboard</h1>
-<p class="sub">실시간 라우팅·지연·품질 집계. PII 없음. (사이클 #3 #3)</p>
+<p class="sub">실시간 라우팅·지연·품질 집계. PII 없음. (사이클 #4 — WS 실시간 + regen/입력채널 통계)</p>
 
 <div class="bar">
   <input id="token" type="password" placeholder="HARNESS_TELEMETRY_TOKEN (loopback 외에서 필수)">
-  <label><input id="auto" type="checkbox" checked> 5초 자동 새로고침</label>
+  <label><input id="auto" type="checkbox" checked> WebSocket 실시간 (실패 시 5초 폴링 폴백)</label>
   <button id="refreshBtn">새로고침</button>
   <button id="evolveBtn" class="primary">/harness:evolve 실행</button>
   <span id="status" class="status">대기</span>
@@ -67,23 +71,38 @@ pre{background:#0a0d12;padding:12px;border-radius:6px;overflow:auto;font-size:12
   </div>
 </div>
 
-<h2>TTS 차단 사유</h2>
-<table id="ttsTable"><thead><tr><th>Reason</th><th>Count</th><th>비중</th></tr></thead><tbody></tbody></table>
+<div class="grid2">
+  <div>
+    <h2>입력 채널</h2>
+    <table id="channelTable"><thead><tr><th>Channel</th><th>Count</th><th>비중</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div>
+    <h2>TTS 차단 사유</h2>
+    <table id="ttsTable"><thead><tr><th>Reason</th><th>Count</th><th>비중</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<h2>최근 턴 스트림 (최신 30개)</h2>
+<table id="streamTable">
+  <thead><tr><th>시각</th><th>채널</th><th>Backend</th><th>Intent</th><th>LLM ms</th><th>TTS ms</th><th>TTS</th></tr></thead>
+  <tbody></tbody>
+</table>
 
 <h2>Evolve 결과</h2>
 <div id="evolveResult" class="evolve-result" style="display:none"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-let timer = null;
+let pollTimer = null;
+let ws = null;
+const recentTurns = [];  // 최신순으로 30개 유지
+const RECENT_MAX = 30;
 
 function fmtPct(x){ return (x*100).toFixed(1) + '%'; }
 function fmtMs(x){ return x ? x.toFixed(1) + 'ms' : '0ms'; }
 function fmtTs(x){ return x ? new Date(x*1000).toLocaleTimeString('ko-KR') : '-'; }
 
 async function fetchJSON(url, opts){
-  // 보안 (사이클 #3 architect P1): 토큰은 Authorization Bearer 헤더로만 전송.
-  // query param 으로 보내면 액세스 로그/프록시 로그/브라우저 히스토리에 평문 노출됨.
   const tok = $('token').value.trim();
   const headers = opts && opts.headers ? {...opts.headers} : {};
   if(tok) headers['Authorization'] = 'Bearer ' + tok;
@@ -95,8 +114,9 @@ async function fetchJSON(url, opts){
 function renderCards(s){
   const cards = [
     {label:'총 턴', value: s.total},
-    {label:'폴백률', value: fmtPct(s.fallback_rate), cls: s.fallback_rate > 0.1 ? 'warn' : 'ok'},
-    {label:'TTS 실패율', value: fmtPct(s.tts_failure_rate), cls: s.tts_failure_rate > 0.05 ? 'err' : 'ok'},
+    {label:'폴백률', value: fmtPct(s.fallback_rate||0), cls: (s.fallback_rate||0) > 0.1 ? 'warn' : 'ok'},
+    {label:'TTS 실패율', value: fmtPct(s.tts_failure_rate||0), cls: (s.tts_failure_rate||0) > 0.05 ? 'err' : 'ok'},
+    {label:'TTS 재생성률', value: fmtPct(s.tts_regen_rate||0) + ' (' + (s.tts_regen_count||0) + ')', cls: (s.tts_regen_rate||0) > 0 ? 'warn' : 'ok'},
     {label:'평균 Fan-out', value: fmtMs(s.avg_fanout_ms)},
     {label:'평균 LLM', value: fmtMs(s.avg_llm_ms)},
     {label:'평균 TTS', value: fmtMs(s.avg_tts_ms)},
@@ -105,6 +125,10 @@ function renderCards(s){
   $('cards').innerHTML = cards.map(c =>
     `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls||''}">${c.value}</div></div>`
   ).join('');
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[<>&"']/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 function renderTable(tableId, dict, total){
@@ -116,24 +140,108 @@ function renderTable(tableId, dict, total){
   }
   tbody.innerHTML = entries.map(([k,v]) => {
     const pct = total > 0 ? v/total : 0;
-    return `<tr><td>${k}</td><td>${v}</td><td><div>${fmtPct(pct)}</div><div class="barbar"><div style="width:${pct*100}%"></div></div></td></tr>`;
+    return `<tr><td>${escapeHtml(k)}</td><td>${v}</td><td><div>${fmtPct(pct)}</div><div class="barbar"><div style="width:${pct*100}%"></div></div></td></tr>`;
   }).join('');
 }
 
-async function refresh(){
-  $('status').textContent = '로딩…'; $('status').className = 'status';
+function renderStream(){
+  const tbody = $('streamTable').querySelector('tbody');
+  if(recentTurns.length === 0){
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center">아직 턴 없음</td></tr>';
+    return;
+  }
+  tbody.innerHTML = recentTurns.map((t, i) => {
+    const ttsCls = t.tts_ok === false ? 'err' : (t.tts_regenerated ? 'warn' : 'ok');
+    const ttsLbl = t.tts_ok === false ? '✗ ' + (t.tts_reason||'?') : (t.tts_regenerated ? '↻ regen' : '✓');
+    return `<tr class="${i===0 && t._fresh ? 'flash' : ''}">
+      <td>${fmtTs(t.ts)}</td>
+      <td>${escapeHtml(t.input_channel||'-')}</td>
+      <td>${escapeHtml(t.backend||'-')}</td>
+      <td>${escapeHtml(t.intent||'-')}</td>
+      <td>${(t.llm_ms||0).toFixed(0)}</td>
+      <td>${(t.tts_ms||0).toFixed(0)}</td>
+      <td class="value ${ttsCls}">${escapeHtml(ttsLbl)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function applySummary(s){
+  renderCards(s);
+  renderTable('backendTable', s.backends, s.total);
+  renderTable('intentTable', s.intents, s.total);
+  renderTable('channelTable', s.input_channels, s.total);
+  renderTable('ttsTable', s.tts_reasons, s.total);
+}
+
+function pushTurn(meta){
+  meta._fresh = true;
+  recentTurns.unshift(meta);
+  if(recentTurns.length > RECENT_MAX) recentTurns.length = RECENT_MAX;
+  renderStream();
+  // _fresh 플래그는 다음 렌더에서 풀음
+  setTimeout(() => { meta._fresh = false; }, 1300);
+}
+
+async function pollOnce(){
+  $('status').textContent = '폴링…'; $('status').className = 'status';
   try {
     const s = await fetchJSON('/api/harness/telemetry');
-    renderCards(s);
-    renderTable('backendTable', s.backends, s.total);
-    renderTable('intentTable', s.intents, s.total);
-    renderTable('ttsTable', s.tts_reasons, s.total);
-    $('status').textContent = '갱신 완료 ' + new Date().toLocaleTimeString('ko-KR');
+    applySummary(s);
+    $('status').textContent = '폴링 완료 ' + new Date().toLocaleTimeString('ko-KR');
     $('status').className = 'status ok';
   } catch(e){
     $('status').textContent = '오류: ' + e.message;
     $('status').className = 'status err';
   }
+}
+
+function startPolling(){
+  if(pollTimer) clearInterval(pollTimer);
+  pollOnce();
+  if($('auto').checked) pollTimer = setInterval(pollOnce, 5000);
+}
+
+function stopPolling(){
+  if(pollTimer){ clearInterval(pollTimer); pollTimer = null; }
+}
+
+function connectWS(){
+  if(ws){ try{ ws.close(); }catch(e){} ws = null; }
+  if(!$('auto').checked){ stopPolling(); return; }
+
+  const tok = $('token').value.trim();
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const qs = tok ? ('?token=' + encodeURIComponent(tok)) : '';
+  const url = `${proto}//${location.host}/api/harness/ws${qs}`;
+
+  $('status').textContent = 'WS 연결 중…'; $('status').className = 'status';
+  try { ws = new WebSocket(url); }
+  catch(e){
+    $('status').textContent = 'WS 실패 — 폴링으로 폴백'; $('status').className = 'status err';
+    startPolling(); return;
+  }
+
+  ws.onopen = () => {
+    $('status').textContent = '✓ 실시간 연결'; $('status').className = 'status live';
+    stopPolling();
+  };
+  ws.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch(e){ return; }
+    if(m.type === 'summary'){ applySummary(m.summary); }
+    else if(m.type === 'turn'){
+      if(m.summary) applySummary(m.summary);
+      if(m.meta) pushTurn(m.meta);
+    }
+    // ping 은 무시 (keepalive 용)
+  };
+  ws.onerror = () => { /* onclose 가 후속 처리 */ };
+  ws.onclose = (ev) => {
+    ws = null;
+    if(!$('auto').checked) return;
+    $('status').textContent = `WS 끊김 (code ${ev.code}) — 5초 폴링으로 폴백`;
+    $('status').className = 'status err';
+    startPolling();
+  };
 }
 
 async function evolve(){
@@ -145,13 +253,13 @@ async function evolve(){
     div.style.display = 'block';
     if(r.ok){
       div.innerHTML = `<strong>✓ 사이클 #${r.cycle} 제안서 생성됨</strong><br>
-        파일: <code>${r.path}</code> (backend: ${r.used_backend}, total turns: ${r.total})<br><br>
+        파일: <code>${escapeHtml(r.path)}</code> (backend: ${escapeHtml(r.used_backend||'?')}, total turns: ${r.total})<br><br>
         <hr style="border-color:var(--border)">
-        <pre>${(r.markdown||'').replace(/[<>&]/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</pre>`;
+        <pre>${escapeHtml(r.markdown||'')}</pre>`;
       $('status').textContent = '✓ Evolve 완료'; $('status').className = 'status ok';
     } else {
-      div.innerHTML = `<strong>✗ 트리거 조건 미충족</strong><br>사유: ${r.reason}<br>현재 누적: ${r.total} 턴`;
-      $('status').textContent = '✗ ' + r.reason; $('status').className = 'status err';
+      div.innerHTML = `<strong>✗ 트리거 조건 미충족</strong><br>사유: ${escapeHtml(r.reason||'')}<br>현재 누적: ${r.total} 턴`;
+      $('status').textContent = '✗ ' + (r.reason||''); $('status').className = 'status err';
     }
   } catch(e){
     $('status').textContent = '오류: ' + e.message; $('status').className = 'status err';
@@ -160,18 +268,22 @@ async function evolve(){
   }
 }
 
-function setupAuto(){
-  if(timer) clearInterval(timer);
-  if($('auto').checked) timer = setInterval(refresh, 5000);
-}
-
-$('refreshBtn').addEventListener('click', refresh);
+$('refreshBtn').addEventListener('click', () => {
+  if(ws && ws.readyState === WebSocket.OPEN){ pollOnce(); }
+  else { startPolling(); }
+});
 $('evolveBtn').addEventListener('click', evolve);
-$('auto').addEventListener('change', setupAuto);
-$('token').addEventListener('change', refresh);
+$('auto').addEventListener('change', () => {
+  if($('auto').checked) connectWS();
+  else { stopPolling(); if(ws){ try{ws.close()}catch(e){} ws=null; } }
+});
+$('token').addEventListener('change', () => {
+  // 토큰 바뀌면 WS 재연결
+  if($('auto').checked) connectWS(); else pollOnce();
+});
 
-refresh();
-setupAuto();
+renderStream();
+connectWS();
 </script>
 </body>
 </html>

@@ -61,7 +61,10 @@ def new_turn_id() -> str:
 
 
 def log_turn(meta: Dict) -> None:
-    """한 턴의 메타데이터 1줄 추가. PII 본문 금지."""
+    """한 턴의 메타데이터 1줄 추가. PII 본문 금지.
+
+    사이클 #4 T002: 디스크 기록 후 _notify(safe) 로 실시간 구독자에게 푸시.
+    """
     safe = _sanitize(meta)
     safe.setdefault("ts", time.time())
     line = json.dumps(safe, ensure_ascii=False, separators=(",", ":"))
@@ -73,6 +76,8 @@ def log_turn(meta: Dict) -> None:
             _rotate_if_needed()
         except OSError as e:
             print(f"[telemetry] write failed: {e!r}")
+    # I/O 성공 여부와 무관하게 구독자 통지 (실시간 우선) — _lock 밖에서 호출.
+    _notify(safe)
 
 
 def _sanitize(meta: Dict) -> Dict:
@@ -159,9 +164,14 @@ def summarize(limit: Optional[int] = None) -> Dict:
         rows = rows[-limit:]
     total = len(rows)
     if total == 0:
+        # 사이클 #4 architect P1: 빈 경로도 비-빈 경로와 동일 키 셋을 반환해야
+        # 클라이언트(대시보드/테스트)가 키 존재를 가정해도 안전하다.
         return {
-            "total": 0, "backends": {}, "fallback_rate": 0.0,
-            "tts_failure_rate": 0.0, "tts_reasons": {}, "intents": {},
+            "total": 0, "backends": {}, "input_channels": {},
+            "fallback_rate": 0.0,
+            "tts_failure_rate": 0.0,
+            "tts_regen_count": 0, "tts_regen_rate": 0.0,
+            "tts_reasons": {}, "intents": {},
             "avg_fanout_ms": 0.0, "avg_llm_ms": 0.0, "avg_tts_ms": 0.0,
             "last_ts": None,
         }

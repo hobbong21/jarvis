@@ -112,11 +112,38 @@
 | Compare 모드 fan-out 부작용 | OK | parallel_analyze 200ms 타임아웃 + 실패 시 빈 dict → compare 응답 흐름에 영향 없음. |
 | dashboard innerHTML XSS | OK | markdown 출력은 `<pre>` 내 `&lt;/&gt;/&amp;` escape 적용. 통계 데이터는 모두 백엔드 통제. |
 
-## 8. 다음 단계 (open items, 사이클 #4 후보)
+## 8. Phase 6 — 사이클 #4 결과 (실시간 텔레메트리 + 통계 보강)
+
+| 항목 | 결과 | 비고 |
+|------|------|------|
+| `telemetry.summarize()` 새 키: `input_channels`, `tts_regen_count`, `tts_regen_rate` | ✅ | 비-빈/빈 경로 양쪽 동일 키셋 (architect P1 fix). |
+| `respond_internal` / `respond_compare` turn_meta 에 `input_channel="text"` | ✅ | text 경로 마킹. |
+| `handle_audio` 텔레메트리 신규 (`input_channel="audio"`, `stt_ms`, `total_ms` 등) | ✅ | 음성 입력 누락 회귀 해소 (사이클 #2/#3 누락분 보완). |
+| `telemetry.subscribe/unsubscribe/_notify` pub-sub | ✅ | log_turn() 후 lock 밖에서 _notify, 콜백 예외 격리. |
+| `WebSocket /api/harness/ws` 실시간 푸시 | ✅ | 연결 직후 summary, 새 turn 마다 `{type:'turn', meta, summary}`, 25초 keepalive ping. |
+| WS 인증 게이트 `_harness_ws_auth_ok` | ✅ | telemetry/evolve 와 동일 정책 (token 또는 loopback). |
+| `_enqueue_safe()` QueueFull 처리 | ✅ | 루프 스레드 내부 try/except (architect P1 fix). |
+| 대시보드 WS 우선 + 폴링 폴백 | ✅ | 끊김 시 5초 폴링 자동 재개, "✓ 실시간 연결" pulse pill. |
+| 새 카드 (TTS 재생성률) + 입력채널 표 + 최근 30턴 스트림 표 | ✅ | escapeHtml 적용, fresh row flash 애니메이션. |
+| 메인 페이지 우상단 "⚙ 제어판" 버튼 | ✅ | `web/index.html` topbar, `target="_blank" rel="noopener"`, 720px 이하 라벨 숨김. |
+| 종단간 검증: 메인 ws 채팅 1건 → harness ws turn msg 즉시 도착, summary.total/input_channels 갱신 | ✅ | |
+
+## 8.1 Architect 사이클 #4 리뷰 결과
+
+| 항목 | 등급 | 처리 |
+|------|------|------|
+| `_on_turn` 의 `try/except QueueFull` 가 `call_soon_threadsafe` 호출자 측에 있어 무효 | P1 | ✅ 수정 — `_enqueue_safe(item)` wrapper 를 만들어 루프 스레드 안에서 catch. |
+| `summarize()` 빈 경로(`total==0`)에 새 키(`input_channels`/`tts_regen_count`/`tts_regen_rate`) 누락 | P1 | ✅ 수정 — 빈 경로 dict 에 기본값 0/{}로 추가. 비-빈 경로와 키셋 동등 검증 통과. |
+| WS 인증 정책 일치성 (HTTP 와 동등?) | OK | _harness_ws_auth_ok 가 token+Bearer+loopback 모두 동일 분기. |
+| unsubscribe 누락 가능 경로 | OK | finally 보장. |
+| 대시보드 escapeHtml 누락 | OK | 모든 동적 출력 이스케이프 + status 는 textContent. |
+
+## 9. 다음 단계 (open items, 사이클 #5 후보)
 
 1. **Ollama 자동 모델 풀** — 헬스체크 통과 시 미설치 모델 자동 pull (백그라운드).
-2. **Telemetry export to GitHub Issue** — 사이클 #N+1 제안서를 자동으로 PR/Issue 로 생성.
-3. **WebSocket 텔레메트리 스트림** — 대시보드가 polling 대신 WS 로 실시간 갱신.
-4. **regen 폴백 통계** — `tts_regenerated` 플래그를 summarize 에 추가 (재생성률 메트릭).
-5. **proposals 자동 적용** — 승인된 cycle-N.md 의 acceptance 항목을 task 트리로 변환.
-6. `references/orchestrator-template.md`, `references/team-examples.md` 등 나머지 참조 문서.
+2. **Telemetry export to GitHub Issue** — 사이클 #N+1 제안서를 자동으로 PR/Issue 로 생성 (github 통합 이미 설치됨).
+3. **proposals 자동 적용** — 승인된 cycle-N.md 의 acceptance 항목을 task 트리로 변환.
+4. **summary 키셋 회귀 테스트** — architect 권장: `summarize()` 빈/비빈 키셋 동등성 + WS 큐 포화 drop 자동 검증.
+5. **WS soak test** — 5~10분 고빈도 turn 부하에서 메모리/연결 안정성.
+6. **응답시간 백분위** — avg 외 p50/p95/p99 추가 (LLM/TTS 분포).
+7. `references/orchestrator-template.md`, `references/team-examples.md` 등 나머지 참조 문서.

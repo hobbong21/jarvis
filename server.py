@@ -858,6 +858,106 @@ async def harness_evolve_endpoint(
     return result
 
 
+# ============================================================
+# 사이클 #4 T002 — Harness 텔레메트리 실시간 WebSocket 스트림
+# ============================================================
+def _harness_ws_auth_ok(ws: WebSocket, token: Optional[str]) -> bool:
+    """WebSocket 용 인증 게이트 — telemetry/evolve 와 동일 정책.
+
+    HARNESS_TELEMETRY_TOKEN 설정 시: query token 또는 Authorization Bearer 검증.
+    미설정 시: loopback 에서만 허용 (개발 모드).
+    """
+    expected = os.environ.get("HARNESS_TELEMETRY_TOKEN", "").strip()
+    if expected:
+        provided = (token or "").strip()
+        if not provided:
+            auth = ws.headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                provided = auth[7:].strip()
+        return bool(provided) and secrets.compare_digest(provided, expected)
+    # loopback only
+    client_host = (ws.client.host if ws.client else "") or ""
+    return client_host in ("127.0.0.1", "::1", "localhost")
+
+
+@app.websocket("/api/harness/ws")
+async def harness_ws_endpoint(ws: WebSocket, token: Optional[str] = None):
+    """텔레메트리 실시간 푸시. 연결 시 summary 1회 + 이후 새 turn 마다 push.
+
+    메시지 형식:
+      {"type": "summary", "summary": {...}}              # 연결 직후 1회
+      {"type": "turn", "meta": {...}, "summary": {...}}  # 새 턴 발생 시
+      {"type": "ping", "ts": <epoch>}                    # 25초 keepalive
+    """
+    if not _harness_ws_auth_ok(ws, token):
+        await ws.close(code=4401)  # 4xxx = 앱 정책 거부
+        return
+
+    await ws.accept()
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+
+    # 텔레메트리 구독 — 동기 콜백에서 asyncio.Queue 에 안전하게 put.
+    # 사이클 #4 architect P1: QueueFull 은 put_nowait 가 *루프 스레드*에서
+    # 실행될 때 raise 됨. 그래서 try/except 는 반드시 그 안에서 잡아야 한다
+    # (call_soon_threadsafe 호출자 측에서는 잡히지 않음).
+    def _enqueue_safe(item: Dict) -> None:
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            # 클라가 느려 큐가 막히면 그냥 드롭 (다음 summary 가 보정).
+            pass
+
+    def _on_turn(meta: Dict):
+        try:
+            loop.call_soon_threadsafe(_enqueue_safe, {"type": "turn", "meta": meta})
+        except RuntimeError:
+            # 이벤트 루프 종료 후 콜백이 들어오면 무시.
+            pass
+
+    telemetry.subscribe(_on_turn)
+
+    keepalive_task: Optional[asyncio.Task] = None
+    try:
+        # 1) 연결 직후 현재 summary 1회 송신.
+        try:
+            await ws.send_json({"type": "summary", "summary": telemetry.summarize()})
+        except Exception:
+            return
+
+        # 2) keepalive ping 25초 주기.
+        async def _keepalive():
+            while True:
+                await asyncio.sleep(25)
+                try:
+                    await queue.put({"type": "ping", "ts": time.time()})
+                except Exception:
+                    break
+        keepalive_task = asyncio.create_task(_keepalive())
+
+        # 3) 메인 루프 — 큐에서 꺼내 송신. turn 메시지엔 갱신된 summary 첨부.
+        while True:
+            msg = await queue.get()
+            if msg["type"] == "turn":
+                msg["summary"] = telemetry.summarize()
+            try:
+                await ws.send_json(msg)
+            except (WebSocketDisconnect, RuntimeError):
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[harness_ws] error: {e!r}")
+    finally:
+        telemetry.unsubscribe(_on_turn)
+        if keepalive_task:
+            keepalive_task.cancel()
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=5000, reload=False)
