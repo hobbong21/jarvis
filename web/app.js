@@ -69,6 +69,15 @@
   const CONTINUOUS_IDLE_TIMEOUT_MS = 30_000;
   const CONTINUOUS_MAX_FAILS = 2;         // 연속 2회 실패 → 모드 자동 OFF (무한 재시도 방지)
 
+  // ---------- 스트리밍 TTS (기획서 v1.5) ----------
+  // 서버가 응답 음성을 head/tail 두 청크로 쪼개 보낼 수 있음. 마지막 청크의
+  // ttsAudio.onended 에서만 maybeAutoStartListening 가 발동하도록 카운터 추적.
+  let _remainingTtsChunks = 0;
+  // (P0) Barge-in 후 서버에서 늦게 도착하는 tail 음성을 차단하는 latch.
+  // 서버는 barge-in 사실을 모르므로 클라이언트에서 새 turn 시작 (state=thinking|speaking)
+  // 까지 도착하는 모든 binary TTS 를 폐기.
+  let _ignoreTtsBytesUntilNextTurn = false;
+
   // ---------- 모바일 감지 ----------
   const isMobile = () => window.innerWidth <= 640;
 
@@ -176,9 +185,24 @@
         break;
       case 'state':
         setState(m.state);
+        // (P0) 새 turn 이 시작되면 barge-in latch 해제 + 청크 카운트 초기화.
+        // 다음에 도착할 tts_chunk_count 가 정상적으로 채워질 수 있도록.
+        if (m.state === 'thinking' || m.state === 'speaking') {
+          _ignoreTtsBytesUntilNextTurn = false;
+          _remainingTtsChunks = 0;
+        }
         // 서버가 idle 로 돌아왔는데 TTS 가 차단/생략돼 onended 가 안 불릴 수도 있음 →
-        // 연속 모드용 fallback 트리거 (이미 타이머가 있다면 idempotent 하게 갱신).
-        if (m.state === 'idle') maybeAutoStartListening();
+        // 연속 모드용 fallback 트리거 + 잔존 카운트 강제 reset (head blocked + tail audio
+        // 같은 비대칭 상황에서 _remainingTtsChunks 가 영구 잔존하는 것을 방지).
+        if (m.state === 'idle') {
+          _remainingTtsChunks = 0;
+          maybeAutoStartListening();
+        }
+        break;
+      case 'tts_chunk_count':
+        // (스트리밍 TTS 기획서 v1.5) 다음 응답이 N 개 청크로 쪼개져 옴.
+        // ttsAudio.onended 에서 카운트가 0 될 때만 자동 마이크 트리거.
+        _remainingTtsChunks = Math.max(0, parseInt(m.count, 10) || 0);
         break;
       case 'emotion':
         setEmotion(m.emotion);
@@ -317,8 +341,41 @@
     if (recording) {
       stopRecording();
     } else {
+      // (Barge-in 기획서 v1.5) 사비스가 말하는 중에 사용자가 마이크/SPACE 로 끼어들면
+      // TTS 즉시 멈추고 듣기 모드로 전환.
+      interruptTts();
       await startRecording();
     }
+  }
+
+  // ---------- Barge-in (기획서 v1.5) ----------
+  // 사비스 발화 중 사용자가 말하기 시작/SEND 누르면 TTS 즉시 정지 + 대기 큐 폐기.
+  // 연속 대화 모드의 자동 시작 예약도 취소 (사용자가 직접 말함).
+  function interruptTts() {
+    let interrupted = false;
+    try {
+      if (ttsAudio && !ttsAudio.paused && !ttsAudio.ended) {
+        ttsAudio.pause();
+        try { ttsAudio.currentTime = 0; } catch {}
+        interrupted = true;
+      }
+    } catch {}
+    if (_pendingTtsQueue.length) {
+      _pendingTtsQueue.length = 0;
+      interrupted = true;
+    }
+    if (interrupted) {
+      _stopAmpLoop();
+      // 환영 음성이 잠겨 있을 가능성 (사용자 첫 액션이 끼어들기) 도 같이 정리.
+      _suppressNextWelcomeAudio = true;
+    }
+    // (스트리밍 TTS) 남은 청크 카운트도 리셋 — 다음에 새 응답이 와야 정상 카운트.
+    _remainingTtsChunks = 0;
+    // (P0) 서버는 barge-in 을 즉시 알 수 없어 tail 합성·전송이 진행 중일 수 있다.
+    // 다음 turn (state=thinking|speaking) 시작 전까지 도착하는 모든 binary TTS 를 폐기.
+    _ignoreTtsBytesUntilNextTurn = true;
+    // 응답 종료 후 자동 마이크 켜기 예약이 있으면 취소 (사용자가 직접 시작하므로 중복 방지)
+    cancelContinuousAutoStart();
   }
 
   async function startRecording() {
@@ -452,6 +509,7 @@
     e.preventDefault();
     const t = textInput.value.trim();
     if (!t) return;
+    interruptTts();                // (Barge-in) 사비스 발화 중 SEND → TTS 즉시 정지
     markVoiceTurn(false);          // 텍스트 turn → 응답 후 자동 마이크 X
     cancelContinuousAutoStart();   // 진행 중인 자동 시작 타이머 취소
     send({ type: 'text_input', text: t });
@@ -464,6 +522,7 @@
       e.preventDefault();
       const t = mobileTextInput.value.trim();
       if (!t) return;
+      interruptTts();
       markVoiceTurn(false);
       cancelContinuousAutoStart();
       send({ type: 'text_input', text: t });
@@ -1281,6 +1340,12 @@
   }
 
   function playTtsBytes(buf, forceUnlocked) {
+    // (P0) Barge-in 후 같은 turn 의 tail 음성이 늦게 도착하면 폐기.
+    // 카운트가 남아 있으면 같이 줄여 영구 잔존 방지.
+    if (_ignoreTtsBytesUntilNextTurn) {
+      if (_remainingTtsChunks > 0) _remainingTtsChunks -= 1;
+      return;
+    }
     // 환영 음성을 사용자가 의도적으로 폐기한 경우 (마이크 즉시 클릭 등).
     if (_expectingWelcomeAudio && _suppressNextWelcomeAudio) {
       _expectingWelcomeAudio = false;
@@ -1315,6 +1380,12 @@
     ttsAudio.onended = () => {
       revokeOnce();
       _stopAmpLoop();
+      // (스트리밍 TTS) 청크가 더 남아 있으면 자동 마이크 트리거 보류.
+      // _remainingTtsChunks 가 0 (= count 메시지 안 옴 = 단일 합성) 이거나 마지막 청크일 때만 진행.
+      if (_remainingTtsChunks > 0) {
+        _remainingTtsChunks -= 1;
+        if (_remainingTtsChunks > 0) return;
+      }
       // 연속 대화 모드: 응답 TTS 가 끝나면 음성 turn 한정으로 자동으로 다음 발화 듣기.
       // (환영 인사는 _lastTurnWasVoice=false 이므로 자동 시작되지 않음 — 의도된 동작)
       maybeAutoStartListening();

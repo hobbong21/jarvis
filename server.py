@@ -11,13 +11,14 @@
 import asyncio
 import json
 import os
+import re
 import secrets
 import tempfile
 import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -42,6 +43,46 @@ print("  S . A . R . V . I . S   웹 서버 초기화")
 print("=" * 60)
 
 WEB_DIR = Path(__file__).parent / "web"
+
+
+# ─────────────────────────────────────────────────────────────
+# 스트리밍 TTS 헬퍼 (기획서 v1.5)
+# 응답 텍스트를 첫 문장(head) 와 나머지(tail) 로 쪼개서 두 청크로 병렬 합성하면
+# 첫 음성 지연이 줄어 사용자 체감 응답속도가 개선됨.
+# ─────────────────────────────────────────────────────────────
+# 한국어 종결 어미 + 라틴 종결 부호. 줄바꿈도 분할 후보.
+# 문장 끝 후보를 *최소* head 길이 이후에서 가장 빠른 후보로 잡는다.
+_SENTENCE_END_RE = re.compile(r"[.!?。…]+|\n+")
+# 실제 한국어 응답에서 의미 있는 첫 문장은 보통 15~160자.
+# min_head 가 너무 크면 분할 기회를 놓치고, 너무 작으면 의미 없는 짧은 첫 청크.
+_TTS_SPLIT_MIN_HEAD = 15
+_TTS_SPLIT_MAX_HEAD = 160
+_TTS_SPLIT_MIN_TOTAL = 60   # 전체가 60자 미만이면 분할 안 함
+
+
+def _split_first_sentence(text: str) -> Tuple[str, str]:
+    """첫 문장과 나머지로 분리. 분할 부적절 시 (text, '') 반환.
+
+    분할 기준:
+      - 전체 길이 ≥ _TTS_SPLIT_MIN_TOTAL
+      - 첫 [.!?。…\\n] 위치가 [_TTS_SPLIT_MIN_HEAD, _TTS_SPLIT_MAX_HEAD] 범위
+      - 분할 후 head, tail 모두 비어 있지 않음
+    """
+    if not text or len(text) < _TTS_SPLIT_MIN_TOTAL:
+        return text, ""
+    for m in _SENTENCE_END_RE.finditer(text):
+        cut = m.end()
+        if cut < _TTS_SPLIT_MIN_HEAD:
+            continue
+        if cut > _TTS_SPLIT_MAX_HEAD:
+            break  # 더 뒤의 후보도 더 길어지므로 분할 포기
+        head = text[:cut].strip()
+        tail = text[cut:].strip()
+        if head and tail:
+            return head, tail
+        return text, ""
+    return text, ""
+
 
 # STT: Whisper 는 모델 다운로드가 오래 걸릴 수 있으므로 백그라운드 스레드로 로드
 STT: Optional["WhisperSTT"] = None
@@ -408,27 +449,92 @@ async def websocket_endpoint(ws: WebSocket):
             await emit(type="state", state="speaking")
 
             # ── Generate-Verify TTS 게이트 (regen 폴백 포함, 사이클 #3 #1) ─
+            # (기획서 v1.5) 스트리밍 TTS: 첫 문장 / 나머지 두 청크 병렬 합성.
+            # 사용자 체감 응답속도 ↑ — 첫 청크가 짧아 빠르게 합성·재생되는 동안
+            # 나머지가 백그라운드에서 합성 진행. WebSocket 순서 보장으로 재생 순서는 안전.
             t_tts_start = time.monotonic()
             def _tts_regen(orig: str, reason: str) -> str:
                 # 별도 스레드에서 호출됨 → brain 재호출은 sync OK
                 return session.brain.regenerate_safe_tts(orig, reason)
-            tts_result = await asyncio.to_thread(
-                TTS.synthesize_bytes_verified, final_text, _tts_regen,
-            )
-            turn_meta["tts_ms"] = (time.monotonic() - t_tts_start) * 1000.0
-            turn_meta["tts_ok"] = tts_result["ok"]
-            turn_meta["tts_reason"] = tts_result["reason"]
-            turn_meta["tts_regenerated"] = bool(tts_result.get("regenerated"))
-
-            if tts_result["audio"]:
-                await emit_bytes(tts_result["audio"])
-            elif not tts_result["ok"]:
-                # 합성 차단 — 사용자에게 투명하게 알림 (텍스트는 이미 표시됨)
-                await emit(
-                    type="tts_blocked",
-                    reason=tts_result["reason"],
-                    message="음성 합성이 안전 검증에서 차단되었습니다 (텍스트만 표시).",
+            head_text, tail_text = _split_first_sentence(final_text)
+            tts_chunks_ok = 0
+            tts_first_reason: Optional[str] = None
+            tts_any_regenerated = False
+            if tail_text:
+                # 두 청크 분리됨 — 클라이언트에 미리 카운트 알려서 마지막 청크의
+                # ttsAudio.onended 에서만 연속 대화 모드 자동 마이크 트리거되도록.
+                await emit(type="tts_chunk_count", count=2)
+                head_task = asyncio.create_task(asyncio.to_thread(
+                    TTS.synthesize_bytes_verified, head_text, _tts_regen,
+                ))
+                tail_task = asyncio.create_task(asyncio.to_thread(
+                    TTS.synthesize_bytes_verified, tail_text, _tts_regen,
+                ))
+                head_res: Optional[dict] = None
+                tail_res: Optional[dict] = None
+                try:
+                    # head 가 끝나는 즉시 emit (tail 은 백그라운드 합성 계속)
+                    head_res = await head_task
+                    tts_first_reason = head_res["reason"]
+                    tts_any_regenerated = tts_any_regenerated or bool(head_res.get("regenerated"))
+                    if head_res["audio"]:
+                        await emit_bytes(head_res["audio"])
+                        tts_chunks_ok += 1
+                    elif not head_res["ok"]:
+                        await emit(
+                            type="tts_blocked",
+                            reason=head_res["reason"],
+                            message="음성 합성이 안전 검증에서 차단되었습니다 (텍스트만 표시).",
+                        )
+                    tail_res = await tail_task
+                    tts_any_regenerated = tts_any_regenerated or bool(tail_res.get("regenerated"))
+                    if tail_res["audio"]:
+                        await emit_bytes(tail_res["audio"])
+                        tts_chunks_ok += 1
+                    elif not tail_res["ok"]:
+                        # tail 만 차단된 경우 — head 는 이미 재생됨, tail 안내만
+                        await emit(
+                            type="tts_blocked",
+                            reason=tail_res["reason"],
+                            message="응답 후반부 음성 합성이 차단되었습니다 (텍스트만 표시).",
+                        )
+                finally:
+                    # (P0) head_task 가 예외를 던지면 tail_task 가 누수될 수 있음.
+                    # 미완료 task 는 cancel + drain 으로 안전 정리.
+                    for _t in (head_task, tail_task):
+                        if not _t.done():
+                            _t.cancel()
+                            try:
+                                await _t
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                # 텔레메트리 호환: 둘 중 하나라도 OK 면 ok=True, reason 은 첫 청크 기준
+                tts_ok = bool((head_res and head_res["ok"]) or (tail_res and tail_res["ok"]))
+                tts_reason = tts_first_reason or (tail_res["reason"] if tail_res else "exception")
+                turn_meta["tts_streamed"] = True
+            else:
+                # 단일 합성 (기존 동작) — count 메시지 안 보냄 → 클라이언트는 기본 0
+                res = await asyncio.to_thread(
+                    TTS.synthesize_bytes_verified, final_text, _tts_regen,
                 )
+                tts_any_regenerated = bool(res.get("regenerated"))
+                if res["audio"]:
+                    await emit_bytes(res["audio"])
+                    tts_chunks_ok += 1
+                elif not res["ok"]:
+                    await emit(
+                        type="tts_blocked",
+                        reason=res["reason"],
+                        message="음성 합성이 안전 검증에서 차단되었습니다 (텍스트만 표시).",
+                    )
+                tts_ok = res["ok"]
+                tts_reason = res["reason"]
+                turn_meta["tts_streamed"] = False
+            turn_meta["tts_ms"] = (time.monotonic() - t_tts_start) * 1000.0
+            turn_meta["tts_ok"] = tts_ok
+            turn_meta["tts_reason"] = tts_reason
+            turn_meta["tts_regenerated"] = tts_any_regenerated
+            turn_meta["tts_chunks"] = tts_chunks_ok
         except Exception as e:
             traceback.print_exc()
             turn_meta["error"] = type(e).__name__
