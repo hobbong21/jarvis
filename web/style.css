@@ -183,15 +183,137 @@ input, select { outline: none; }
 }
 
 /* ===== Desktop layout (≥ 769px) ===== */
+/* 대화 우선: 가운데 chat-main 항상 표시, 좌(orb)/우(vision) 패널은 토글식. */
 .layout {
   position: relative;
   display: grid;
-  grid-template-columns: 1.55fr 1fr;
+  grid-template-columns: 0px minmax(0, 1fr) 0px;
+  transition: grid-template-columns 0.3s ease;
   height: calc(100dvh - var(--topbar-h));
   overflow: hidden;
 }
+.layout.show-orb    { grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1fr) 0px; }
+.layout.show-vision { grid-template-columns: 0px minmax(0, 1fr) minmax(320px, 0.9fr); }
+.layout.show-orb.show-vision {
+  grid-template-columns: minmax(280px, 0.7fr) minmax(0, 1fr) minmax(280px, 0.7fr);
+}
 
-/* ===== Orb pane (좌/데스크톱) ===== */
+/* 패널 토글 버튼 (topbar) */
+.panel-toggles {
+  display: flex; gap: 6px; flex: 1; justify-content: center;
+}
+.panel-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 10px; font-size: 11px; letter-spacing: 0.08em;
+  min-height: 32px;
+}
+.panel-toggle[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(0,217,255,0.12);
+  box-shadow: 0 0 8px rgba(0,217,255,0.2);
+}
+.panel-toggle svg { flex-shrink: 0; opacity: 0.85; }
+
+/* ===== Chat main (가운데 메인) ===== */
+.chat-main {
+  position: relative; z-index: 1;
+  display: flex; flex-direction: column;
+  background: var(--bg);
+  min-width: 0; min-height: 0;
+}
+.chat-main .log-pane {
+  flex: 1; border: none; border-radius: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--accent-d);
+}
+.chat-main .log-header {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 11px; letter-spacing: 0.18em;
+  padding: 10px 18px;
+}
+.chat-main .log-header .log-sub {
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  font-size: 11px;
+  text-transform: none;
+  font-weight: 400;
+}
+.chat-main .log-body { padding: 18px 22px; font-size: 14px; }
+.chat-main .text-input {
+  display: flex; gap: 8px; align-items: center;
+  width: auto; margin: 0;
+  padding: 12px 16px calc(12px + var(--safe-bottom));
+  border-top: 1px solid var(--accent-d);
+  background: rgba(8,17,28,0.95);
+  flex-shrink: 0;
+}
+.chat-main .text-input input {
+  flex: 1; min-width: 0;
+  padding: 0 14px; height: 44px;
+  font-size: 15px;
+  border-radius: 22px;
+  background: rgba(8,17,28,0.85);
+}
+.mic-inline {
+  width: 44px; height: 44px; flex-shrink: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent-d);
+  background: rgba(0, 60, 90, 0.4);
+  color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: all 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.mic-inline:hover { border-color: var(--accent); }
+.mic-inline:active { transform: scale(0.92); }
+.mic-inline.recording {
+  border-color: var(--red);
+  color: var(--red);
+  background: rgba(255, 80, 100, 0.15);
+  box-shadow: 0 0 12px rgba(255,80,100,0.4);
+  animation: pulse-red 1s infinite;
+}
+.mic-label-sr { position: absolute; left: -9999px; }
+.send-btn {
+  height: 44px; padding: 0 18px;
+  border: 1px solid var(--accent);
+  background: rgba(0,217,255,0.1);
+  color: var(--accent);
+  font-size: 12px; letter-spacing: 0.18em; font-weight: 600;
+  border-radius: 22px;
+  cursor: pointer; transition: all 0.15s;
+}
+.send-btn:hover { background: rgba(0,217,255,0.22); }
+.send-btn:active { transform: scale(0.96); }
+
+/* 모드 패널 (chat-main 위에 떠 있는 드롭다운) */
+.mode-panel {
+  position: absolute;
+  top: 8px; left: 50%; transform: translateX(-50%);
+  z-index: 5;
+  background: rgba(8, 17, 28, 0.97);
+  border: 1px solid var(--accent-d);
+  border-radius: 6px;
+  padding: 12px 14px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  backdrop-filter: blur(6px);
+  animation: mode-fade 0.18s ease;
+}
+@keyframes mode-fade {
+  from { opacity: 0; transform: translate(-50%, -6px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+.mode-section + .mode-section { margin-top: 10px; }
+.mode-title {
+  font-size: 10px; letter-spacing: 0.18em;
+  color: var(--accent); margin-bottom: 8px;
+  font-family: 'Share Tech Mono', monospace;
+}
+.mode-panel .quick-keys { margin-top: 0; }
+.mode-panel .quick-keys .ghost { padding: 6px 10px; font-size: 11px; min-height: 32px; }
+
+/* ===== Orb pane (좌/데스크톱, 토글식) ===== */
 .orb-pane {
   position: relative; z-index: 1;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -199,6 +321,13 @@ input, select { outline: none; }
   border-right: 1px solid var(--accent-d);
   min-width: 0;
   overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+.layout.show-orb .orb-pane {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 /* HUD 스캔라인 — 주기적으로 오브 위를 훑어 내려감 */
@@ -388,13 +517,21 @@ input, select { outline: none; }
   box-shadow: 0 0 8px rgba(0,217,255,0.25);
 }
 
-/* ===== Side pane (우/데스크톱) ===== */
+/* ===== Side pane (우/데스크톱, 토글식) ===== */
 .side-pane {
   position: relative; z-index: 1;
   display: flex; flex-direction: column;
   padding: 16px;
   gap: 12px;
   overflow: hidden;
+  border-left: 1px solid var(--accent-d);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+.layout.show-vision .side-pane {
+  opacity: 1;
+  pointer-events: auto;
 }
 .cam-wrap {
   position: relative;
@@ -811,15 +948,14 @@ input, select { outline: none; }
 @media (max-width: 960px) {
   .topbar { padding: 0 12px; }
   .meta { font-size: 11px; }
-  .layout {
-    grid-template-columns: 1fr;
-    grid-template-rows: 50% 50%;
-    height: calc(100dvh - var(--topbar-h));
-  }
-  .orb-pane { border-right: none; border-bottom: 1px solid var(--accent-d); padding: 12px 16px; }
-  #orb { width: min(260px, 55vw); height: min(260px, 55vw); max-height: none; }
-  .text-input { width: min(480px, 96%); }
+  .panel-toggle span { display: none; }
+  .panel-toggle { padding: 5px 8px; }
+  /* 태블릿: 가운데 chat + 우측 vision 만 동시 (orb 는 별도 탭) */
+  .layout.show-vision { grid-template-columns: 0px minmax(0,1fr) minmax(280px, 0.8fr); }
+  .layout.show-orb    { grid-template-columns: minmax(280px,0.8fr) minmax(0,1fr) 0px; }
+  .orb-pane { border-right: none; padding: 12px 16px; }
   .side-pane { padding: 12px; gap: 8px; }
+  #orb { width: min(220px, 50vw); height: min(220px, 50vw); max-height: none; }
   .quick-keys .ghost { padding: 8px 14px; min-height: 40px; }
 }
 
@@ -837,17 +973,22 @@ input, select { outline: none; }
   .meta .dot { display: none; }
   .meta span[id="clock"] { display: none; }
 
+  /* 모바일: topbar 패널 토글 숨김 (대신 하단 탭바 사용) */
+  .panel-toggles { display: none; }
+
   /* Hide desktop layout, show mobile panels */
   .layout {
     display: block;
     height: calc(100dvh - var(--topbar-h));
     overflow: hidden;
     position: relative;
+    grid-template-columns: none !important;
   }
 
   /* Tab panels — bottom 은 탭바(56) + 입력바(62) = 118px */
   .orb-pane,
-  .side-pane {
+  .side-pane,
+  .chat-main {
     position: absolute;
     inset: 0;
     bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 62px);
@@ -863,9 +1004,22 @@ input, select { outline: none; }
   }
 
   .orb-pane.tab-active,
-  .side-pane.tab-active {
+  .side-pane.tab-active,
+  .chat-main.tab-active {
     opacity: 1;
     pointer-events: auto;
+  }
+
+  /* 모바일에서 chat-main 의 데스크톱 입력바 숨김 (하단 mobile-input-bar 사용) */
+  .chat-main { padding: 0; flex-direction: column; }
+  .chat-main .text-input { display: none; }
+  .chat-main .log-pane { border-bottom: none; }
+  .chat-main .log-header { padding: 12px 14px; }
+  .chat-main .log-body { padding: 12px 14px; font-size: 14px; }
+  .mode-panel { left: 12px; right: 12px; transform: none; max-width: calc(100% - 24px); }
+  @keyframes mode-fade {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
 
   /* Orb tab */

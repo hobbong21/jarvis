@@ -16,6 +16,39 @@
   <header class="topbar">
     <div class="brand-sm">S . A . R . V . I . S</div>
     <div id="state-pill" class="state-pill">STATE · IDLE</div>
+
+    <!-- 패널 토글 (대화 우선, 나머지는 원하면 표시) -->
+    <div class="panel-toggles" role="group" aria-label="패널 표시">
+      <button id="toggle-orb" class="panel-toggle ghost" type="button"
+              aria-pressed="false" title="오브 패널 (1)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="5"/>
+          <circle cx="12" cy="12" r="9" opacity="0.4"/>
+        </svg>
+        <span>오브</span>
+      </button>
+      <button id="toggle-vision" class="panel-toggle ghost" type="button"
+              aria-pressed="false" title="비전 (카메라/얼굴) 패널 (2)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+        <span>비전</span>
+      </button>
+      <button id="toggle-mode" class="panel-toggle ghost" type="button"
+              aria-pressed="false" title="모드 / 백엔드 (3)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/>
+          <line x1="3" y1="12" x2="21" y2="12"/>
+          <line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        <span>모드</span>
+      </button>
+    </div>
+
     <div class="meta">
       <span id="clock"></span>
       <span class="dot">·</span>
@@ -33,8 +66,8 @@
   </header>
 
   <main class="layout">
-    <!-- 좌/탭1: 오브 + 컨트롤 -->
-    <div class="orb-pane tab-active">
+    <!-- 좌/탭1: 오브 패널 (toggle, 기본 숨김) -->
+    <div class="orb-pane">
       <div class="orb-stack">
         <div class="orb-unit primary">
           <span class="orb-tag">CLAUDE</span>
@@ -49,35 +82,9 @@
       </div>
       <div class="orb-label">
         <span id="emotion-label">NEUTRAL</span>
-        <span id="hint-label" class="hint">버튼을 누르거나 SPACE 를 눌러 말하세요</span>
+        <span id="hint-label" class="hint">SPACE 또는 마이크 버튼으로 말하세요</span>
       </div>
       <div id="tool-badge" class="tool-badge hidden">⚙ <span id="tool-name"></span></div>
-
-      <div class="controls">
-        <button id="mic-btn" class="primary big" aria-label="음성 입력">
-          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 2a3 3 0 00-3 3v6a3 3 0 006 0V5a3 3 0 00-3-3z"/>
-            <path d="M19 10a7 7 0 01-14 0"/>
-            <line x1="12" y1="17" x2="12" y2="22"/>
-            <line x1="8" y1="22" x2="16" y2="22"/>
-          </svg>
-          <span id="mic-label">SPEAK</span>
-        </button>
-      </div>
-
-      <form id="text-form" class="text-input">
-        <input id="text-input" type="text" placeholder="텍스트로 입력..."
-               autocomplete="off" autocorrect="off" spellcheck="false">
-        <button type="submit" class="ghost">SEND</button>
-      </form>
-
-      <div class="quick-keys">
-        <button data-key="claude" class="ghost">1·CLAUDE</button>
-        <button data-key="openai" class="ghost">2·OPENAI</button>
-        <button data-key="ollama" class="ghost">3·OLLAMA</button>
-        <button data-key="compare" class="ghost">4·COMPARE</button>
-        <button data-key="reset" class="ghost">R·RESET</button>
-      </div>
 
       <div class="orb-style-picker" role="radiogroup" aria-label="오브 스타일">
         <span class="picker-label">ORB STYLE</span>
@@ -91,7 +98,51 @@
       <div id="orb-reply" class="orb-reply" role="status" aria-live="assertive" aria-label="사비스 응답"></div>
     </div>
 
-    <!-- 우/탭2: 카메라 + 로그 -->
+    <!-- 가운데: 대화 메인 (기본) -->
+    <div class="chat-main">
+      <div class="log-pane">
+        <div class="log-header">
+          <span>SARVIS · 대화</span>
+          <span class="log-sub">한국어로 대화하거나 SPACE 로 음성 입력</span>
+        </div>
+        <div id="log" class="log-body" role="log" aria-live="polite"></div>
+      </div>
+
+      <!-- 모드 패널 (토글, chat-main 위에 떠 있음) -->
+      <div id="mode-panel" class="mode-panel" hidden>
+        <div class="mode-section">
+          <div class="mode-title">백엔드 선택</div>
+          <div class="quick-keys">
+            <button data-key="claude" class="ghost">1·CLAUDE</button>
+            <button data-key="openai" class="ghost">2·OPENAI</button>
+            <button data-key="ollama" class="ghost">3·OLLAMA</button>
+            <button data-key="compare" class="ghost">4·COMPARE</button>
+            <button data-key="reset" class="ghost">R·RESET</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 데스크톱 통합 입력바 (마이크 + 텍스트 + 전송) -->
+      <form id="text-form" class="text-input">
+        <button id="mic-btn" type="button" class="mic-inline" aria-label="음성 입력">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2a3 3 0 00-3 3v6a3 3 0 006 0V5a3 3 0 00-3-3z"/>
+            <path d="M19 10a7 7 0 01-14 0"/>
+            <line x1="12" y1="17" x2="12" y2="22"/>
+            <line x1="8" y1="22" x2="16" y2="22"/>
+          </svg>
+          <span id="mic-label" class="mic-label-sr">SPEAK</span>
+        </button>
+        <input id="text-input" type="text" placeholder="SARVIS에게 한국어로 물어보세요..."
+               autocomplete="off" autocorrect="off" spellcheck="false">
+        <button type="submit" class="send-btn">SEND</button>
+      </form>
+
+      <!-- (구) 컨트롤 영역 placeholder — app.js 호환을 위해 hidden으로 유지 -->
+      <div class="controls" hidden></div>
+    </div>
+
+    <!-- 우/탭2: 비전 패널 (카메라 + 얼굴, toggle, 기본 숨김) -->
     <aside class="side-pane">
       <div class="cam-wrap">
         <video id="cam" autoplay muted playsinline></video>
@@ -140,11 +191,6 @@
         <div id="face-list" class="face-list"></div>
         <div id="face-msg" class="face-msg"></div>
       </div>
-
-      <div class="log-pane">
-        <div class="log-header">COMMUNICATION LOG</div>
-        <div id="log" class="log-body" role="log" aria-live="polite"></div>
-      </div>
     </aside>
   </main>
 
@@ -158,26 +204,33 @@
         <line x1="8" y1="22" x2="16" y2="22"/>
       </svg>
     </button>
-    <input id="mobile-text-input" type="text" placeholder="메시지 입력..."
+    <input id="mobile-text-input" type="text" placeholder="SARVIS에게 메시지..."
            autocomplete="off" autocorrect="off" spellcheck="false">
     <button type="submit" class="mobile-send-btn">↑</button>
   </form>
 
-  <!-- Mobile: 하단 탭바 -->
+  <!-- Mobile: 하단 탭바 (대화 우선) -->
   <div class="mobile-tabs">
     <nav>
-      <button class="tab-btn active" data-tab="orb">
+      <button class="tab-btn active" data-tab="chat">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+        </svg>
+        대화
+      </button>
+      <button class="tab-btn" data-tab="orb">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">
           <circle cx="12" cy="12" r="5"/>
           <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
         </svg>
-        ORB
+        오브
       </button>
       <button class="tab-btn" data-tab="side">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">
-          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+          <circle cx="12" cy="12" r="3"/>
         </svg>
-        LOG
+        비전
       </button>
     </nav>
   </div>

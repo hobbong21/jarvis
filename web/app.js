@@ -70,9 +70,10 @@
   setupClock();
   setupHotkeys();
   setupMobileTabs();
+  setupPanelToggles();
   connectWS();
   listCameras();
-  switchTab('orb');
+  switchTab('chat');
 
   // ---------- WebSocket ----------
   function connectWS() {
@@ -139,7 +140,7 @@
         break;
       case 'message':
         addLog(m.role, m.text);
-        if (isMobile() && m.role === 'assistant') markTabBadge('side');
+        if (isMobile() && m.role === 'assistant') markTabBadge('chat');
         break;
       case 'tool_event':
         if (m.status === 'start') {
@@ -164,7 +165,7 @@
         break;
       case 'stream_end':
         finalizeStreamBubble(m.text || '', m.emotion || 'neutral');
-        if (isMobile()) markTabBadge('side');
+        if (isMobile()) markTabBadge('chat');
         break;
       case 'compare_start':
         beginCompareBubbles(m.sources || ['claude', 'openai']);
@@ -185,7 +186,7 @@
         setSubEmotion(m.source, (m.emotion || 'NEUTRAL').toUpperCase());
         break;
       case 'compare_done':
-        if (isMobile()) markTabBadge('side');
+        if (isMobile()) markTabBadge('chat');
         break;
       case 'observe_state':
         observeToggle.checked = m.on;
@@ -472,14 +473,88 @@
     });
     const orbPane = document.querySelector('.orb-pane');
     const sidePane = document.querySelector('.side-pane');
-    if (tab === 'orb') {
+    const chatMain = document.querySelector('.chat-main');
+    [orbPane, sidePane, chatMain].forEach((el) => el && el.classList.remove('tab-active'));
+    if (tab === 'orb' && orbPane) {
       orbPane.classList.add('tab-active');
-      sidePane.classList.remove('tab-active');
-    } else {
+    } else if (tab === 'side' && sidePane) {
       sidePane.classList.add('tab-active');
-      orbPane.classList.remove('tab-active');
+    } else if (chatMain) {
+      // 기본: chat
+      chatMain.classList.add('tab-active');
       logEl.scrollTop = logEl.scrollHeight;
-      clearTabBadge('side');
+      clearTabBadge('chat');
+    }
+  }
+
+  // ---------- 데스크톱 패널 토글 (오브 / 비전 / 모드) ----------
+  function setupPanelToggles() {
+    const layout = document.querySelector('.layout');
+    const modePanel = document.getElementById('mode-panel');
+    if (!layout) return;
+
+    // 모바일은 하단 탭바 시스템을 사용하므로 데스크톱 패널 클래스가 끼어들지 않도록 정리.
+    const applyDesktopState = () => {
+      if (isMobile()) {
+        layout.classList.remove('show-orb', 'show-vision');
+        return;
+      }
+      // 저장된 패널 상태 복원 (데스크톱에서만)
+      const saved = (() => {
+        try { return JSON.parse(localStorage.getItem('panelState') || '{}'); }
+        catch { return {}; }
+      })();
+      layout.classList.toggle('show-orb', !!saved.orb);
+      layout.classList.toggle('show-vision', !!saved.vision);
+      setPressed('toggle-orb', !!saved.orb);
+      setPressed('toggle-vision', !!saved.vision);
+    };
+    applyDesktopState();
+    window.addEventListener('resize', applyDesktopState);
+
+    bindToggle('toggle-orb', () => {
+      const on = layout.classList.toggle('show-orb');
+      setPressed('toggle-orb', on);
+      saveState();
+    });
+    bindToggle('toggle-vision', () => {
+      const on = layout.classList.toggle('show-vision');
+      setPressed('toggle-vision', on);
+      saveState();
+    });
+    bindToggle('toggle-mode', () => {
+      if (!modePanel) return;
+      const willOpen = modePanel.hasAttribute('hidden');
+      if (willOpen) { modePanel.removeAttribute('hidden'); }
+      else { modePanel.setAttribute('hidden', ''); }
+      setPressed('toggle-mode', willOpen);
+    });
+
+    // 모드 패널 외부 클릭 시 닫기
+    document.addEventListener('click', (e) => {
+      if (!modePanel || modePanel.hasAttribute('hidden')) return;
+      const toggleBtn = document.getElementById('toggle-mode');
+      if (modePanel.contains(e.target) || (toggleBtn && toggleBtn.contains(e.target))) return;
+      // 모드 패널 안의 버튼 (백엔드 선택) 클릭은 quick-keys 핸들러가 따로 처리
+      modePanel.setAttribute('hidden', '');
+      setPressed('toggle-mode', false);
+    });
+
+    function bindToggle(id, fn) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('click', fn);
+    }
+    function setPressed(id, on) {
+      const el = document.getElementById(id);
+      if (el) el.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+    function saveState() {
+      try {
+        localStorage.setItem('panelState', JSON.stringify({
+          orb: layout.classList.contains('show-orb'),
+          vision: layout.classList.contains('show-vision'),
+        }));
+      } catch {}
     }
   }
 
@@ -847,7 +922,7 @@
     } else {
       textEl.textContent = text;
     }
-    markTabBadge('side');
+    markTabBadge('chat');
   }
 
   function typeWriter(el, text) {
