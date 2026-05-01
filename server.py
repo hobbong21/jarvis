@@ -28,6 +28,7 @@ from audio_io import EdgeTTS, WhisperSTT
 from brain import Brain, _friendly_error
 from config import cfg
 from emotion import Emotion
+from memory import get_memory
 from tools import ToolExecutor
 from vision import FaceRegistry, WebVision
 
@@ -133,9 +134,28 @@ class UserSession:
         self._last_observation = ""
         self.on_event = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        # (기획서 v2.0) 장기 메모리.
+        # memory_user_id 는 인증 도입 전까지 cfg.memory_user_id 를 공유 (단일 비서 모델).
+        # username 은 UI 표시용; 메모리 격리는 별도 키.
+        self.memory = get_memory()
+        self.memory_user_id = cfg.memory_user_id
+        # (P1) 한 세션 내부 동시 호출 직렬화용 락. conv_id 자체는 매 호출마다
+        # memory.get_or_start_conversation 으로 재평가 — idle 후 자동 전환.
+        self._conv_id_lock = threading.Lock()
 
         if cfg.llm_backend == "claude" and cfg.anthropic_api_key:
             self._attach_tools()
+
+    def get_conv_id(self) -> int:
+        """현재 대화 conversation id. 30분 idle 후 자동 재시작.
+
+        매 호출마다 memory.get_or_start_conversation 을 재평가해야 idle 윈도우가
+        지난 후 새 conversation 으로 자연 전환된다 + 다중 세션이 같은 user_id 의
+        가장 최근 active conversation 으로 수렴한다. lock 은 한 세션 내부의
+        동시 호출이 두 번 INSERT 하지 않도록 직렬화하기 위함.
+        """
+        with self._conv_id_lock:
+            return self.memory.get_or_start_conversation(self.memory_user_id)
 
     def _attach_tools(self):
         if self.tools is None:
@@ -368,7 +388,9 @@ async def websocket_endpoint(ws: WebSocket):
 
         try:
             # ── Phase: Fan-out/Fan-in 사전 분석 ─────────────────────
-            base_ctx = build_context()
+            # (기획서 v2.0) build_context 에 현재 발화를 query 로 전달 → 관련 과거 발언이
+            # system prompt 에 자동 주입된다.
+            base_ctx = build_context(query=prompt)
             analysis = await parallel_analyze(prompt, session)
             turn_meta["fanout_ms"] = analysis.get("ms", 0.0)
             turn_meta["intent"] = analysis.get("intent")
@@ -378,6 +400,16 @@ async def websocket_endpoint(ws: WebSocket):
 
             if log_user:
                 await emit(type="message", role="user", text=prompt)
+            # (기획서 v2.0) 사용자 발화를 장기 메모리에 기록. log_user=False 인 경우는
+            # 환영 인사처럼 시스템이 만든 prompt 라 메모리 기록 대상 아님.
+            user_msg_id: Optional[int] = None
+            if log_user:
+                try:
+                    user_msg_id = session.memory.add_message(
+                        session.get_conv_id(), "user", prompt,
+                    )
+                except Exception:
+                    traceback.print_exc()
 
             # 폴백 알림 큐 — 메인 루프에서만 emit (스레드 안전)
             fallback_events = []
@@ -444,6 +476,16 @@ async def websocket_endpoint(ws: WebSocket):
             turn_meta["llm_ms"] = (time.monotonic() - t_llm_start) * 1000.0
             turn_meta["emotion"] = final_emotion
             turn_meta["reply_len"] = len(final_text)
+
+            # (기획서 v2.0) 어시스턴트 응답을 장기 메모리에 기록.
+            if final_text:
+                try:
+                    session.memory.add_message(
+                        session.get_conv_id(), "assistant", final_text,
+                        emotion=final_emotion,
+                    )
+                except Exception:
+                    traceback.print_exc()
 
             await emit(type="emotion", emotion=final_emotion)
             await emit(type="state", state="speaking")
@@ -583,12 +625,17 @@ async def websocket_endpoint(ws: WebSocket):
 
         try:
             # Fan-out 분석 — compare 도 동일하게 실행 (intent 분포 통계용)
-            base_ctx = build_context()
+            base_ctx = build_context(query=prompt)
             analysis = await parallel_analyze(prompt, session)
             turn_meta["fanout_ms"] = analysis.get("ms", 0.0)
             turn_meta["intent"] = analysis.get("intent")
             extra_ctx = analysis_to_context(analysis)
             ctx = ", ".join(p for p in (base_ctx, extra_ctx) if p)
+            # (기획서 v2.0) compare 모드도 사용자 발화를 메모리에 기록.
+            try:
+                session.memory.add_message(session.get_conv_id(), "user", prompt)
+            except Exception:
+                traceback.print_exc()
 
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
@@ -631,6 +678,20 @@ async def websocket_endpoint(ws: WebSocket):
                 elif chunk:
                     await emit(type="compare_chunk", source=source, text=chunk)
 
+            # (기획서 v2.0) compare 모드의 두 백엔드 응답을 모두 메모리에 기록 —
+            # role="assistant" + emotion 에 source 표시(예: "neutral|claude").
+            for src, res in finals.items():
+                txt = (res.get("text") or "").strip()
+                if not txt:
+                    continue
+                try:
+                    session.memory.add_message(
+                        session.get_conv_id(), "assistant", txt,
+                        emotion=f"{res.get('emotion','neutral')}|{src}",
+                    )
+                except Exception:
+                    traceback.print_exc()
+
             await emit(type="compare_done")
             await emit(type="emotion", emotion="neutral")
 
@@ -654,12 +715,20 @@ async def websocket_endpoint(ws: WebSocket):
             except Exception:
                 traceback.print_exc()
 
-    def build_context() -> str:
+    def build_context(query: Optional[str] = None) -> str:
         parts = []
         if session.observing:
             parts.append("행동 모니터링 활성")
         if session._last_observation:
             parts.append(f"최근 관찰: {session._last_observation}")
+        # (기획서 v2.0) 저장된 사실/관련 과거 발언을 system prompt 에 주입.
+        # query 가 있으면 해당 키워드로 과거 메시지 LIKE 검색 — 빈 결과면 아무것도 추가 안 함.
+        try:
+            mem_block = session.memory.context_block(session.memory_user_id, query=query)
+            if mem_block:
+                parts.append(mem_block)
+        except Exception:
+            traceback.print_exc()
         return ", ".join(parts)
 
     welcome_task = asyncio.create_task(welcome())
@@ -881,16 +950,30 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
             return
 
         await emit(type="message", role="user", text=text)
+        # (기획서 v2.0) 음성 turn 도 장기 메모리에 기록.
+        try:
+            session.memory.add_message(session.get_conv_id(), "user", text)
+        except Exception:
+            traceback.print_exc()
 
         t_llm = time.monotonic()
         emotion, reply = await asyncio.to_thread(
-            session.brain.think, text, build_context()
+            session.brain.think, text, build_context(query=text)
         )
         turn_meta["llm_ms"] = (time.monotonic() - t_llm) * 1000.0
         turn_meta["emotion"] = emotion.value if hasattr(emotion, "value") else str(emotion)
         turn_meta["reply_len"] = len(reply or "")
 
         await emit(type="message", role="assistant", text=reply)
+        # (기획서 v2.0) 어시스턴트 응답도 메모리에 기록.
+        if reply:
+            try:
+                session.memory.add_message(
+                    session.get_conv_id(), "assistant", reply,
+                    emotion=turn_meta["emotion"],
+                )
+            except Exception:
+                traceback.print_exc()
         await emit(type="emotion", emotion=emotion.value)
         await emit(type="state", state="speaking")
 

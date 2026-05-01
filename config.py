@@ -58,6 +58,12 @@ class Config:
 
     # ============ 얼굴 인식 ============
     faces_dir: str = "faces"
+
+    # ============ 장기 메모리 (기획서 v2.0) ============
+    # SARVIS 는 단일 사용자 데스크톱 비서 모델. 인증이 추가되기 전까지는
+    # 모든 WS 연결이 동일한 메모리 user_id 를 공유 (= 한 사람의 비서로 사용).
+    # 다중 사용자 환경에서는 SARVIS_MEMORY_USER 를 디바이스/계정별로 분리할 것.
+    memory_user_id: str = os.getenv("SARVIS_MEMORY_USER", "default")
     face_check_interval: float = 0.8
     face_match_tolerance: float = 0.5
 

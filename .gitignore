@@ -48,3 +48,11 @@ models/
 *.tmp
 *.mp3
 *.wav
+
+
+# 메모리 DB (v2.0)
+memory.db
+memory.db-journal
+memory.db-wal
+memory.db-shm
+chromadb/
