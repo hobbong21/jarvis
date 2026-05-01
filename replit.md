@@ -26,7 +26,10 @@ A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning �
 ## Environment Variables
 
 - `ANTHROPIC_API_KEY` — Required for Claude backend (set as a secret)
-- `SARVIS_BACKEND` — `"claude"` (default) or `"ollama"`
+- `OPENAI_API_KEY` — Required for OpenAI backend and `compare` mode (set as a secret)
+- `SARVIS_BACKEND` — `"claude"` (default), `"openai"`, `"ollama"`, or `"compare"`
+- `OLLAMA_HOST` — Ollama server URL (default `http://localhost:11434`). Use a tunnel URL (e.g. cloudflared) when SARVIS runs on Replit but Ollama runs on a local machine.
+- `OLLAMA_MODEL` — Ollama model tag (default `qwen2.5:7b`). Examples: `llama3.2:3b`, `qwen2.5:14b`, `gemma2:9b`.
 - `PORCUPINE_ACCESS_KEY` — Optional, for desktop wake-word detection
 
 ## Running

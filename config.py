@@ -21,8 +21,9 @@ class Config:
     openai_model: str = "gpt-4o-mini"
 
     # Ollama (로컬, 도구 사용 비활성화)
-    ollama_host: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    ollama_model: str = "claude"
+    # 모델 변경: OLLAMA_MODEL 환경변수로 (예: llama3.2:3b, qwen2.5:14b, gemma2:9b)
+    ollama_host: str = os.getenv("OLLAMA_HOST") or "http://localhost:11434"
+    ollama_model: str = os.getenv("OLLAMA_MODEL") or "qwen2.5:7b"
 
     # ============ 호출어 ============
     porcupine_access_key: str = os.getenv("PORCUPINE_ACCESS_KEY", "")
