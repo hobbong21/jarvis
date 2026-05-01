@@ -182,6 +182,37 @@ input, select { outline: none; }
   .control-panel-btn { padding: 4px 7px; }
 }
 
+/* 연속 대화 모드 토글 (topbar meta 영역) — control-panel-btn 과 동일 시각 톤 */
+.continuous-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--accent-d);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.continuous-toggle:hover { color: var(--accent); border-color: var(--accent); }
+.continuous-toggle svg { flex-shrink: 0; opacity: 0.85; }
+.continuous-toggle[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(0,217,255,0.10);
+  box-shadow: 0 0 8px rgba(0,217,255,0.20);
+}
+.continuous-toggle[aria-pressed="true"] svg { opacity: 1; }
+@media (max-width: 720px) {
+  .continuous-toggle span { display: none; }
+  .continuous-toggle { padding: 4px 7px; }
+}
+
 /* ===== Desktop layout (≥ 769px) ===== */
 /* 대화 우선: 가운데 chat-main 항상 표시, 좌(orb)/우(vision) 패널은 토글식. */
 .layout {

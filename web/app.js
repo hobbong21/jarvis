@@ -38,6 +38,7 @@
   const faceCount = $('face-count');
   const faceMsg = $('face-msg');
   const ttsAudio = $('tts-audio');
+  const continuousToggle = $('continuous-toggle');
 
   const mobileMicBtn = $('mobile-mic-btn');
   const mobileTextForm = $('mobile-text-form');
@@ -55,6 +56,19 @@
   let secondOrb = null;
   let compareMode = false;
 
+  // ---------- 연속 대화 모드 (기획서 v1.5) ----------
+  // 음성 발화 → 응답 종료 → 자동으로 다음 발화 듣기로 전환.
+  // 사용자가 텍스트로 입력한 turn 뒤에는 자동 시작하지 않음 (텍스트 선호자 보호).
+  // 30 초 무발화 시 자동 OFF (안전장치).
+  let continuousMode = (localStorage.getItem('sarvis-continuous') === '1');
+  let _lastTurnWasVoice = false;          // 마지막 turn 이 음성 입력이었는지
+  let _continuousAutoStartTimer = null;   // 응답 종료 후 자동 시작까지 짧은 지연 타이머
+  let _continuousIdleTimer = null;        // 30 초 무발화 자동 OFF 타이머
+  let _continuousFailCount = 0;           // 자동 시작 연속 실패 카운터 (마이크 권한 거부 등)
+  const CONTINUOUS_AUTO_START_DELAY_MS = 600;
+  const CONTINUOUS_IDLE_TIMEOUT_MS = 30_000;
+  const CONTINUOUS_MAX_FAILS = 2;         // 연속 2회 실패 → 모드 자동 OFF (무한 재시도 방지)
+
   // ---------- 모바일 감지 ----------
   const isMobile = () => window.innerWidth <= 640;
 
@@ -71,6 +85,7 @@
   setupHotkeys();
   setupMobileTabs();
   setupPanelToggles();
+  setupContinuousToggle();
   connectWS();
   listCameras();
   switchTab('chat');
@@ -86,6 +101,11 @@
       _suppressNextWelcomeAudio = false;
       _pendingTtsQueue.length = 0;
     } catch (_e) { /* TDZ on initial connect — 깨끗한 상태이므로 무시 */ }
+    // (연속 대화 모드 P1) 재연결 시 마지막 turn voice flag 리셋 — 재연결 후 환영 음성의
+    // onended 가 이전 세션의 voice flag 로 자동 마이크를 켜는 사고 방지.
+    _lastTurnWasVoice = false;
+    cancelContinuousAutoStart();
+    cancelContinuousIdleTimer();
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.binaryType = 'arraybuffer';
@@ -156,6 +176,9 @@
         break;
       case 'state':
         setState(m.state);
+        // 서버가 idle 로 돌아왔는데 TTS 가 차단/생략돼 onended 가 안 불릴 수도 있음 →
+        // 연속 모드용 fallback 트리거 (이미 타이머가 있다면 idempotent 하게 갱신).
+        if (m.state === 'idle') maybeAutoStartListening();
         break;
       case 'emotion':
         setEmotion(m.emotion);
@@ -325,6 +348,7 @@
       };
       mediaRecorder.start();
       recording = true;
+      markVoiceTurn(true);  // 음성으로 시작한 turn → 응답 후 자동 시작 자격
       micBtn.classList.add('recording');
       if (mobileMicBtn) mobileMicBtn.classList.add('recording');
       micLabel.textContent = 'STOP';
@@ -368,6 +392,9 @@
   function stopRecording() {
     if (!recording) return;
     recording = false;
+    // (연속 대화 모드 P1 수정) idle timer cancel 은 VAD 가 처음 음성을 감지한 시점에서 처리.
+    // stopRecording 시점에서는 cancel 하지 않음 — 그렇게 하면 VAD 의 15s 강제 stop 으로
+    // 30s 무발화 자동 OFF 가 실제로는 절대 발동 못 했었음.
     micBtn.classList.remove('recording');
     if (mobileMicBtn) mobileMicBtn.classList.remove('recording');
     micLabel.textContent = 'SPEAK';
@@ -398,6 +425,10 @@
       const rms = Math.sqrt(sum / data.length);
       const now = performance.now();
       if (rms > 0.04) {
+        if (!speaking) {
+          // (연속 대화 모드 P1) 사용자가 실제로 발화 시작 — 30s 무발화 자동 OFF 타이머 취소.
+          markUserSpoke();
+        }
         speaking = true;
         silenceStart = 0;
       } else if (speaking) {
@@ -421,6 +452,8 @@
     e.preventDefault();
     const t = textInput.value.trim();
     if (!t) return;
+    markVoiceTurn(false);          // 텍스트 turn → 응답 후 자동 마이크 X
+    cancelContinuousAutoStart();   // 진행 중인 자동 시작 타이머 취소
     send({ type: 'text_input', text: t });
     textInput.value = '';
   });
@@ -431,6 +464,8 @@
       e.preventDefault();
       const t = mobileTextInput.value.trim();
       if (!t) return;
+      markVoiceTurn(false);
+      cancelContinuousAutoStart();
       send({ type: 'text_input', text: t });
       mobileTextInput.value = '';
       mobileTextInput.blur();
@@ -586,6 +621,110 @@
         }));
       } catch {}
     }
+  }
+
+  // ---------- 연속 대화 모드 (기획서 v1.5) ----------
+  function setupContinuousToggle() {
+    if (!continuousToggle) return;
+    applyContinuousButtonState();
+    continuousToggle.addEventListener('click', () => {
+      setContinuousMode(!continuousMode, /*fromUser=*/true);
+    });
+  }
+
+  function applyContinuousButtonState() {
+    if (!continuousToggle) return;
+    continuousToggle.setAttribute('aria-pressed', continuousMode ? 'true' : 'false');
+    continuousToggle.title = continuousMode
+      ? '연속 대화 모드 ON — 응답 후 자동으로 다음 발화를 듣습니다 (30초 무발화 시 자동 종료)'
+      : '연속 대화 모드 OFF — 응답 후 마이크가 자동으로 켜지지 않습니다';
+  }
+
+  function setContinuousMode(on, fromUser) {
+    continuousMode = !!on;
+    try { localStorage.setItem('sarvis-continuous', continuousMode ? '1' : '0'); } catch {}
+    applyContinuousButtonState();
+    if (!continuousMode) {
+      cancelContinuousAutoStart();
+      cancelContinuousIdleTimer();
+    }
+    if (fromUser) {
+      flash(continuousMode
+        ? '연속 대화 ON — 응답 후 자동으로 다음 발화를 듣습니다'
+        : '연속 대화 OFF', 'info');
+    }
+  }
+
+  function cancelContinuousAutoStart() {
+    if (_continuousAutoStartTimer) {
+      clearTimeout(_continuousAutoStartTimer);
+      _continuousAutoStartTimer = null;
+    }
+  }
+  function cancelContinuousIdleTimer() {
+    if (_continuousIdleTimer) {
+      clearTimeout(_continuousIdleTimer);
+      _continuousIdleTimer = null;
+    }
+  }
+
+  // 응답 종료 시점 (TTS audio onended, 또는 state="idle" fallback) 에서 호출.
+  // 음성으로 시작한 turn 뒤에만 자동 시작. 이미 녹음 중이거나 모드 OFF 면 noop.
+  function maybeAutoStartListening() {
+    if (!continuousMode) return;
+    if (!_lastTurnWasVoice) return;
+    if (recording) return;
+    if (compareMode) return;  // compare 모드는 두 백엔드 응답 비교가 목적 — 자동 마이크 X
+    cancelContinuousAutoStart();
+    _continuousAutoStartTimer = setTimeout(async () => {
+      _continuousAutoStartTimer = null;
+      // 사이의 사용자 액션(text 전송 등)으로 무효화된 경우 스킵
+      if (!continuousMode || !_lastTurnWasVoice || recording) return;
+      try {
+        await startRecording();
+        // (P1 가드) startRecording 내부 catch 가 throw 하지 않으므로 recording 으로 성공 판정.
+        // 권한 거부·InsecureContext 등 마이크 실패 시 idle timer 를 걸지 않고 실패 카운트.
+        if (!recording) {
+          _continuousFailCount += 1;
+          if (_continuousFailCount >= CONTINUOUS_MAX_FAILS) {
+            setContinuousMode(false, /*fromUser=*/false);
+            flash('마이크 시작 실패가 반복되어 연속 대화 모드를 종료했습니다', 'error');
+            _continuousFailCount = 0;
+          }
+          return;
+        }
+        _continuousFailCount = 0;  // 성공 — 카운터 리셋
+        // 녹음 시작 후 30 초 안에 발화 시작이 없으면 모드 자동 OFF.
+        // VAD 가 실제 음성을 감지하면 markUserSpoke() 가 idle timer 를 취소함.
+        cancelContinuousIdleTimer();
+        _continuousIdleTimer = setTimeout(() => {
+          _continuousIdleTimer = null;
+          if (!continuousMode) return;
+          // 사용자가 한 마디도 안 해서 timer 가 발동 — 마이크 끄고 모드도 OFF
+          if (recording) stopRecording();
+          setContinuousMode(false, /*fromUser=*/false);
+          flash('30초간 발화가 없어 연속 대화 모드를 종료했습니다', 'info');
+        }, CONTINUOUS_IDLE_TIMEOUT_MS);
+      } catch (e) {
+        console.warn('[continuous] auto-start failed', e);
+        _continuousFailCount += 1;
+        if (_continuousFailCount >= CONTINUOUS_MAX_FAILS) {
+          setContinuousMode(false, /*fromUser=*/false);
+          flash('마이크 시작 실패가 반복되어 연속 대화 모드를 종료했습니다', 'error');
+          _continuousFailCount = 0;
+        }
+      }
+    }, CONTINUOUS_AUTO_START_DELAY_MS);
+  }
+
+  function markVoiceTurn(isVoice) {
+    _lastTurnWasVoice = !!isVoice;
+  }
+
+  function markUserSpoke() {
+    // 사용자가 실제로 발화를 시작했다 — 30s 무발화 idle 타이머는 더 이상 필요 없음.
+    // VAD 의 첫 음성 감지 시점에서 호출됨 (stopRecording 에서 호출하지 않음 — P1 수정).
+    cancelContinuousIdleTimer();
   }
 
   function markTabBadge(tabName) {
@@ -1176,6 +1315,9 @@
     ttsAudio.onended = () => {
       revokeOnce();
       _stopAmpLoop();
+      // 연속 대화 모드: 응답 TTS 가 끝나면 음성 turn 한정으로 자동으로 다음 발화 듣기.
+      // (환영 인사는 _lastTurnWasVoice=false 이므로 자동 시작되지 않음 — 의도된 동작)
+      maybeAutoStartListening();
     };
   }
 
