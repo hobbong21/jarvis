@@ -8,7 +8,7 @@ from typing import List
 class Config:
     # ============ LLM 백엔드 ============
     # "claude" | "openai" | "ollama" | "compare" (Claude + OpenAI 병렬 A/B)
-    llm_backend: str = os.getenv("SARVIS_BACKEND", "claude")
+    llm_backend: str = os.getenv("SARVIS_BACKEND", "openai")
 
     # Claude API
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
