@@ -5,6 +5,7 @@ Microsoft SARVIS의 4단계 패턴을 Claude tool_use로 구현:
 """
 import base64
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -170,7 +171,8 @@ class ToolExecutor:
         self.on_timer = on_timer       # callback(label) — 타이머 만료 시 호출
         self.face_registry = face_registry  # FaceRegistry (선택)
 
-        self.memory_path = Path("memory.json")
+        # 사이클 #9 정비: 도구의 영속 메모리도 data/ 아래로 통일.
+        self.memory_path = Path(os.environ.get("SARVIS_TOOL_MEMORY", "data/memory.json"))
         self.memory: dict = self._load_memory()
 
     def definitions(self) -> List[dict]:
@@ -469,6 +471,8 @@ class ToolExecutor:
         return {}
 
     def _save_memory(self):
+        # 사이클 #9 정비: data/ 등 하위 경로면 부모 디렉토리 자동 생성.
+        self.memory_path.parent.mkdir(parents=True, exist_ok=True)
         self.memory_path.write_text(
             json.dumps(self.memory, indent=2, ensure_ascii=False), encoding="utf-8"
         )

@@ -86,7 +86,8 @@ def _get_face_recognition():
 class FaceMemory:
     def __init__(self):
         self.dir = Path(cfg.faces_dir)
-        self.dir.mkdir(exist_ok=True)
+        # 사이클 #9 정비: data/faces 같은 다단계 경로 지원.
+        self.dir.mkdir(parents=True, exist_ok=True)
         self.path = self.dir / "faces.pkl"
         self.encodings: List = []
         self.names: List[str] = []
@@ -351,12 +352,13 @@ def _safe_filename(name: str) -> str:
 class FaceRegistry:
     """등록된 사람 ↔ 얼굴 JPEG 저장소.
 
-    저장: faces/{safe_name}.jpg + faces/_index.json (원본 표시 이름 매핑)
+    저장: data/faces/{safe_name}.jpg + data/faces/_index.json (원본 표시 이름 매핑)
     """
 
-    def __init__(self, faces_dir: str = "faces"):
+    def __init__(self, faces_dir: str = "data/faces"):
         self.dir = Path(faces_dir)
-        self.dir.mkdir(exist_ok=True)
+        # 사이클 #9 정비: data/faces 같은 다단계 경로 지원.
+        self.dir.mkdir(parents=True, exist_ok=True)
         self.index_path = self.dir / "_index.json"
         self._lock = threading.Lock()
         self._index: Dict[str, str] = {}  # safe_name -> display_name

@@ -35,7 +35,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-DB_PATH = os.environ.get("SARVIS_MEMORY_DB", "memory.db")
+DB_PATH = os.environ.get("SARVIS_MEMORY_DB", "data/memory.db")
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -123,6 +123,10 @@ def _ensure_schema(path: str) -> None:
     with _init_lock:
         if path in _initialized_paths:
             return
+        # 사이클 #9 정비: data/ 등 하위 경로 사용 시 부모 디렉토리 자동 생성.
+        parent = os.path.dirname(path)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
         conn = _connect(path)
         try:
             conn.executescript(_SCHEMA_SQL)

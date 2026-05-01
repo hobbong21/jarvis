@@ -137,9 +137,11 @@ sarvis/
 ├── requirements.txt
 ├── LICENSE          # MIT
 ├── README.md
-├── users.json       # 자동 생성 — 계정
-├── memory.json      # 자동 생성 — 장기 기억
-└── faces/           # 자동 생성 — 얼굴 인코딩
+└── data/            # 자동 생성 — 모든 런타임 사용자 데이터
+    ├── users.json   #   계정
+    ├── memory.db    #   장기 기억 (SQLite)
+    ├── memory.json  #   도구용 단순 메모리
+    └── faces/       #   얼굴 인코딩
 ```
 
 ## 아키텍처 비교

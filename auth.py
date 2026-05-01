@@ -24,7 +24,7 @@ def verify_password(stored: str, password: str) -> bool:
 class AuthSystem:
     """사용자 등록/로그인 관리"""
 
-    def __init__(self, path: str = "users.json"):
+    def __init__(self, path: str = "data/users.json"):
         self.path = Path(path)
         self.users: dict = {}
         self._load()
@@ -37,6 +37,8 @@ class AuthSystem:
                 self.users = {}
 
     def save(self):
+        # 사이클 #9 정비: data/ 등 하위 경로면 부모 디렉토리 자동 생성.
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
             json.dumps(self.users, indent=2, ensure_ascii=False), encoding="utf-8"
         )

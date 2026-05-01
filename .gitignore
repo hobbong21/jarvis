@@ -1,4 +1,9 @@
-# 사용자 생성 데이터 (민감 정보)
+# 사용자 생성 데이터 (민감 정보) — 사이클 #9 부터 모두 data/ 아래로 통일.
+data/users.json
+data/sessions.json
+data/memory.json
+data/faces/
+# 레거시 루트 위치 (마이그레이션 전 호환)
 users.json
 sessions.json
 memory.json
@@ -50,7 +55,13 @@ models/
 *.wav
 
 
-# 메모리 DB (v2.0)
+# 메모리 DB (v2.0) — 사이클 #9 부터 data/ 아래.
+data/memory.db
+data/memory.db-journal
+data/memory.db-wal
+data/memory.db-shm
+data/chromadb/
+# 레거시 루트 위치
 memory.db
 memory.db-journal
 memory.db-wal

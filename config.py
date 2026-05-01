@@ -1,7 +1,58 @@
 """사비스 설정"""
 import os
+import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 사이클 #9 정비: 루트 → data/ 1회성 마이그레이션
+# 기존 사용자가 루트에 보관하던 런타임 파일을 data/ 아래로 자동 이동.
+# 새 경로가 이미 있으면 건너뛰어서 멱등 (idempotent). 안전 우선 → move only,
+# 권한 오류 등은 조용히 무시 (서비스 부팅을 막지 않음).
+# ──────────────────────────────────────────────────────────────────────────
+def _migrate_legacy_root_data() -> None:
+    pairs = [
+        ("users.json", "data/users.json"),
+        ("memory.db", "data/memory.db"),
+        ("memory.db-wal", "data/memory.db-wal"),
+        ("memory.db-shm", "data/memory.db-shm"),
+        ("memory.db-journal", "data/memory.db-journal"),
+        ("memory.json", "data/memory.json"),
+        ("sessions.json", "data/sessions.json"),
+    ]
+    moved: List[str] = []
+    try:
+        for legacy, new in pairs:
+            lp, np = Path(legacy), Path(new)
+            if lp.exists() and not np.exists():
+                np.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.move(str(lp), str(np))
+                    moved.append(f"{legacy} → {new}")
+                except OSError:
+                    pass
+        # faces/ 디렉토리는 내용물이 있을 때만 이동
+        legacy_faces = Path("faces")
+        new_faces = Path("data/faces")
+        if legacy_faces.is_dir() and any(legacy_faces.iterdir()) and not new_faces.exists():
+            try:
+                new_faces.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(legacy_faces), str(new_faces))
+                moved.append("faces/ → data/faces/")
+            except OSError:
+                pass
+    except Exception:
+        # 마이그레이션 실패는 절대 부팅을 막으면 안 됨.
+        return
+    if moved:
+        print("[migrate] 루트 → data/ 자동 이동:")
+        for m in moved:
+            print(f"  - {m}")
+
+
+_migrate_legacy_root_data()
 
 
 @dataclass
@@ -70,7 +121,8 @@ class Config:
     camera_height: int = 720
 
     # ============ 얼굴 인식 ============
-    faces_dir: str = "faces"
+    # 사이클 #9 정비: 런타임 데이터는 모두 data/ 아래로 통일.
+    faces_dir: str = os.getenv("SARVIS_FACES_DIR", "data/faces")
 
     # ============ 장기 메모리 (기획서 v2.0) ============
     # SARVIS 는 단일 사용자 데스크톱 비서 모델. 인증이 추가되기 전까지는
@@ -81,7 +133,7 @@ class Config:
     face_match_tolerance: float = 0.5
 
     # ============ 인증 ============
-    users_file: str = "users.json"
+    users_file: str = os.getenv("SARVIS_USERS_FILE", "data/users.json")
 
     # ============ 페르소나 + 도구 사용 가이드 ============
     system_prompt: str = """너는 사비스(SARVIS). 사용자의 개인 AI 비서이자 친구.
