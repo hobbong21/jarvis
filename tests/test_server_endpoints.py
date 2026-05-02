@@ -1061,6 +1061,101 @@ class CompareModeWebSocketTests(unittest.TestCase):
         self.assertEqual(entry["compare_sources"], ["system"])
         self.assertEqual(entry["reply_len"], len(ends[0]["text"]))
 
+    # ----------------------------------------------------------------------
+    # Task #18 — server.respond_compare 가 두 백엔드 응답을 모두
+    # session.memory.add_message(emotion="<emo>|<source>") 로 영구 기록하는지
+    # 검증한다. 사이클 #13 의 기존 케이스는 WebSocket 시퀀스만 보장하므로
+    # 메모리 저장이 회귀해도 침묵으로 통과되는 갭이 있었음.
+    # ----------------------------------------------------------------------
+    def test_compare_persists_assistant_messages_per_source(self):
+        """compare 모드 정상/부분 응답 시 session.memory 에 어떤 메시지가
+        기록되는지 검증.
+
+        - 정상 시나리오: user prompt 1건 + assistant 2건
+          (emotion="neutral|claude", "happy|openai") = 총 3건.
+        - 한쪽만 응답: user prompt 1건 + 응답한 backend assistant 1건 = 총 2건.
+        """
+        from config import cfg
+        mem = server.get_memory()
+        user_id = cfg.memory_user_id
+
+        # 0) baseline — 이전 케이스들이 같은 DB 싱글톤에 메시지를 남겨두었을
+        # 수 있으므로 현재 최대 message id 를 기준점으로 잡고 그 이후만 본다.
+        before = mem.get_recent_messages(user_id, limit=500)
+        before_max_id = max((m["id"] for m in before), default=0)
+
+        # 1) 정상 — 양쪽 백엔드가 모두 종결.
+        _ScriptedCompareBrain.script = [
+            ("claude", "안녕", None, None),
+            ("openai", "Hello", None, None),
+            ("claude", None, Emotion.NEUTRAL, "안녕 친구"),
+            ("openai", None, Emotion.HAPPY, "Hello friend"),
+        ]
+        done, _hist = self._run_compare(prompt="compare-mem-both")
+        self.assertIsNotNone(done, "compare_done 미수신 (정상 시나리오)")
+
+        after_both = mem.get_recent_messages(user_id, limit=500)
+        new_both = [m for m in after_both if m["id"] > before_max_id]
+        roles_both = [(m["role"], m["content"], m["emotion"]) for m in new_both]
+        self.assertEqual(
+            len(new_both), 3,
+            f"정상 시나리오는 user 1 + assistant 2 = 3건이어야 함. 실제: {roles_both!r}",
+        )
+
+        # user 발화가 먼저 기록되고 (role=user, emotion=None), 그 뒤에 두
+        # assistant 응답이 source 접미와 함께 기록돼야 한다.
+        user_rows = [m for m in new_both if m["role"] == "user"]
+        asst_rows = [m for m in new_both if m["role"] == "assistant"]
+        self.assertEqual(len(user_rows), 1, f"user 메시지 1건 기대. 실제 new={roles_both!r}")
+        self.assertEqual(user_rows[0]["content"], "compare-mem-both")
+        self.assertEqual(len(asst_rows), 2, f"assistant 메시지 2건 기대. 실제 new={roles_both!r}")
+
+        by_emotion = {m["emotion"]: m["content"] for m in asst_rows}
+        self.assertIn(
+            "neutral|claude", by_emotion,
+            f"emotion='neutral|claude' 누락. 실제: {by_emotion!r}",
+        )
+        self.assertIn(
+            "happy|openai", by_emotion,
+            f"emotion='happy|openai' 누락. 실제: {by_emotion!r}",
+        )
+        self.assertEqual(by_emotion["neutral|claude"], "안녕 친구")
+        self.assertEqual(by_emotion["happy|openai"], "Hello friend")
+
+        # 2) 한쪽(claude) 만 응답하는 시나리오 — 두 번째 turn.
+        mid_max_id = max(m["id"] for m in after_both)
+        _ScriptedCompareBrain.script = [
+            ("claude", "단독", None, None),
+            ("claude", None, Emotion.NEUTRAL, "단독 응답"),
+            # openai 측 종결 이벤트 없음 — finals 에 들어가지 않으므로 메모리에도 안 남는다.
+        ]
+        done2, _hist2 = self._run_compare(prompt="compare-mem-only-claude")
+        self.assertIsNotNone(done2, "compare_done 미수신 (한쪽만 응답)")
+
+        after_one = mem.get_recent_messages(user_id, limit=500)
+        new_one = [m for m in after_one if m["id"] > mid_max_id]
+        roles_one = [(m["role"], m["content"], m["emotion"]) for m in new_one]
+        self.assertEqual(
+            len(new_one), 2,
+            f"한쪽만 응답은 user 1 + assistant 1 = 2건이어야 함. 실제: {roles_one!r}",
+        )
+
+        user_rows_one = [m for m in new_one if m["role"] == "user"]
+        asst_rows_one = [m for m in new_one if m["role"] == "assistant"]
+        self.assertEqual(len(user_rows_one), 1)
+        self.assertEqual(user_rows_one[0]["content"], "compare-mem-only-claude")
+        self.assertEqual(len(asst_rows_one), 1)
+        self.assertEqual(asst_rows_one[0]["content"], "단독 응답")
+        self.assertEqual(
+            asst_rows_one[0]["emotion"], "neutral|claude",
+            "응답한 백엔드 source 접미('|claude') 가 emotion 에 보존돼야 함",
+        )
+        # openai 가 침묵했으므로 새 메시지 중 '|openai' 접미는 없어야 한다.
+        self.assertFalse(
+            any((m["emotion"] or "").endswith("|openai") for m in new_one),
+            f"openai 가 응답하지 않았는데 메모리에 '|openai' 메시지가 기록됨: {roles_one!r}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
