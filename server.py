@@ -9,6 +9,7 @@
     python server.py
 """
 import asyncio
+import base64
 import json
 import os
 import re
@@ -102,6 +103,16 @@ threading.Thread(target=_load_stt, daemon=True, name="stt-loader").start()
 print("[2/3] TTS (Edge-TTS) ...")
 TTS = EdgeTTS()
 
+def _write_bytes(path: str, data: bytes) -> None:
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+def _read_bytes(path: str) -> bytes:
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
 print("[3/3] 얼굴 등록부 ...")
 FACE_REGISTRY = FaceRegistry(cfg.faces_dir)
 _known = FACE_REGISTRY.list_people()
@@ -109,6 +120,14 @@ if _known:
     print(f"      등록된 얼굴: {', '.join(_known)}")
 else:
     print("      등록된 얼굴 없음 (웹에서 + 버튼으로 등록)")
+
+# 멀티모달 명령 로그용 이미지 디렉토리. 텍스트/메타는 memory.commands 테이블,
+# 이진 이미지는 이 디렉토리에 <commands.id>.jpg 로 저장.
+COMMANDS_DIR = os.environ.get(
+    "SARVIS_COMMANDS_DIR",
+    os.path.join(os.path.dirname(cfg.faces_dir) or "data", "commands"),
+)
+os.makedirs(COMMANDS_DIR, exist_ok=True)
 
 print("[3/3] 설정 완료.")
 
@@ -856,6 +875,46 @@ async def websocket_endpoint(ws: WebSocket):
                         continue
                     async with busy:
                         await handle_audio(payload, emit, emit_bytes, session, build_context, _learn_and_signal)
+                elif kind == 0x03:
+                    # 멀티모달 명령 이미지 저장.
+                    # 페이로드 형식: <caption_len:2 BE><caption_utf8><JPEG bytes>
+                    if len(payload) < 2:
+                        continue
+                    clen = int.from_bytes(payload[:2], "big")
+                    if len(payload) < 2 + clen:
+                        continue
+                    try:
+                        caption = payload[2:2 + clen].decode("utf-8", errors="replace")
+                    except Exception:
+                        caption = ""
+                    jpeg = payload[2 + clen:]
+                    if not jpeg:
+                        continue
+                    try:
+                        cmd_id = await asyncio.to_thread(
+                            session.memory.log_command,
+                            session.memory_user_id,
+                            caption,
+                            "multimodal" if caption else "image",
+                            None,
+                            None,
+                            "done",
+                            None,
+                        )
+                        img_path = os.path.join(COMMANDS_DIR, f"{cmd_id}.jpg")
+                        await asyncio.to_thread(_write_bytes, img_path, jpeg)
+                        await asyncio.to_thread(
+                            session.memory.update_command,
+                            cmd_id, None, None, img_path,
+                        )
+                        await emit(
+                            type="command_saved",
+                            id=cmd_id, kind="multimodal" if caption else "image",
+                            caption=caption, has_image=True,
+                        )
+                    except Exception as e:
+                        print(f"[WS 0x03 command image save] {e}")
+                        await emit(type="error", message="명령 이미지를 저장하지 못했습니다.")
                 continue
 
             # 텍스트 (JSON)
@@ -999,6 +1058,87 @@ async def websocket_endpoint(ws: WebSocket):
 
             elif mtype == "list_faces":
                 await emit(type="face_list", faces=FACE_REGISTRY.list_people())
+
+            elif mtype == "command_log":
+                # 텍스트만 명령 적재. body: {text, kind?, status?, meta?}
+                ctext = (data.get("text") or "").strip()
+                if not ctext:
+                    await emit(type="error", message="명령 텍스트가 비어있습니다.")
+                else:
+                    try:
+                        cmd_id = await asyncio.to_thread(
+                            session.memory.log_command,
+                            session.memory_user_id, ctext,
+                            (data.get("kind") or "text"),
+                            None, None,
+                            (data.get("status") or "pending"),
+                            data.get("meta"),
+                        )
+                        await emit(type="command_saved", id=cmd_id,
+                                   kind=(data.get("kind") or "text"),
+                                   caption=ctext, has_image=False)
+                    except ValueError as e:
+                        print(f"[WS command_log] {e}")
+                        await emit(type="error", message="명령을 저장할 수 없습니다 (잘못된 종류 또는 상태).")
+
+            elif mtype == "commands_recent":
+                limit = int(data.get("limit") or 50)
+                kind = data.get("kind")
+                rows = await asyncio.to_thread(
+                    session.memory.recent_commands,
+                    session.memory_user_id, limit, kind,
+                )
+                # image_path 는 클라이언트에 그대로 노출하지 않고 has_image 만 표시.
+                items = [{
+                    "id": r["id"],
+                    "kind": r["kind"],
+                    "command_text": r["command_text"],
+                    "response_text": r["response_text"],
+                    "status": r["status"],
+                    "has_image": bool(r["image_path"]),
+                    "created_at": r["created_at"],
+                    "completed_at": r["completed_at"],
+                    "meta": r["meta"],
+                } for r in rows]
+                await emit(type="commands_recent", items=items)
+
+            elif mtype == "command_get":
+                # body: {id, include_image?: bool}
+                cid = int(data.get("id") or 0)
+                row = await asyncio.to_thread(session.memory.get_command, cid)
+                if not row or row["user_id"] != session.memory_user_id:
+                    await emit(type="error", message="명령을 찾을 수 없습니다.")
+                else:
+                    img_b64 = None
+                    if data.get("include_image") and row.get("image_path") \
+                            and os.path.isfile(row["image_path"]):
+                        try:
+                            blob = await asyncio.to_thread(_read_bytes, row["image_path"])
+                            img_b64 = base64.b64encode(blob).decode("ascii")
+                        except OSError as e:
+                            print(f"[WS command_get image read] {e}")
+                            await emit(type="error", message="이미지를 불러올 수 없습니다.")
+                    await emit(
+                        type="command_get",
+                        id=row["id"], kind=row["kind"],
+                        command_text=row["command_text"],
+                        response_text=row["response_text"],
+                        status=row["status"],
+                        has_image=bool(row["image_path"]),
+                        created_at=row["created_at"],
+                        completed_at=row["completed_at"],
+                        meta=row["meta"],
+                        image_b64=img_b64,
+                    )
+
+            elif mtype == "command_delete":
+                cid = int(data.get("id") or 0)
+                row = await asyncio.to_thread(session.memory.get_command, cid)
+                if not row or row["user_id"] != session.memory_user_id:
+                    await emit(type="error", message="명령을 찾을 수 없습니다.")
+                else:
+                    ok = await asyncio.to_thread(session.memory.delete_command, cid)
+                    await emit(type="command_deleted", id=cid, ok=ok)
 
             elif mtype == "ping":
                 await emit(type="pong")

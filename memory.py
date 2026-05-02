@@ -93,12 +93,27 @@ CREATE TABLE IF NOT EXISTS timers_events (
     completed    INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS commands (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       TEXT    NOT NULL,
+    conv_id       INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    kind          TEXT    NOT NULL DEFAULT 'text',
+    command_text  TEXT    NOT NULL DEFAULT '',
+    image_path    TEXT,
+    response_text TEXT,
+    status        TEXT    NOT NULL DEFAULT 'pending',
+    meta_json     TEXT,
+    created_at    REAL    NOT NULL,
+    completed_at  REAL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content);
 CREATE INDEX IF NOT EXISTS idx_facts_user ON facts(user_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_obs_user_ts ON observations(user_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_conv_user_started ON conversations(user_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_timers_user_sched ON timers_events(user_id, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_commands_user_created ON commands(user_id, created_at DESC);
 """
 
 
@@ -554,6 +569,138 @@ class Memory:
                 d.pop("data_json", None)
             out.append(d)
         return out
+
+    # ── 명령 로그 (멀티모달: 텍스트 + 이미지) ──────────────────────
+    # 사용자가 사비스에게 시킨 일과 그에 따른 이미지를 영구 저장한다.
+    # 이미지 바이트는 별도 파일(예: data/commands/<id>.jpg)로 저장하고
+    # 경로만 image_path 컬럼에 기록 — SQLite BLOB 으로 큰 이진 데이터를
+    # 들고 다니지 않기 위함.
+    def log_command(
+        self,
+        user_id: str,
+        command_text: str,
+        kind: str = "text",
+        image_path: Optional[str] = None,
+        conv_id: Optional[int] = None,
+        status: str = "pending",
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        if kind not in ("text", "voice", "image", "multimodal"):
+            raise ValueError(f"invalid kind: {kind}")
+        if status not in ("pending", "done", "error"):
+            raise ValueError(f"invalid status: {status}")
+        if not isinstance(command_text, str):
+            command_text = str(command_text)
+        meta_blob = json.dumps(meta, ensure_ascii=False) if meta else None
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO commands(user_id, conv_id, kind, command_text,
+                                     image_path, status, meta_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, conv_id, kind, command_text, image_path,
+                 status, meta_blob, time.time()),
+            )
+            return int(cur.lastrowid)
+
+    def update_command(
+        self,
+        cmd_id: int,
+        response_text: Optional[str] = None,
+        status: Optional[str] = None,
+        image_path: Optional[str] = None,
+    ) -> bool:
+        if status is not None and status not in ("pending", "done", "error"):
+            raise ValueError(f"invalid status: {status}")
+        sets: List[str] = []
+        args: List[Any] = []
+        if response_text is not None:
+            sets.append("response_text=?"); args.append(response_text)
+        if status is not None:
+            sets.append("status=?"); args.append(status)
+            if status in ("done", "error"):
+                sets.append("completed_at=?"); args.append(time.time())
+        if image_path is not None:
+            sets.append("image_path=?"); args.append(image_path)
+        if not sets:
+            return False
+        args.append(int(cmd_id))
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                f"UPDATE commands SET {', '.join(sets)} WHERE id=?",
+                args,
+            )
+            return cur.rowcount > 0
+
+    def get_command(self, cmd_id: int) -> Optional[Dict[str, Any]]:
+        with _conn_ctx(self.path) as conn:
+            row = conn.execute(
+                "SELECT * FROM commands WHERE id=?", (int(cmd_id),)
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        if d.get("meta_json"):
+            try:
+                d["meta"] = json.loads(d["meta_json"])
+            except json.JSONDecodeError:
+                d["meta"] = {}
+        else:
+            d["meta"] = {}
+        d.pop("meta_json", None)
+        return d
+
+    def recent_commands(
+        self,
+        user_id: str,
+        limit: int = 50,
+        kind: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with _conn_ctx(self.path) as conn:
+            if kind:
+                rows = conn.execute(
+                    "SELECT * FROM commands WHERE user_id=? AND kind=? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (user_id, kind, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM commands WHERE user_id=? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (user_id, limit),
+                ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            if d.get("meta_json"):
+                try:
+                    d["meta"] = json.loads(d["meta_json"])
+                except json.JSONDecodeError:
+                    d["meta"] = {}
+            else:
+                d["meta"] = {}
+            d.pop("meta_json", None)
+            out.append(d)
+        return out
+
+    def delete_command(self, cmd_id: int) -> bool:
+        """행 삭제 + image_path 가 있으면 파일도 best-effort 정리."""
+        with _conn_ctx(self.path) as conn:
+            row = conn.execute(
+                "SELECT image_path FROM commands WHERE id=?", (int(cmd_id),)
+            ).fetchone()
+            if not row:
+                return False
+            img = row["image_path"]
+            conn.execute("DELETE FROM commands WHERE id=?", (int(cmd_id),))
+        if img and os.path.isfile(img):
+            try:
+                os.remove(img)
+            except OSError:
+                pass
+        return True
 
     # ── 타이머 / 이벤트 ────────────────────────────────────────────
     def add_timer_event(

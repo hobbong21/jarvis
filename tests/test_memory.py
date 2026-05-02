@@ -353,5 +353,120 @@ class AutoFactExtractionTests(unittest.TestCase):
         self.assertEqual(extract_user_facts(""), [])
 
 
+class CommandsTests(unittest.TestCase):
+    """멀티모달 명령 로그(commands 테이블) — 텍스트/이미지 + 상태/응답 라이프사이클."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.mem = Memory(os.path.join(self.tmpdir.name, "mem.db"))
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    def test_log_text_command_returns_id(self) -> None:
+        cid = self.mem.log_command("u1", "오늘 날씨 알려줘")
+        self.assertIsInstance(cid, int)
+        self.assertGreater(cid, 0)
+        row = self.mem.get_command(cid)
+        self.assertEqual(row["command_text"], "오늘 날씨 알려줘")
+        self.assertEqual(row["kind"], "text")
+        self.assertEqual(row["status"], "pending")
+        self.assertIsNone(row["image_path"])
+        self.assertIsNone(row["completed_at"])
+
+    def test_log_command_rejects_invalid_kind(self) -> None:
+        with self.assertRaises(ValueError):
+            self.mem.log_command("u1", "x", kind="banana")
+
+    def test_log_command_rejects_invalid_status(self) -> None:
+        with self.assertRaises(ValueError):
+            self.mem.log_command("u1", "x", status="weird")
+
+    def test_log_image_command_with_path(self) -> None:
+        img_path = os.path.join(self.tmpdir.name, "a.jpg")
+        with open(img_path, "wb") as fh:
+            fh.write(b"\xff\xd8\xff\xe0")
+        cid = self.mem.log_command(
+            "u1", "이 사진 분석해줘", kind="multimodal",
+            image_path=img_path, meta={"src": "webcam"},
+        )
+        row = self.mem.get_command(cid)
+        self.assertEqual(row["image_path"], img_path)
+        self.assertEqual(row["kind"], "multimodal")
+        self.assertEqual(row["meta"]["src"], "webcam")
+
+    def test_update_command_sets_response_and_completed_at(self) -> None:
+        cid = self.mem.log_command("u1", "타이머 5분")
+        before = time.time()
+        ok = self.mem.update_command(cid, response_text="네, 5분 타이머를 설정했어요", status="done")
+        self.assertTrue(ok)
+        row = self.mem.get_command(cid)
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["response_text"], "네, 5분 타이머를 설정했어요")
+        self.assertIsNotNone(row["completed_at"])
+        self.assertGreaterEqual(row["completed_at"], before)
+
+    def test_update_command_pending_does_not_set_completed_at(self) -> None:
+        cid = self.mem.log_command("u1", "x")
+        self.mem.update_command(cid, response_text="진행 중", status="pending")
+        row = self.mem.get_command(cid)
+        self.assertIsNone(row["completed_at"])
+
+    def test_update_command_no_fields_returns_false(self) -> None:
+        cid = self.mem.log_command("u1", "x")
+        self.assertFalse(self.mem.update_command(cid))
+
+    def test_recent_commands_orders_newest_first_and_isolates_users(self) -> None:
+        a = self.mem.log_command("u1", "첫 번째")
+        time.sleep(0.005)
+        b = self.mem.log_command("u1", "두 번째")
+        time.sleep(0.005)
+        c = self.mem.log_command("u2", "다른 사용자")
+        rows = self.mem.recent_commands("u1")
+        self.assertEqual([r["id"] for r in rows], [b, a])
+        self.assertNotIn(c, [r["id"] for r in rows])
+        u2 = self.mem.recent_commands("u2")
+        self.assertEqual([r["id"] for r in u2], [c])
+
+    def test_recent_commands_filters_by_kind(self) -> None:
+        self.mem.log_command("u1", "텍스트1", kind="text")
+        img_id = self.mem.log_command("u1", "이미지 명령", kind="image")
+        rows = self.mem.recent_commands("u1", kind="image")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], img_id)
+
+    def test_recent_commands_limit_capped(self) -> None:
+        for i in range(7):
+            self.mem.log_command("u1", f"cmd{i}")
+        rows = self.mem.recent_commands("u1", limit=3)
+        self.assertEqual(len(rows), 3)
+
+    def test_delete_command_removes_row_and_image_file(self) -> None:
+        img_path = os.path.join(self.tmpdir.name, "del.jpg")
+        with open(img_path, "wb") as fh:
+            fh.write(b"\xff\xd8\xff")
+        cid = self.mem.log_command("u1", "삭제 대상", kind="image", image_path=img_path)
+        self.assertTrue(self.mem.delete_command(cid))
+        self.assertIsNone(self.mem.get_command(cid))
+        self.assertFalse(os.path.isfile(img_path))
+
+    def test_delete_command_missing_returns_false(self) -> None:
+        self.assertFalse(self.mem.delete_command(999999))
+
+    def test_get_command_unknown_returns_none(self) -> None:
+        self.assertIsNone(self.mem.get_command(999999))
+
+    def test_schema_includes_commands_table(self) -> None:
+        import sqlite3
+        conn = sqlite3.connect(self.mem.path)
+        try:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='commands'"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(len(rows), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
