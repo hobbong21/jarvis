@@ -57,7 +57,7 @@ def _bg_preload_cv2():
 if os.environ.get("SARVIS_SKIP_CV2_PRELOAD", "").strip() not in ("1", "true", "True"):
     threading.Thread(target=_bg_preload_cv2, daemon=True, name="cv2-loader").start()
 
-from config import cfg
+from .config import cfg
 
 # face_recognition 은 임포트 시간이 매우 길어 서버 시작을 차단할 수 있으므로
 # 실제 사용 시점에 지연 로드(lazy import)한다.

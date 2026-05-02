@@ -5,14 +5,14 @@ from typing import List, Optional
 
 import pygame
 
-from auth import AuthSystem
-from audio_io import EdgeTTS, SpeechRecorder, WakeWordListener, WhisperSTT
-from brain import Brain
-from config import cfg
-from emotion import Emotion
-from tools import ToolExecutor
-from ui import SarvisUI
-from vision import VisionSystem
+from .auth import AuthSystem
+from .audio_io import EdgeTTS, SpeechRecorder, WakeWordListener, WhisperSTT
+from .brain import Brain
+from .config import cfg
+from .emotion import Emotion
+from .tools import ToolExecutor
+from .ui import SarvisUI
+from .vision import VisionSystem
 
 
 class SarvisCore:

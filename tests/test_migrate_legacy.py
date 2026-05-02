@@ -20,7 +20,7 @@ class MigrateLegacyTests(unittest.TestCase):
         os.chdir(self.tmp)
         # config 모듈은 import 시점에 한 번 마이그레이션을 돌리므로,
         # 테스트는 함수를 직접 import 해서 호출한다.
-        from config import _migrate_legacy_root_data  # noqa: WPS433
+        from sarvis.config import _migrate_legacy_root_data  # noqa: WPS433
         self.run_migration = _migrate_legacy_root_data
 
     def tearDown(self):

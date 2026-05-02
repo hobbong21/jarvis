@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import pygame
 
-from emotion import Emotion, PALETTES
+from .emotion import Emotion, PALETTES
 
 
 # ============ Colors ============

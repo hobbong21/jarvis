@@ -22,10 +22,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
-import telemetry
-from config import cfg
+from . import telemetry
+from .config import cfg
 
-PROPOSALS_DIR = Path(__file__).parent / "harness" / "sarvis" / "proposals"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROPOSALS_DIR = _PROJECT_ROOT / "harness" / "sarvis" / "proposals"
 MIN_TURNS = 10  # 최소 누적 턴 — 데모용 낮음. 운영은 100+ 권장.
 
 # 사이클 #5: GitHub Issue body 최대 길이 (GitHub 한도 65536, 안전 마진).
@@ -172,7 +173,7 @@ def propose_next_cycle(
         "ok": True,
         "reason": "ok",
         "cycle": cycle,
-        "path": str(out_path.relative_to(Path(__file__).parent)),
+        "path": str(out_path.relative_to(_PROJECT_ROOT)),
         "markdown": markdown,
         "total": total,
         "summary": summary,
@@ -202,7 +203,7 @@ def _read_proposal(path: str) -> Optional[Dict]:
     """Proposal 경로 검증 (PROPOSALS_DIR 안에 있어야 path traversal 방지) + 읽기."""
     p = Path(path)
     if not p.is_absolute():
-        p = (Path(__file__).parent / p).resolve()
+        p = (_PROJECT_ROOT / p).resolve()
     else:
         p = p.resolve()
     base = PROPOSALS_DIR.resolve()

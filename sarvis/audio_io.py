@@ -7,7 +7,7 @@ import time
 from typing import Callable
 
 # numpy / sounddevice 는 사용하는 함수 안에서만 임포트 (배포 cold start 지연 방지)
-from config import cfg
+from .config import cfg
 
 
 # ============================================================
@@ -30,9 +30,10 @@ class WakeWordListener:
         # 커스텀 .ppn 파일 자동 탐색 ("sarvis"는 Porcupine 내장 키워드가 아님)
         keyword_path = cfg.wake_keyword_path
         if not keyword_path:
+            _pkg_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
             default_paths = [
-                _os.path.join(_os.path.dirname(__file__), "sarvis.ppn"),
-                _os.path.join(_os.path.dirname(__file__), "wake", "sarvis.ppn"),
+                _os.path.join(_pkg_root, "sarvis.ppn"),
+                _os.path.join(_pkg_root, "wake", "sarvis.ppn"),
             ]
             for p in default_paths:
                 if _os.path.exists(p):
@@ -268,7 +269,7 @@ class EdgeTTS:
           length   : int    — 실제 합성에 사용된 텍스트 길이
           regenerated: bool — regen_callback 으로 재작성된 텍스트가 사용됐는지
         """
-        from tts_verifier import verify_tts_candidate
+        from .tts_verifier import verify_tts_candidate
 
         verdict = verify_tts_candidate(text or "")
         regenerated = False

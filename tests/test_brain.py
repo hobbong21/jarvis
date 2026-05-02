@@ -22,12 +22,12 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 
-from emotion import Emotion  # noqa: E402
+from sarvis.emotion import Emotion  # noqa: E402
 
 
 # brain 모듈은 import 만 했을 때 사이드이펙트가 적음 (Brain 인스턴스화는 무거움)
-import brain as brain_mod  # noqa: E402
-from brain import (  # noqa: E402
+from sarvis import brain as brain_mod  # noqa: E402
+from sarvis.brain import (  # noqa: E402
     Brain,
     _friendly_error,
     _model_switch_friendly,
@@ -108,7 +108,7 @@ class SwitchBackendTests(_BrainNoInitMixin, unittest.TestCase):
 
     def test_known_backend_updates_cfg(self):
         b = self.make_brain()
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             with patch.object(Brain, "_init_backend") as init:
@@ -139,7 +139,7 @@ class SwitchModelTests(_BrainNoInitMixin, unittest.TestCase):
 
     def test_valid_model_sets_cfg(self):
         b = self.make_brain()
-        from config import cfg, MODEL_CATALOG
+        from sarvis.config import cfg, MODEL_CATALOG
         original = cfg.claude_model
         try:
             target = MODEL_CATALOG["claude"][0]
@@ -152,7 +152,7 @@ class SwitchModelTests(_BrainNoInitMixin, unittest.TestCase):
 
     def test_init_failure_rolls_back_cfg(self):
         b = self.make_brain()
-        from config import cfg, MODEL_CATALOG
+        from sarvis.config import cfg, MODEL_CATALOG
         original = cfg.claude_model
         try:
             target = MODEL_CATALOG["claude"][1]
@@ -255,7 +255,7 @@ class ThinkErrorWrappingTests(_BrainNoInitMixin, unittest.TestCase):
         b = self.make_brain()
         b.client = MagicMock()
         # 어떤 백엔드로 분기되든 결국 RuntimeError 가 외부로 나가지 않아야
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "claude"
@@ -271,7 +271,7 @@ class ThinkErrorWrappingTests(_BrainNoInitMixin, unittest.TestCase):
     def test_no_client_returns_friendly(self):
         b = self.make_brain()
         b.client = None
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "openai"
@@ -293,7 +293,7 @@ class AvailableBackendsTests(_BrainNoInitMixin, unittest.TestCase):
         b.client = None
         # ollama 헬스체크는 False 로
         with patch.object(brain_mod, "_ollama_healthcheck", return_value=False):
-            from config import cfg
+            from sarvis.config import cfg
             original = cfg.llm_backend
             try:
                 cfg.llm_backend = "claude"
@@ -313,7 +313,7 @@ class AvailableBackendsTests(_BrainNoInitMixin, unittest.TestCase):
         b.zhipuai_client = None
         b.gemini_client = None
         with patch.object(brain_mod, "_ollama_healthcheck", return_value=False):
-            from config import cfg
+            from sarvis.config import cfg
             original = cfg.llm_backend
             try:
                 cfg.llm_backend = "openai"
@@ -429,7 +429,7 @@ class ThinkStreamTests(_BrainNoInitMixin, unittest.TestCase):
     def test_no_client_yields_friendly_message(self):
         b = self.make_brain()
         b.client = None
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "openai"
@@ -447,7 +447,7 @@ class ThinkStreamTests(_BrainNoInitMixin, unittest.TestCase):
     def test_stream_exception_yields_friendly_and_rolls_back(self):
         b = self.make_brain()
         b.client = MagicMock()
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "claude"
@@ -468,7 +468,7 @@ class ThinkStreamTests(_BrainNoInitMixin, unittest.TestCase):
         b = self.make_brain()
         b.anthropic_client = None
         b.openai_client = None
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "compare"
@@ -482,7 +482,7 @@ class ThinkStreamTests(_BrainNoInitMixin, unittest.TestCase):
     def test_context_prepended(self):
         b = self.make_brain()
         b.client = MagicMock()
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "claude"
@@ -524,7 +524,7 @@ class FallbackChainTests(_BrainNoInitMixin, unittest.TestCase):
 
     def test_compare_mode_delegates_to_think_stream(self):
         b = self.make_brain()
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "compare"
@@ -543,7 +543,7 @@ class FallbackChainTests(_BrainNoInitMixin, unittest.TestCase):
         b.zhipuai_client = None
         b.gemini_client = None
         b.client = None
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "claude"
@@ -559,7 +559,7 @@ class FallbackChainTests(_BrainNoInitMixin, unittest.TestCase):
         b = self.make_brain()
         b.anthropic_client = MagicMock()
         b.openai_client = MagicMock()
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "claude"
@@ -577,7 +577,7 @@ class FallbackChainTests(_BrainNoInitMixin, unittest.TestCase):
         b = self.make_brain()
         b.anthropic_client = MagicMock()
         b.openai_client = MagicMock()
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         called = {"count": 0}
 
@@ -615,7 +615,7 @@ class FallbackChainTests(_BrainNoInitMixin, unittest.TestCase):
     def test_client_for_ollama_active_backend(self):
         b = self.make_brain()
         b.client = "OLLAMA_CLIENT"
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "ollama"

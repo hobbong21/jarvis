@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 
-import analysis  # noqa: E402
+from sarvis import analysis  # noqa: E402
 
 
 def _run(coro):

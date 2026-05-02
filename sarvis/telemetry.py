@@ -15,7 +15,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
 
-LOG_PATH = Path(__file__).parent / "data" / "harness_telemetry.jsonl"
+LOG_PATH = Path(__file__).resolve().parent.parent / "data" / "harness_telemetry.jsonl"
 MAX_LINES = 5000  # 자동 회전 임계 (초과 시 절반만 유지)
 
 _lock = threading.Lock()

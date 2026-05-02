@@ -26,17 +26,17 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from audio_io import EdgeTTS, WhisperSTT
-from brain import Brain, _friendly_error, _model_switch_friendly
-from config import cfg
-from emotion import Emotion
-from memory import get_memory, extract_user_facts
-from tools import ToolExecutor
-from vision import FaceRegistry, WebVision
+from .audio_io import EdgeTTS, WhisperSTT
+from .brain import Brain, _friendly_error, _model_switch_friendly
+from .config import cfg
+from .emotion import Emotion
+from .memory import get_memory, extract_user_facts
+from .tools import ToolExecutor
+from .vision import FaceRegistry, WebVision
 
 # Harness Phase 4 — Fan-out 분석 + Evolution 텔레메트리
-from analysis import parallel_analyze, analysis_to_context
-import telemetry
+from .analysis import parallel_analyze, analysis_to_context
+from . import telemetry
 
 # ============================================================
 # 전역 — 서버를 즉시 시작하고 Whisper 는 백그라운드에서 로드
@@ -45,7 +45,7 @@ print("=" * 60)
 print("  S . A . R . V . I . S   웹 서버 초기화")
 print("=" * 60)
 
-WEB_DIR = Path(__file__).parent / "web"
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -492,7 +492,7 @@ async def websocket_endpoint(ws: WebSocket):
                         loop.call_soon_threadsafe(queue.put_nowait, item)
                 except Exception as exc:
                     traceback.print_exc()
-                    from emotion import Emotion as _E
+                    from .emotion import Emotion as _E
                     # 사이클 #6 핫픽스: raw 영문 예외 대신 친절 한국어 안내
                     loop.call_soon_threadsafe(
                         queue.put_nowait,
@@ -715,7 +715,7 @@ async def websocket_endpoint(ws: WebSocket):
                         loop.call_soon_threadsafe(queue.put_nowait, item)
                 except Exception as exc:
                     traceback.print_exc()
-                    from emotion import Emotion as _E
+                    from .emotion import Emotion as _E
                     # 사이클 #6 핫픽스: compare 모드도 raw 예외 대신 친절 안내
                     loop.call_soon_threadsafe(
                         queue.put_nowait,
@@ -1017,7 +1017,7 @@ async def websocket_endpoint(ws: WebSocket):
 
             elif mtype == "models_list":
                 # 사이클 #7 — UI 가 드롭다운 채울 때 사용. 카탈로그 + 현재 선택 모델.
-                from config import MODEL_CATALOG, current_model
+                from .config import MODEL_CATALOG, current_model
                 payload = {
                     b: {"models": list(models), "current": current_model(b)}
                     for b, models in MODEL_CATALOG.items()
@@ -1400,7 +1400,7 @@ async def harness_evolve_endpoint(
     """
     _harness_auth_check(request, token)
 
-    import harness_evolve
+    from . import harness_evolve
 
     # min_turns clamp: 외부 입력은 절대 MIN_TURNS 미만으로 못 내림.
     effective_min = harness_evolve.MIN_TURNS
@@ -1418,7 +1418,7 @@ async def harness_evolve_endpoint(
 
     # 활성 세션이 없으면 새 Brain 인스턴스 생성 (도구 없음)
     if anthropic_client is None and openai_client is None:
-        from brain import Brain
+        from .brain import Brain
         try:
             tmp = Brain()
             anthropic_client = tmp.anthropic_client
@@ -1455,7 +1455,7 @@ async def harness_actions_list(
     recommendations[*] = recommend_actions(summary).
     """
     _harness_auth_check(request, token)
-    import harness_actions
+    from . import harness_actions
     summary = telemetry.summarize()
     return {
         "actions": harness_actions.list_actions(),
@@ -1484,7 +1484,7 @@ async def harness_actions_apply(
     if "value" not in body:
         raise HTTPException(status_code=400, detail="missing 'value'")
     source = body.get("source") if isinstance(body.get("source"), str) else "dashboard"
-    import harness_actions
+    from . import harness_actions
     try:
         entry = harness_actions.apply_action(name, body["value"], source=source)
     except KeyError:
@@ -1512,7 +1512,7 @@ async def harness_actions_revert(
     if not isinstance(name, str) or not name:
         raise HTTPException(status_code=400, detail="missing 'name'")
     source = body.get("source") if isinstance(body.get("source"), str) else "dashboard"
-    import harness_actions
+    from . import harness_actions
     try:
         entry = harness_actions.revert_action(name, source=source)
     except KeyError:
@@ -1530,7 +1530,7 @@ async def harness_actions_audit(
 ):
     """최근 감사 로그 N개 (apply/revert 모두)."""
     _harness_auth_check(request, token)
-    import harness_actions
+    from . import harness_actions
     n = max(1, min(500, int(limit or 50)))
     return {"audit": harness_actions.recent_audit(n)}
 
@@ -1573,7 +1573,7 @@ async def harness_evolve_export_endpoint(
     labels = body.get("labels") if isinstance(body.get("labels"), list) else None
     dry_run = bool(body.get("dry_run"))
 
-    import harness_evolve
+    from . import harness_evolve
     result = await asyncio.to_thread(
         harness_evolve.export_proposal_to_github,
         path, repo, None, labels, dry_run,

@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 
-import server  # noqa: E402
+from sarvis import server  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 

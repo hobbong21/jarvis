@@ -14,7 +14,7 @@ import unittest
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from server import _split_first_sentence  # noqa: E402
+from sarvis.server import _split_first_sentence  # noqa: E402
 
 
 class SplitFirstSentenceTests(unittest.TestCase):

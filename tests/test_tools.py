@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 
-from tools import _WEATHER_CODES, ToolExecutor  # noqa: E402
+from sarvis.tools import _WEATHER_CODES, ToolExecutor  # noqa: E402
 
 
 def _make_executor(tmp_dir, **kwargs):

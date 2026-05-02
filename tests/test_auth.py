@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 
-from auth import AuthSystem, hash_password, verify_password  # noqa: E402
+from sarvis.auth import AuthSystem, hash_password, verify_password  # noqa: E402
 
 
 class HashPasswordTests(unittest.TestCase):

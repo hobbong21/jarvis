@@ -26,10 +26,10 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 
-from emotion import Emotion  # noqa: E402
+from sarvis.emotion import Emotion  # noqa: E402
 
-import brain as brain_mod  # noqa: E402
-from brain import Brain  # noqa: E402
+from sarvis import brain as brain_mod  # noqa: E402
+from sarvis.brain import Brain  # noqa: E402
 
 
 class _FakeStreamCtx:
@@ -179,7 +179,7 @@ class StreamClaudeRollbackTests(_BrainNoInitMixin, unittest.TestCase):
         )
         b.client = _make_anthropic_client(ctx)
 
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "claude"
@@ -477,7 +477,7 @@ class ThinkStreamCompareDispatchTests(_BrainNoInitMixin, unittest.TestCase):
         b.client = None  # think_stream 이 self.client = anthropic_client 로 세팅
         b.anthropic_client.messages.stream.return_value = ctx
 
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "compare"
@@ -498,7 +498,7 @@ class ThinkStreamCompareDispatchTests(_BrainNoInitMixin, unittest.TestCase):
         ])
         b.tools = None
 
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "compare"
@@ -517,7 +517,7 @@ class ThinkStreamCompareDispatchTests(_BrainNoInitMixin, unittest.TestCase):
         b.anthropic_client = None
         b.openai_client = None
         b.tools = None
-        from config import cfg
+        from sarvis.config import cfg
         original = cfg.llm_backend
         try:
             cfg.llm_backend = "compare"

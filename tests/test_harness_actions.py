@@ -16,8 +16,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import harness_actions as ha
-from config import cfg
+from sarvis import harness_actions as ha
+from sarvis.config import cfg
 
 
 class _IsolatedAudit:
@@ -289,7 +289,7 @@ class HarnessActionsRouteAstTests(unittest.TestCase):
 
     def test_server_has_action_routes(self):
         import ast
-        src = Path(__file__).resolve().parent.parent / "server.py"
+        src = Path(__file__).resolve().parent.parent / "sarvis" / "server.py"
         tree = ast.parse(src.read_text(encoding="utf-8"))
         routes: set = set()
         for node in ast.walk(tree):
@@ -310,7 +310,7 @@ class HarnessActionsRouteAstTests(unittest.TestCase):
 
     def test_vision_tool_whitelist_includes_identify_person(self):
         """P1#1 회귀 — _on_tool_event 의 vision tool 집합이 identify_person 포함."""
-        src = (Path(__file__).resolve().parent.parent / "server.py").read_text(encoding="utf-8")
+        src = (Path(__file__).resolve().parent.parent / "sarvis" / "server.py").read_text(encoding="utf-8")
         # 단순 구문 스캔: 한 줄에 세 도구가 모두 있으면 OK.
         line_ok = any(
             ("see" in ln and "observe_action" in ln and "identify_person" in ln

@@ -62,7 +62,7 @@ os.environ.pop("GH_TOKEN", None)
 # 결과적으로 server.STT 가 None 으로 유지되도록 audio_io.WhisperSTT 를 미리
 # 가짜 클래스로 치환. (실제 STT 사용 분기는 fake/None 양쪽에서 모두 테스트
 # 됨 — test_ws_audio_with_stt_not_ready_emits_error.)
-import audio_io  # noqa: E402
+from sarvis import audio_io  # noqa: E402
 
 
 class _StubWhisperSTT:  # pragma: no cover — import-time only
@@ -72,10 +72,10 @@ class _StubWhisperSTT:  # pragma: no cover — import-time only
 
 audio_io.WhisperSTT = _StubWhisperSTT  # type: ignore[attr-defined]
 
-import server  # noqa: E402
-import telemetry  # noqa: E402
-import harness_actions  # noqa: E402
-from emotion import Emotion  # noqa: E402
+from sarvis import server  # noqa: E402
+from sarvis import telemetry  # noqa: E402
+from sarvis import harness_actions  # noqa: E402
+from sarvis.emotion import Emotion  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 TOKEN = "test-token"
@@ -267,7 +267,7 @@ class HarnessEvolveEndpointTests(unittest.TestCase):
             "cycle": None, "path": None, "markdown": None,
             "total": 0, "summary": {"total": 0},
         }
-        with patch("harness_evolve.propose_next_cycle", return_value=fake_result) as m:
+        with patch("sarvis.harness_evolve.propose_next_cycle", return_value=fake_result) as m:
             with TestClient(server.app) as client:
                 r = client.post(f"/api/harness/evolve?token={TOKEN}&min_turns=999")
         self.assertEqual(r.status_code, 200)
@@ -763,6 +763,7 @@ class HandleAudioTests(unittest.TestCase):
         # 흔한 케이스를 별도 회귀 검사로 고정.
         self._assert_short_transcription_is_skipped("가")
 
+
     # --------------- TTS 차단 ---------------
     def test_audio_tts_blocked_emits_tts_blocked_message(self):
         stt = _RecordingSTT(text="안녕")
@@ -799,6 +800,7 @@ class HandleAudioTests(unittest.TestCase):
         self.assertGreaterEqual(i_user, 0)
         self.assertLess(i_user, i_asst, "user 가 assistant 보다 먼저 와야 함")
         self.assertLess(i_asst, i_blocked, "assistant 가 tts_blocked 보다 먼저 와야 함")
+
 
         # 텔레메트리: tts_ok=False / tts_reason=blocklist:....
         rows = self._read_telemetry()
@@ -900,7 +902,7 @@ class _ScriptedCompareBrain(_FakeBrain):
 class CompareModeWebSocketTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        from config import cfg
+        from sarvis.config import cfg
         cls._orig_backend = cfg.llm_backend  # type: ignore[attr-defined]
         cls._orig_brain = server.Brain        # type: ignore[attr-defined]
         cfg.llm_backend = "compare"
@@ -908,7 +910,7 @@ class CompareModeWebSocketTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        from config import cfg
+        from sarvis.config import cfg
         cfg.llm_backend = cls._orig_backend   # type: ignore[attr-defined]
         server.Brain = cls._orig_brain        # type: ignore[attr-defined]
 

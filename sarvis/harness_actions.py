@@ -26,9 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from config import cfg
+from .config import cfg
 
-AUDIT_PATH = Path(__file__).parent / "data" / "harness_actions.jsonl"
+AUDIT_PATH = Path(__file__).resolve().parent.parent / "data" / "harness_actions.jsonl"
 AUDIT_MAX = 2000  # 회전 임계
 
 _audit_lock = threading.Lock()

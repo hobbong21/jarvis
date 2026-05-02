@@ -4,8 +4,8 @@ import time
 import traceback
 from typing import Generator, Iterator, Optional, Tuple
 
-from config import cfg
-from emotion import Emotion, parse_emotion
+from .config import cfg
+from .emotion import Emotion, parse_emotion
 
 # Ollama 헬스체크 캐시 (TTL 60s) — 사이클 #3 #2: 항상 후보화
 _OLLAMA_HEALTH_TTL = 60.0
@@ -825,7 +825,7 @@ class Brain:
         원복해 옛 모델로 안전하게 회귀한다. cfg 변경 → init 실패 → 후속 요청이
         잘못된 모델명으로 가는 회귀를 방지.
         """
-        from config import MODEL_CATALOG
+        from .config import MODEL_CATALOG
         if backend == "compare":
             raise ValueError("compare 모드는 모델 변경을 지원하지 않음 — 개별 백엔드를 변경하세요")
         catalog = MODEL_CATALOG.get(backend)

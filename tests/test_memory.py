@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 
-from memory import Memory, extract_user_facts
+from sarvis.memory import Memory, extract_user_facts
 
 
 class MemorySchemaTests(unittest.TestCase):

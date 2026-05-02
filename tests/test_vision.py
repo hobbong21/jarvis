@@ -23,8 +23,8 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 
-import vision as vision_mod  # noqa: E402
-from vision import FaceRegistry, WebVision, _safe_filename  # noqa: E402
+from sarvis import vision as vision_mod  # noqa: E402
+from sarvis.vision import FaceRegistry, WebVision, _safe_filename  # noqa: E402
 
 
 class SafeFilenameTests(unittest.TestCase):

@@ -208,7 +208,7 @@ class SemanticIndex:
 
     def __init__(self, persist_dir: Optional[str] = None) -> None:
         self.persist_dir = persist_dir or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "chromadb"
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chromadb"
         )
         self._client = None
         self._collection = None

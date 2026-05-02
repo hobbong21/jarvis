@@ -1,5 +1,5 @@
 [run]
-source = .
+source = sarvis
 branch = True
 omit =
     tests/*
@@ -8,10 +8,9 @@ omit =
     tools_local/*
     web/*
     */__pycache__/*
-    face_setup.py
-    main.py
-    ui.py
-    setup.py
+    sarvis/face_setup.py
+    sarvis/main.py
+    sarvis/ui.py
 
 [report]
 exclude_lines =

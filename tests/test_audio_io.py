@@ -37,8 +37,8 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 
-from audio_io import EdgeTTS, SpeechRecorder, WhisperSTT, WakeWordListener  # noqa: E402
-from config import cfg  # noqa: E402
+from sarvis.audio_io import EdgeTTS, SpeechRecorder, WhisperSTT, WakeWordListener  # noqa: E402
+from sarvis.config import cfg  # noqa: E402
 
 # numpy 는 SpeechRecorder.record() 가 lazy 임포트한다. 테스트가 patch.dict(sys.modules,...)
 # 로 sounddevice 만 끼워넣을 때, 그 patch 가 시작되기 전에 numpy 가 sys.modules 에 없으면
@@ -71,14 +71,14 @@ class SynthesizeBytesVerifiedTests(unittest.TestCase):
         self.assertFalse(result["regenerated"])
 
     def test_blocklist_with_no_regen_callback(self):
-        with patch("tts_verifier._blocklist_cache", ["secret"]):
+        with patch("sarvis.tts_verifier._blocklist_cache", ["secret"]):
             result = self.tts.synthesize_bytes_verified("이건 secret 키")
         self.assertFalse(result["ok"])
         self.assertEqual(result["audio"], b"")
         self.assertTrue(result["reason"].startswith("blocklist:"))
 
     def test_ok_path_returns_audio(self):
-        with patch("tts_verifier._blocklist_cache", []), \
+        with patch("sarvis.tts_verifier._blocklist_cache", []), \
              patch.object(EdgeTTS, "_synthesize", _fake_synthesize_factory(b"AUDIO")):
             result = self.tts.synthesize_bytes_verified("안녕하세요.")
         self.assertTrue(result["ok"])
@@ -92,7 +92,7 @@ class SynthesizeBytesVerifiedTests(unittest.TestCase):
         def regen(orig, reason):
             return "안전한 한국어 응답."
 
-        with patch("tts_verifier._blocklist_cache", ["bad"]), \
+        with patch("sarvis.tts_verifier._blocklist_cache", ["bad"]), \
              patch.object(EdgeTTS, "_synthesize", _fake_synthesize_factory(b"REGEN")):
             result = self.tts.synthesize_bytes_verified("이건 bad 단어 포함",
                                                        regen_callback=regen)
@@ -105,7 +105,7 @@ class SynthesizeBytesVerifiedTests(unittest.TestCase):
         def regen(orig, reason):
             return "여전히 bad 단어 포함"
 
-        with patch("tts_verifier._blocklist_cache", ["bad"]):
+        with patch("sarvis.tts_verifier._blocklist_cache", ["bad"]):
             result = self.tts.synthesize_bytes_verified("원본 bad", regen_callback=regen)
         self.assertFalse(result["ok"])
         self.assertEqual(result["audio"], b"")
@@ -116,7 +116,7 @@ class SynthesizeBytesVerifiedTests(unittest.TestCase):
         def regen(orig, reason):
             raise RuntimeError("콜백 폭발")
 
-        with patch("tts_verifier._blocklist_cache", ["bad"]):
+        with patch("sarvis.tts_verifier._blocklist_cache", ["bad"]):
             result = self.tts.synthesize_bytes_verified("bad", regen_callback=regen)
         # 예외는 격리 — 원래 차단 사유가 그대로 노출
         self.assertFalse(result["ok"])
@@ -127,13 +127,13 @@ class SynthesizeBytesVerifiedTests(unittest.TestCase):
         def regen(orig, reason):
             return ""
 
-        with patch("tts_verifier._blocklist_cache", ["bad"]):
+        with patch("sarvis.tts_verifier._blocklist_cache", ["bad"]):
             result = self.tts.synthesize_bytes_verified("bad here", regen_callback=regen)
         self.assertFalse(result["ok"])
         self.assertEqual(result["audio"], b"")
 
     def test_synthesize_bytes_returns_audio_only(self):
-        with patch("tts_verifier._blocklist_cache", []), \
+        with patch("sarvis.tts_verifier._blocklist_cache", []), \
              patch.object(EdgeTTS, "_synthesize", _fake_synthesize_factory(b"X")):
             audio = self.tts.synthesize_bytes("안녕")
         self.assertEqual(audio, b"X")
@@ -144,7 +144,7 @@ class SynthesizeBytesVerifiedTests(unittest.TestCase):
 
     def test_long_text_truncated_warning_in_result(self):
         long = "이 문장은 충분히 깁니다. " * 200
-        with patch("tts_verifier._blocklist_cache", []), \
+        with patch("sarvis.tts_verifier._blocklist_cache", []), \
              patch.object(EdgeTTS, "_synthesize", _fake_synthesize_factory(b"L")):
             result = self.tts.synthesize_bytes_verified(long)
         self.assertTrue(result["ok"])
@@ -226,7 +226,7 @@ class SpeakTests(unittest.TestCase):
 
         with patch.object(EdgeTTS, "_synthesize",
                           _fake_synthesize_factory(b"X")), \
-             patch("audio_io.os.unlink", side_effect=OSError("nope")):
+             patch("sarvis.audio_io.os.unlink", side_effect=OSError("nope")):
             tts.speak("bye")  # 예외 없이 정상 종료해야 함
 
     def test_speak_play_exception_still_unlinks(self):
@@ -341,10 +341,10 @@ class SynthesizeWrapperTests(unittest.TestCase):
     def test_synthesize_bytes_verified_unlink_oserror_swallowed(self):
         """ok 경로에서 임시파일 unlink 가 OSError 라도 결과는 정상."""
         tts = EdgeTTS()
-        with patch("tts_verifier._blocklist_cache", []), \
+        with patch("sarvis.tts_verifier._blocklist_cache", []), \
              patch.object(EdgeTTS, "_synthesize",
                           _fake_synthesize_factory(b"AUD")), \
-             patch("audio_io.os.unlink", side_effect=OSError("locked")):
+             patch("sarvis.audio_io.os.unlink", side_effect=OSError("locked")):
             result = tts.synthesize_bytes_verified("정상 텍스트입니다.")
         self.assertTrue(result["ok"])
         self.assertEqual(result["audio"], b"AUD")

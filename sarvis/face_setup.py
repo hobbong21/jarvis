@@ -11,8 +11,8 @@ except ImportError:
     print("  pip install face_recognition")
     sys.exit(1)
 
-from config import cfg
-from vision import FaceMemory
+from .config import cfg
+from .vision import FaceMemory
 
 
 def main():

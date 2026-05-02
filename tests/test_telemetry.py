@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import telemetry  # noqa: E402
+from sarvis import telemetry  # noqa: E402
 
 
 class _IsolatedLog:
@@ -262,7 +262,7 @@ class GeminiBackendTests(unittest.TestCase):
                          f"키셋 불일치: 누락={empty_keys - gemini_keys}, 추가={gemini_keys - empty_keys}")
 
     def test_gemini_in_alt_buttons(self):
-        from brain import _ALT_BUTTONS
+        from sarvis.brain import _ALT_BUTTONS
         # 다른 백엔드의 alt 메시지가 gemini 를 후보로 안내해야 함 (claude/openai/zhipuai)
         self.assertIn("GEMINI", _ALT_BUTTONS["claude"])
         self.assertIn("GEMINI", _ALT_BUTTONS["openai"])
@@ -270,7 +270,7 @@ class GeminiBackendTests(unittest.TestCase):
         self.assertIn("gemini", _ALT_BUTTONS)
 
     def test_gemini_friendly_error_korean(self):
-        from brain import _friendly_error
+        from sarvis.brain import _friendly_error
         # 인증 실패
         msg = _friendly_error(Exception("401 Unauthorized: API key invalid"), "gemini")
         self.assertIn("Gemini", msg)
@@ -289,9 +289,9 @@ class GeminiBackendTests(unittest.TestCase):
         import os
         os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
         from unittest.mock import patch
-        from brain import Brain
-        from config import cfg
-        from emotion import Emotion
+        from sarvis.brain import Brain
+        from sarvis.config import cfg
+        from sarvis.emotion import Emotion
 
         original_backend = cfg.llm_backend
         try:
@@ -326,7 +326,7 @@ class FriendlyErrorTests(unittest.TestCase):
     """
 
     def test_credit_message_in_korean(self):
-        from brain import _friendly_error
+        from sarvis.brain import _friendly_error
         msg = _friendly_error(Exception("Your credit balance is too low"), "claude")
         self.assertIn("크레딧", msg)
         self.assertIn("Claude", msg.title()) if False else self.assertTrue(
@@ -334,19 +334,19 @@ class FriendlyErrorTests(unittest.TestCase):
         )
 
     def test_zhipuai_auth_message(self):
-        from brain import _friendly_error
+        from sarvis.brain import _friendly_error
         msg = _friendly_error(Exception("身份验证失败 1000"), "zhipuai")
         self.assertIn("ZhipuAI", msg)
         self.assertIn("키", msg)
 
     def test_network_message_generic(self):
-        from brain import _friendly_error
+        from sarvis.brain import _friendly_error
         msg = _friendly_error(Exception("Connection timed out"), "openai")
         self.assertIn("연결", msg)
         self.assertNotIn("Connection timed out", msg)  # raw 영문 노출 금지
 
     def test_unknown_falls_back_to_generic_korean(self):
-        from brain import _friendly_error
+        from sarvis.brain import _friendly_error
         msg = _friendly_error(Exception("Some weird internal server error xyz"), "claude")
         # raw 영문이 그대로 노출되면 안 됨
         self.assertNotIn("xyz", msg)
@@ -364,7 +364,7 @@ class BrainCfgRegressionTests(unittest.TestCase):
     def test_brain_instance_has_no_cfg_attr(self):
         # Brain 을 실제 초기화하지 않고 클래스 차원에서 검증
         # (init 은 외부 키에 의존하므로 import 만)
-        from brain import Brain
+        from sarvis.brain import Brain
         # 클래스 정의 또는 __init__ 의 self 할당에 cfg 가 없어야
         # (이 회귀 패턴이 다시 들어오면 이 테스트가 실패하도록 명시)
         import inspect
@@ -376,7 +376,7 @@ class BrainCfgRegressionTests(unittest.TestCase):
     def test_server_handle_audio_uses_module_cfg(self):
         # server.py 가 session.brain.cfg 가 아니라 cfg.llm_backend 를 쓰는지
         from pathlib import Path as _P
-        src = _P(__file__).resolve().parent.parent.joinpath("server.py").read_text(encoding="utf-8")
+        src = _P(__file__).resolve().parent.parent.joinpath("sarvis", "server.py").read_text(encoding="utf-8")
         self.assertNotIn("session.brain.cfg", src,
                          "session.brain.cfg 접근은 AttributeError 를 일으킵니다 "
                          "(Brain 에는 cfg 속성이 없음). cfg.llm_backend 를 사용하세요.")
@@ -389,7 +389,7 @@ class BrainCfgRegressionTests(unittest.TestCase):
         """
         import ast
         from pathlib import Path as _P
-        src_path = _P(__file__).resolve().parent.parent.joinpath("server.py")
+        src_path = _P(__file__).resolve().parent.parent.joinpath("sarvis", "server.py")
         tree = ast.parse(src_path.read_text(encoding="utf-8"))
 
         offending = []
@@ -513,15 +513,15 @@ class Cycle7ModelSwitchTests(unittest.TestCase):
     """사이클 #7 T001: brain.switch_model + config.MODEL_CATALOG."""
 
     def test_catalog_covers_all_real_backends(self):
-        import config
+        from sarvis import config
         cat = config.MODEL_CATALOG
         for b in ("claude", "openai", "ollama", "gemini"):
             self.assertIn(b, cat, f"MODEL_CATALOG 에 {b} 누락")
             self.assertGreater(len(cat[b]), 0, f"MODEL_CATALOG[{b}] 비어있음")
 
     def test_switch_model_accepts_known(self):
-        import config
-        from brain import Brain
+        from sarvis import config
+        from sarvis.brain import Brain
         brain = Brain()
         first = config.MODEL_CATALOG["openai"][0]
         # raise 하지 않으면 성공
@@ -529,20 +529,20 @@ class Cycle7ModelSwitchTests(unittest.TestCase):
         self.assertEqual(getattr(config.cfg, "openai_model", None), first)
 
     def test_switch_model_rejects_unknown(self):
-        from brain import Brain
+        from sarvis.brain import Brain
         brain = Brain()
         with self.assertRaises(ValueError):
             brain.switch_model("openai", "gpt-fake-9000")
 
     def test_switch_model_rejects_unknown_backend(self):
-        from brain import Brain
+        from sarvis.brain import Brain
         brain = Brain()
         with self.assertRaises(ValueError):
             brain.switch_model("nonexistent", "anything")
 
     def test_compare_backend_blocks_model_switch(self):
         """compare 는 모델 변경 불가 (다중 백엔드 동시 호출 의미상)."""
-        from brain import Brain
+        from sarvis.brain import Brain
         brain = Brain()
         with self.assertRaises(ValueError):
             brain.switch_model("compare", "anything")
@@ -550,7 +550,7 @@ class Cycle7ModelSwitchTests(unittest.TestCase):
     def test_current_model_falls_back_to_catalog_first_when_env_override(self):
         """architect P1: 환경변수로 카탈로그 외 모델을 지정해도 current_model 은
         UI 가 select 옵션을 잃지 않도록 카탈로그 첫 항목을 반환해야."""
-        import config
+        from sarvis import config
         old = config.cfg.openai_model
         try:
             config.cfg.openai_model = "totally-custom-experimental-model"
@@ -562,8 +562,8 @@ class Cycle7ModelSwitchTests(unittest.TestCase):
 
     def test_switch_model_rolls_back_cfg_on_init_failure(self):
         """architect P1: switch_model 의 _init_backend 가 raise 하면 cfg 가 옛 모델로 원복."""
-        import config
-        from brain import Brain
+        from sarvis import config
+        from sarvis.brain import Brain
         brain = Brain()
         old_model = config.cfg.openai_model
         valid_target = config.MODEL_CATALOG["openai"][1]
@@ -589,7 +589,7 @@ class Cycle7ModelSwitchTests(unittest.TestCase):
         를 _friendly_error 로 통과시키면 '통신 오류' 로 오안내된다. 직접
         한국어 메시지를 emit 하는 ValueError 분기가 있어야 한다."""
         from pathlib import Path as _P
-        src = _P(__file__).resolve().parent.parent.joinpath("server.py").read_text(encoding="utf-8")
+        src = _P(__file__).resolve().parent.parent.joinpath("sarvis", "server.py").read_text(encoding="utf-8")
         # switch_model 블록 안에 except ValueError 가 있어야 함.
         idx = src.find('mtype == "switch_model"')
         self.assertGreater(idx, 0, "switch_model 핸들러 누락")
@@ -606,7 +606,7 @@ class Cycle7SemanticIndexTests(unittest.TestCase):
         import os, importlib
         old = os.environ.pop("SARVIS_SEMANTIC", None)
         try:
-            import memory
+            from sarvis import memory
             importlib.reload(memory)
             idx = memory.SemanticIndex()
             self.assertFalse(idx.available, "기본 환경에서 의미 검색이 활성화됨")
@@ -619,7 +619,7 @@ class Cycle7SemanticIndexTests(unittest.TestCase):
     def test_search_messages_falls_back_to_like_when_semantic_unavailable(self):
         """SemanticIndex 비활성 + LIKE 폴백 정상 동작."""
         import tempfile, os
-        from memory import Memory
+        from sarvis.memory import Memory
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
         try:
@@ -636,7 +636,7 @@ class Cycle7SemanticIndexTests(unittest.TestCase):
     def test_custom_path_isolates_from_global_singleton(self):
         """architect P0: 사용자 지정 path Memory 는 운영 chromadb 와 격리되어야."""
         import tempfile, os
-        from memory import Memory, _NullSemanticIndex
+        from sarvis.memory import Memory, _NullSemanticIndex
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
         try:
@@ -652,7 +652,7 @@ class Cycle7SemanticIndexTests(unittest.TestCase):
     def test_add_message_safe_when_semantic_disabled(self):
         """의미 검색 비활성 상태에서도 add_message 가 정상 반환."""
         import tempfile, os
-        from memory import Memory
+        from sarvis.memory import Memory
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
         try:

@@ -19,8 +19,8 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 
-import tts_verifier  # noqa: E402
-from tts_verifier import (  # noqa: E402
+from sarvis import tts_verifier  # noqa: E402
+from sarvis.tts_verifier import (  # noqa: E402
     MAX_LEN,
     _korean_ratio,
     _normalize,

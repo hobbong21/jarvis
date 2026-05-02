@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 # cv2 는 vision 모듈의 lazy 로더를 재사용 (배포 cold start 60초 제한 회피).
 # 모듈 import 시 cv2 를 즉시 로드하면 uvicorn 이 포트 열기 전에 헬스체크 실패.
-from vision import _ensure_cv2
+from .vision import _ensure_cv2
 
 def _get_cv2():
     """cv2 모듈 객체를 lazy 로 반환 (없으면 None)."""
@@ -23,7 +23,7 @@ def _get_cv2():
         return _cv2
     return None
 
-from config import cfg
+from .config import cfg
 
 
 # ============================================================
