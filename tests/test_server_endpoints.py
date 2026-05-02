@@ -539,6 +539,317 @@ class MainWebSocketTests(unittest.TestCase):
 
 
 # ============================================================
+# WebSocket /ws — 음성 입력 (handle_audio) 오케스트레이션
+# ============================================================
+# Task #14: 사이클 #8 의 STT-not-ready 에러 분기에 더해, STT 가 정상일 때의
+# handle_audio 본문 (server.py 1062-1133) 70+ 라인을 회귀 검사한다.
+#
+# 검증하는 분기:
+# - 정상 경로: STT → Brain → TTS → 클라이언트가 user msg + assistant msg + audio bytes 수신
+# - 빈 transcription: STT 가 "" 또는 1자만 돌려주면 Brain/TTS 가 호출되지 않고 idle 로 복귀
+# - TTS 차단: synthesize_bytes_verified 가 ok=False / audio=b"" → tts_blocked 이벤트 발화
+# - Brain 예외: think() 가 raise → user msg 후 error 이벤트 + 임시 파일 정리
+class _RecordingSTT:
+    """`server.STT` 자리 — transcribe(path) 호출을 기록하고 미리 정한 텍스트 반환."""
+
+    def __init__(self, text: str = "안녕"):
+        self.text = text
+        self.calls: List[str] = []
+
+    def transcribe(self, path: str) -> str:
+        self.calls.append(path)
+        return self.text
+
+
+class _ScriptedTTS:
+    """`server.TTS` 자리 — synthesize_bytes_verified 가 미리 정한 dict 반환."""
+
+    def __init__(
+        self,
+        audio: bytes = b"FAKEMP3",
+        ok: bool = True,
+        reason: str = "ok",
+        regenerated: bool = False,
+    ):
+        self.audio = audio
+        self.ok = ok
+        self.reason = reason
+        self.regenerated = regenerated
+        self.calls: List[str] = []
+
+    def synthesize_bytes_verified(self, text, regen):  # noqa: ARG002
+        self.calls.append(text)
+        return {
+            "audio": self.audio,
+            "ok": self.ok,
+            "reason": self.reason,
+            "regenerated": self.regenerated,
+        }
+
+
+def _drain_audio_turn(ws, max_msgs: int = 80):
+    """오디오 turn 종료 신호(state=idle 발화)까지 모든 msg/bytes 를 모은다.
+
+    handle_audio 의 finally 가 항상 'state=idle' 를 emit 하므로 이를 종료
+    표지로 사용한다. (환영 인사가 보낼 수 있는 idle 도 같은 이벤트지만, 우리는
+    audio 를 보내기 전에 await receive_json()=ready 만 한 직후 곧바로 audio
+    를 send 하므로 환영 인사는 0.5s sleep 중에 _preempt_welcome() 가 취소함.)
+    """
+    seen: List[Dict[str, Any]] = []
+    handler_started = False
+    for _ in range(max_msgs):
+        try:
+            data = ws.receive()
+        except Exception:
+            break
+        if data.get("type") == "websocket.disconnect":
+            break
+        if data.get("text"):
+            try:
+                obj = json.loads(data["text"])
+            except Exception:
+                continue
+            seen.append(obj)
+            # handle_audio 진입 표지: state=listening 또는 thinking
+            if obj.get("type") == "state" and obj.get("state") in {"listening", "thinking"}:
+                handler_started = True
+            if (
+                handler_started
+                and obj.get("type") == "state"
+                and obj.get("state") == "idle"
+            ):
+                return seen
+        elif data.get("bytes") is not None:
+            seen.append({"_bytes": len(data["bytes"])})
+    return seen
+
+
+class HandleAudioTests(unittest.TestCase):
+    """server.handle_audio 본문 회귀 검사 (Task #14)."""
+
+    def setUp(self) -> None:
+        # 매 테스트마다 STT/TTS 를 깨끗한 fake 로 갈아끼우고 종료 시 복원.
+        self._prev_stt = server.STT
+        self._prev_tts = server.TTS
+        # 텔레메트리 결과 검사를 위해 LOG_PATH 를 테스트 단위 임시 파일로 분리.
+        self._prev_log_path = telemetry.LOG_PATH
+        self._tmp_log = Path(_TMP_DIR) / f"audio_turn_{id(self)}.jsonl"
+        if self._tmp_log.exists():
+            self._tmp_log.unlink()
+        telemetry.LOG_PATH = self._tmp_log
+
+    def tearDown(self) -> None:
+        server.STT = self._prev_stt
+        server.TTS = self._prev_tts
+        telemetry.LOG_PATH = self._prev_log_path
+
+    def _read_telemetry(self) -> List[Dict[str, Any]]:
+        if not self._tmp_log.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        with open(self._tmp_log, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+        return rows
+
+    # --------------- 정상 경로 ---------------
+    def test_audio_happy_path_emits_user_assistant_and_audio_bytes(self):
+        stt = _RecordingSTT(text="안녕")
+        tts = _ScriptedTTS(audio=b"FAKEMP3", ok=True, reason="ok")
+        server.STT = stt
+        server.TTS = tts
+
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"\x02" + b"webm")
+                seen = _drain_audio_turn(ws)
+
+        # STT 가 webm 임시 파일 경로로 호출됐고 그 파일은 finally 에서 삭제됐는지.
+        self.assertEqual(len(stt.calls), 1, f"STT.transcribe 1회 호출 기대, seen={seen!r}")
+        self.assertTrue(stt.calls[0].endswith(".webm"))
+        self.assertFalse(
+            Path(stt.calls[0]).exists(),
+            "handle_audio finally 가 임시 .webm 을 정리해야 함",
+        )
+
+        # 사용자 메시지 → 어시스턴트 메시지 → 오디오 바이트 순서 확인.
+        user_msgs = [o for o in seen if o.get("type") == "message" and o.get("role") == "user"]
+        asst_msgs = [o for o in seen if o.get("type") == "message" and o.get("role") == "assistant"]
+        audio_chunks = [o for o in seen if "_bytes" in o]
+        self.assertEqual(len(user_msgs), 1, f"user message 1건 기대. seen={seen!r}")
+        self.assertEqual(user_msgs[0]["text"], "안녕")
+        self.assertEqual(len(asst_msgs), 1, f"assistant message 1건 기대. seen={seen!r}")
+        self.assertEqual(asst_msgs[0]["text"], "음성 응답 더미")
+        self.assertGreaterEqual(len(audio_chunks), 1, "TTS audio bytes 가 emit_bytes 로 와야 함")
+        self.assertEqual(audio_chunks[0]["_bytes"], len(b"FAKEMP3"))
+
+        # 순서 검증: user msg index < assistant msg index < audio bytes index.
+        def _idx(pred):
+            for i, o in enumerate(seen):
+                if pred(o):
+                    return i
+            return -1
+
+        i_user = _idx(lambda o: o.get("type") == "message" and o.get("role") == "user")
+        i_asst = _idx(lambda o: o.get("type") == "message" and o.get("role") == "assistant")
+        i_audio = _idx(lambda o: "_bytes" in o)
+        self.assertLess(i_user, i_asst, f"user 가 assistant 보다 먼저 와야 함. seen={seen!r}")
+        self.assertLess(i_asst, i_audio, f"assistant 가 audio bytes 보다 먼저 와야 함. seen={seen!r}")
+
+        # speaking 상태 진입 (TTS 단계 도달) 검증.
+        self.assertTrue(
+            any(o.get("type") == "state" and o.get("state") == "speaking" for o in seen),
+            f"speaking state 미발화. seen={seen!r}",
+        )
+
+        # 텔레메트리: input_channel='audio' + tts_ok=True + reply_len>0.
+        rows = self._read_telemetry()
+        audio_rows = [r for r in rows if r.get("input_channel") == "audio"]
+        self.assertEqual(len(audio_rows), 1, f"audio turn 1건 텔레메트리 기대. rows={rows!r}")
+        row = audio_rows[0]
+        self.assertTrue(row.get("tts_ok"))
+        self.assertEqual(row.get("tts_reason"), "ok")
+        self.assertGreater(row.get("reply_len", 0), 0)
+        self.assertGreater(row.get("stt_text_len", 0), 0)
+        self.assertNotIn("error", row)
+        self.assertNotIn("empty_transcription", row)
+
+    # --------------- 빈 / 너무 짧은 transcription ---------------
+    def _assert_short_transcription_is_skipped(self, stt_text: str) -> None:
+        """STT 결과가 '' 혹은 1글자 (len(text)<2) 일 때 Brain/TTS 가 스킵돼야 한다는 공통 검증."""
+        stt = _RecordingSTT(text=stt_text)
+        tts = _ScriptedTTS()
+        server.STT = stt
+        server.TTS = tts
+
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"\x02" + b"webm")
+                seen = _drain_audio_turn(ws)
+
+        # message / tts_blocked / error 가 한 건도 안 와야 한다.
+        self.assertFalse(
+            any(o.get("type") == "message" for o in seen),
+            f"짧은 transcription({stt_text!r}) → user/assistant message 발화 금지. seen={seen!r}",
+        )
+        self.assertFalse(any(o.get("type") == "tts_blocked" for o in seen))
+        self.assertFalse(any(o.get("type") == "error" for o in seen))
+        # TTS 는 호출되지 않았어야 함.
+        self.assertEqual(len(tts.calls), 0, "TTS 가 호출되면 안 됨")
+        # state=thinking 까지는 도달했지만 speaking 은 못 가야 함.
+        self.assertTrue(any(o.get("type") == "state" and o.get("state") == "thinking" for o in seen))
+        self.assertFalse(any(o.get("type") == "state" and o.get("state") == "speaking" for o in seen))
+
+        # 텔레메트리에 empty_transcription=True 기록.
+        rows = self._read_telemetry()
+        audio_rows = [r for r in rows if r.get("input_channel") == "audio"]
+        self.assertEqual(len(audio_rows), 1)
+        self.assertTrue(audio_rows[0].get("empty_transcription"))
+
+    def test_audio_empty_transcription_skips_brain_and_tts(self):
+        # 완전히 빈 문자열 — `not text` 분기.
+        self._assert_short_transcription_is_skipped("")
+
+    def test_audio_one_char_transcription_skips_brain_and_tts(self):
+        # 1글자 — `len(text) < 2` 분기. Whisper 가 노이즈를 한 음절로 환각하는
+        # 흔한 케이스를 별도 회귀 검사로 고정.
+        self._assert_short_transcription_is_skipped("가")
+
+    # --------------- TTS 차단 ---------------
+    def test_audio_tts_blocked_emits_tts_blocked_message(self):
+        stt = _RecordingSTT(text="안녕")
+        tts = _ScriptedTTS(audio=b"", ok=False, reason="blocklist:테스트")
+        server.STT = stt
+        server.TTS = tts
+
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"\x02" + b"webm")
+                seen = _drain_audio_turn(ws)
+
+        # user msg + assistant msg 는 와야 한다 (TTS 만 차단).
+        self.assertTrue(
+            any(o.get("type") == "message" and o.get("role") == "user" for o in seen),
+            f"user message 누락. seen={seen!r}",
+        )
+        self.assertTrue(
+            any(o.get("type") == "message" and o.get("role") == "assistant" for o in seen),
+            f"assistant message 누락. seen={seen!r}",
+        )
+        blocked = [o for o in seen if o.get("type") == "tts_blocked"]
+        self.assertEqual(len(blocked), 1, f"tts_blocked 1건 기대. seen={seen!r}")
+        self.assertEqual(blocked[0]["reason"], "blocklist:테스트")
+        self.assertIn("message", blocked[0])
+        # 오디오 바이트는 와선 안 된다.
+        self.assertFalse(any("_bytes" in o for o in seen), "audio bytes 가 와선 안 됨")
+
+        # 순서 검증: user message → assistant message → tts_blocked.
+        i_user = next((i for i, o in enumerate(seen) if o.get("type") == "message" and o.get("role") == "user"), -1)
+        i_asst = next((i for i, o in enumerate(seen) if o.get("type") == "message" and o.get("role") == "assistant"), -1)
+        i_blocked = next((i for i, o in enumerate(seen) if o.get("type") == "tts_blocked"), -1)
+        self.assertGreaterEqual(i_user, 0)
+        self.assertLess(i_user, i_asst, "user 가 assistant 보다 먼저 와야 함")
+        self.assertLess(i_asst, i_blocked, "assistant 가 tts_blocked 보다 먼저 와야 함")
+
+        # 텔레메트리: tts_ok=False / tts_reason=blocklist:....
+        rows = self._read_telemetry()
+        audio_rows = [r for r in rows if r.get("input_channel") == "audio"]
+        self.assertEqual(len(audio_rows), 1)
+        self.assertFalse(audio_rows[0].get("tts_ok"))
+        self.assertEqual(audio_rows[0].get("tts_reason"), "blocklist:테스트")
+
+    # --------------- Brain 예외 ---------------
+    def test_audio_brain_exception_emits_error_and_cleans_up_temp_file(self):
+        stt = _RecordingSTT(text="안녕")
+        tts = _ScriptedTTS()
+        server.STT = stt
+        server.TTS = tts
+
+        # _FakeBrain.think 를 한시적으로 예외 raise 로 패치.
+        def _boom(self_brain, text, ctx=""):
+            raise RuntimeError("brain blew up")
+
+        with patch.object(_FakeBrain, "think", _boom):
+            with TestClient(server.app) as client:
+                with client.websocket_connect("/ws") as ws:
+                    ws.receive_json()  # ready
+                    ws.send_bytes(b"\x02" + b"webm")
+                    seen = _drain_audio_turn(ws)
+
+        # user msg 는 오고, 그 후 error 메시지가 와야 한다 (assistant 는 X).
+        self.assertTrue(
+            any(o.get("type") == "message" and o.get("role") == "user" for o in seen),
+            f"user message 누락. seen={seen!r}",
+        )
+        self.assertFalse(
+            any(o.get("type") == "message" and o.get("role") == "assistant" for o in seen),
+            "Brain 예외 시 assistant message 가 와선 안 됨",
+        )
+        errs = [o for o in seen if o.get("type") == "error"]
+        self.assertEqual(len(errs), 1, f"error 1건 기대. seen={seen!r}")
+        self.assertIn("message", errs[0])
+        # TTS 는 호출되지 않았어야 함.
+        self.assertEqual(len(tts.calls), 0)
+        # 임시 파일도 finally 에서 정리됐는지.
+        self.assertFalse(Path(stt.calls[0]).exists())
+
+        # 텔레메트리: error=RuntimeError 라벨이 남아야 한다.
+        rows = self._read_telemetry()
+        audio_rows = [r for r in rows if r.get("input_channel") == "audio"]
+        self.assertEqual(len(audio_rows), 1)
+        self.assertEqual(audio_rows[0].get("error"), "RuntimeError")
+
+
+# ============================================================
 # WebSocket /api/harness/ws — 텔레메트리 푸시
 # ============================================================
 class HarnessWebSocketTests(unittest.TestCase):
