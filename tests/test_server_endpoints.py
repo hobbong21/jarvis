@@ -872,5 +872,195 @@ class HarnessWebSocketTests(unittest.TestCase):
                 self.assertIn("total", msg["summary"])
 
 
+# ============================================================
+# WebSocket /ws — compare 모드 (Claude + OpenAI 동시 스트리밍)
+# ============================================================
+# Task #13: respond_compare(server.py 636-766) 회귀 가드.
+# - 정상: 양쪽 백엔드 모두 chunk + end 발화 → compare_done 까지 메시지 순서 검증.
+# - 부분 실패: 한쪽만 응답 (다른 쪽 침묵) — compare_done 은 그대로 발화돼야 한다.
+# - 전체 실패: compare_stream 자체가 예외 → server.run_stream 의 except 분기가
+#   ("system", None, CONCERNED, _friendly_error(...)) 를 큐에 넣어 user 에게는
+#   compare_end(source="system") + compare_done 로 안내된다.
+class _ScriptedCompareBrain(_FakeBrain):
+    """compare_stream 만 클래스-레벨 스크립트로 동작하도록 한 fake.
+    - script: respond_compare 가 큐에서 읽을 (source, chunk, emo, body) 튜플 목록.
+    - raise_exc: 설정 시 generator 가 첫 next() 에서 해당 예외를 raise.
+    """
+
+    script: List[Tuple[Any, ...]] = []
+    raise_exc: Any = None  # type: ignore[assignment]
+
+    def compare_stream(self, prompt: str, ctx: str):
+        if _ScriptedCompareBrain.raise_exc is not None:
+            raise _ScriptedCompareBrain.raise_exc
+        for item in _ScriptedCompareBrain.script:
+            yield item
+
+
+class CompareModeWebSocketTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        from config import cfg
+        cls._orig_backend = cfg.llm_backend  # type: ignore[attr-defined]
+        cls._orig_brain = server.Brain        # type: ignore[attr-defined]
+        cfg.llm_backend = "compare"
+        server.Brain = _ScriptedCompareBrain
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        from config import cfg
+        cfg.llm_backend = cls._orig_backend   # type: ignore[attr-defined]
+        server.Brain = cls._orig_brain        # type: ignore[attr-defined]
+
+    def setUp(self) -> None:
+        _ScriptedCompareBrain.script = []
+        _ScriptedCompareBrain.raise_exc = None
+
+    def _run_compare(self, prompt: str = "안녕"):
+        # 매 케이스마다 telemetry log 를 비우고 시작 — compare turn 한 줄만 남도록.
+        try:
+            if telemetry.LOG_PATH.exists():
+                telemetry.LOG_PATH.unlink()
+        except Exception:
+            pass
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_text(json.dumps({"type": "text_input", "text": prompt}))
+                done, history = _drain_until(
+                    ws,
+                    lambda o: o.get("type") in ("compare_done", "error"),
+                    max_msgs=120,
+                )
+        return done, history
+
+    def _last_telemetry_entry(self) -> Dict[str, Any]:
+        # respond_compare 의 finally 절에서 log_turn 이 동기 호출되므로
+        # WebSocket 종료 시점에는 jsonl 마지막 줄에 compare turn 이 적혀 있다.
+        self.assertTrue(
+            telemetry.LOG_PATH.exists(),
+            f"telemetry 파일이 없음: {telemetry.LOG_PATH}",
+        )
+        with open(telemetry.LOG_PATH, "r", encoding="utf-8") as f:
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+        self.assertTrue(lines, "telemetry 파일에 turn 이 기록되지 않음")
+        return json.loads(lines[-1])
+
+    def test_compare_normal_both_backends_respond(self):
+        """양쪽 백엔드가 chunk + end 를 발화 — compare_start → chunk(둘) →
+        compare_end(둘) → compare_done 순서가 보장돼야 한다."""
+        _ScriptedCompareBrain.script = [
+            ("claude", "안녕", None, None),
+            ("openai", "Hello", None, None),
+            ("claude", " 친구", None, None),
+            ("openai", " friend", None, None),
+            ("claude", None, Emotion.NEUTRAL, "안녕 친구"),
+            ("openai", None, Emotion.HAPPY, "Hello friend"),
+        ]
+        done, history = self._run_compare()
+        self.assertIsNotNone(done, f"compare_done 미수신. history={history!r}")
+        self.assertEqual(done["type"], "compare_done")
+
+        types = [m.get("type") for m in history]
+        self.assertIn("compare_start", types)
+
+        # 순서: compare_start 가 chunk/end 보다 먼저, compare_done 이 가장 마지막.
+        idx_start = types.index("compare_start")
+        idx_done = types.index("compare_done")
+        self.assertLess(idx_start, idx_done)
+        for t in ("compare_chunk", "compare_end"):
+            for i, mt in enumerate(types):
+                if mt == t:
+                    self.assertGreater(i, idx_start)
+                    self.assertLess(i, idx_done)
+
+        # 양쪽 source 가 모두 chunk + end 발화돼야 함.
+        sources_chunk = {m.get("source") for m in history
+                         if m.get("type") == "compare_chunk"}
+        sources_end = {m.get("source") for m in history
+                       if m.get("type") == "compare_end"}
+        self.assertEqual(sources_chunk, {"claude", "openai"})
+        self.assertEqual(sources_end, {"claude", "openai"})
+
+        # compare_end body / emotion 검증.
+        ends = {m["source"]: m for m in history if m.get("type") == "compare_end"}
+        self.assertEqual(ends["claude"]["text"], "안녕 친구")
+        self.assertEqual(ends["claude"]["emotion"], "neutral")
+        self.assertEqual(ends["openai"]["text"], "Hello friend")
+        self.assertEqual(ends["openai"]["emotion"], "happy")
+
+        # compare_start 의 sources 필드도 두 백엔드를 안내해야 함.
+        start = next(m for m in history if m.get("type") == "compare_start")
+        self.assertEqual(set(start.get("sources", [])), {"claude", "openai"})
+
+        # 텔레메트리 — backend=compare, compare_sources 누적, reply_len 합산.
+        entry = self._last_telemetry_entry()
+        self.assertEqual(entry["backend"], "compare")
+        self.assertEqual(set(entry["compare_sources"]), {"claude", "openai"})
+        # reply_len = "안녕 친구" + "Hello friend" 두 본문 길이 합.
+        self.assertEqual(entry["reply_len"], len("안녕 친구") + len("Hello friend"))
+        self.assertEqual(entry["tts_reason"], "compare_no_tts")
+        self.assertEqual(entry["fallback_chain"], ["compare:claude+openai"])
+
+    def test_compare_only_one_backend_responds(self):
+        """한쪽(claude) 만 chunk + end 를 발화하고 다른쪽(openai) 은 침묵.
+        그래도 compare_done 까지 도달해야 하며, openai 측 메시지는 없어야 한다.
+        """
+        _ScriptedCompareBrain.script = [
+            ("claude", "단독", None, None),
+            ("claude", None, Emotion.NEUTRAL, "단독 응답"),
+            # openai 측 종결 이벤트 없음 — compare_stream generator 가 그대로 종료.
+        ]
+        done, history = self._run_compare()
+        self.assertIsNotNone(done, f"compare_done 미수신. history={history!r}")
+        self.assertEqual(done["type"], "compare_done")
+
+        sources_chunk = {m.get("source") for m in history
+                         if m.get("type") == "compare_chunk"}
+        sources_end = [m.get("source") for m in history
+                       if m.get("type") == "compare_end"]
+        self.assertEqual(sources_chunk, {"claude"})
+        self.assertEqual(sources_end, ["claude"])
+
+        end = next(m for m in history if m.get("type") == "compare_end")
+        self.assertEqual(end["text"], "단독 응답")
+
+        # 텔레메트리 — compare_sources 에 응답한 백엔드만 누적, reply_len 도 그쪽 길이.
+        entry = self._last_telemetry_entry()
+        self.assertEqual(entry["backend"], "compare")
+        self.assertEqual(entry["compare_sources"], ["claude"])
+        self.assertEqual(entry["reply_len"], len("단독 응답"))
+
+    def test_compare_both_backends_raise(self):
+        """compare_stream 자체가 예외 — server 의 run_stream 가 system 소스로
+        친절 안내를 발화하고, 그래도 compare_done 까지 도달해야 한다 (사용자가
+        '응답 없음' 으로 멈춰버리는 회귀를 막는다).
+        """
+        _ScriptedCompareBrain.raise_exc = RuntimeError("both backends down")
+        done, history = self._run_compare()
+        self.assertIsNotNone(done, f"compare_done 미수신. history={history!r}")
+        self.assertEqual(done["type"], "compare_done")
+
+        ends = [m for m in history if m.get("type") == "compare_end"]
+        self.assertEqual(len(ends), 1)
+        self.assertEqual(ends[0]["source"], "system")
+        self.assertEqual(ends[0]["emotion"], "concerned")
+        self.assertTrue(ends[0]["text"], "system 안내 본문이 비어 있음")
+
+        # compare_start → compare_end(system) → compare_done 순서.
+        types = [m.get("type") for m in history]
+        idx_start = types.index("compare_start")
+        idx_end = types.index("compare_end")
+        idx_done = types.index("compare_done")
+        self.assertLess(idx_start, idx_end)
+        self.assertLess(idx_end, idx_done)
+
+        # 텔레메트리 — system 소스가 누적되고 reply_len 은 안내 본문 길이.
+        entry = self._last_telemetry_entry()
+        self.assertEqual(entry["backend"], "compare")
+        self.assertEqual(entry["compare_sources"], ["system"])
+        self.assertEqual(entry["reply_len"], len(ends[0]["text"]))
+
+
 if __name__ == "__main__":
     unittest.main()
