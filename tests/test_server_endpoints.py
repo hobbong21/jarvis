@@ -35,6 +35,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Tuple
@@ -1318,6 +1319,448 @@ class CompareModeVoiceGuardTests(unittest.TestCase):
             _SpyCompareBrain.think_calls, [],
             f"compare 진입했는데 think_stream_with_fallback 가 호출됨. "
             f"calls={_SpyCompareBrain.think_calls!r}",
+        )
+
+
+# ============================================================
+# Task #22 — 음성 입력 인접 사각지대 5개 자동 검사
+# ============================================================
+# Task #14 가 handle_audio 본문(STT→Brain→TTS) 을 ~92% 커버한 뒤에도
+# 사용자가 마이크 버튼을 누른 시점부터 응답을 듣기까지의 *경로* 와 *부수 효과*
+# 는 침묵의 회귀 지대로 남아 있었다. 이 클래스는 다음 5개 인접 영역의 회귀를
+# 한 묶음으로 막는다:
+#   1. WS 바이너리 디스패처 분기 (0x01 / 0x02 / 알 수 없는 매직 / 빈 페이로드)
+#   2. busy lock 점유 시 두 번째 0x02 silently drop (첫 turn 응답은 온전히)
+#   3. welcome 선점 — 0x02 / text_input 양쪽 경로
+#   4. 연결 중간 끊김 시 임시 .webm 파일 정리
+#   5. 3-Pillar 음성 카운터 키 (tool_count / vision_used / tool_ms) 및
+#      자동 사실 학습/recall (memory_event learned/recall) emit
+class VoiceInputAdjacentTests(unittest.TestCase):
+    """Task #22: handle_audio 본문 도달 경로와 부수 효과의 회귀 가드."""
+
+    def setUp(self) -> None:
+        self._prev_stt = server.STT
+        self._prev_tts = server.TTS
+        self._prev_log_path = telemetry.LOG_PATH
+        self._tmp_log = Path(_TMP_DIR) / f"voice_adj_{id(self)}.jsonl"
+        if self._tmp_log.exists():
+            self._tmp_log.unlink()
+        telemetry.LOG_PATH = self._tmp_log
+        # 메모리 격리 — 각 테스트가 고유한 user_id 를 쓰도록 cfg 를 잠시 바꿔
+        # 다른 테스트의 facts/메시지가 끼어들지 않게 한다.
+        from sarvis.config import cfg
+        self._prev_mem_user = cfg.memory_user_id
+        cfg.memory_user_id = f"voice_adj_{id(self)}"
+
+    def tearDown(self) -> None:
+        server.STT = self._prev_stt
+        server.TTS = self._prev_tts
+        telemetry.LOG_PATH = self._prev_log_path
+        from sarvis.config import cfg
+        cfg.memory_user_id = self._prev_mem_user
+
+    def _read_telemetry(self) -> List[Dict[str, Any]]:
+        if not self._tmp_log.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        with open(self._tmp_log, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+        return rows
+
+    # --------------- 1. WS 바이너리 디스패처 ---------------
+    def test_dispatcher_0x01_routes_to_vision_no_error(self):
+        """0x01 = 카메라 프레임 — vision.push_jpeg 분기로 빠지고 dispatcher 가
+        에러를 발화하지 않아야 한다 (가짜 JPEG 라 push_jpeg 는 False 반환)."""
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"\x01" + b"not-a-real-jpeg")
+                # ping → pong 으로 dispatcher 가 다음 메시지를 정상 처리함을 검증.
+                ws.send_text(json.dumps({"type": "ping"}))
+                pong, history = _drain_until(
+                    ws, lambda o: o.get("type") == "pong",
+                )
+        self.assertIsNotNone(pong, f"0x01 처리 후 pong 미수신. history={history!r}")
+        self.assertFalse(
+            any(o.get("type") == "error" for o in history),
+            f"0x01 처리 중 error 발화. history={history!r}",
+        )
+
+    def test_dispatcher_unknown_magic_byte_is_ignored(self):
+        """0x01/0x02/0x03..0x05 외 매직 바이트는 어떤 emit 도 발생시키지 않아야 한다."""
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"\x99" + b"some payload")
+                ws.send_text(json.dumps({"type": "ping"}))
+                pong, history = _drain_until(
+                    ws, lambda o: o.get("type") == "pong",
+                )
+        self.assertIsNotNone(pong)
+        self.assertFalse(
+            any(o.get("type") == "error" for o in history),
+            f"unknown magic 처리 중 error 발화. history={history!r}",
+        )
+        # 0x99 분기는 어떤 도메인 이벤트(faces/message/tts_blocked 등) 도 만들지 않는다.
+        forbidden = {"faces", "message", "tts_blocked", "command_saved", "memory_event"}
+        self.assertFalse(
+            any(o.get("type") in forbidden for o in history),
+            f"unknown magic 이 도메인 이벤트를 발화: {history!r}",
+        )
+
+    def test_dispatcher_empty_payload_continues(self):
+        """빈 binary 페이로드는 ``if not data: continue`` 분기로 silently 무시."""
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"")
+                ws.send_text(json.dumps({"type": "ping"}))
+                pong, history = _drain_until(
+                    ws, lambda o: o.get("type") == "pong",
+                )
+        self.assertIsNotNone(pong)
+        self.assertFalse(
+            any(o.get("type") == "error" for o in history),
+            f"빈 payload 처리 중 error. history={history!r}",
+        )
+
+    # --------------- 2. busy lock — 두 번째 0x02 ---------------
+    def test_back_to_back_0x02_first_turn_completes_intact(self):
+        """연속 0x02 음성 프레임 — 두 번째가 dispatcher 정책상 silently drop
+        되거나 순차 처리되더라도 첫 번째 turn 의 응답이 항상 온전해야 한다.
+        (busy lock 분기는 _preempt_welcome 가 lock 을 풀어주므로 통상 둘 다
+        처리되지만, 첫 turn 의 회귀를 막는 것이 본 테스트의 목적.)
+        """
+        stt = _RecordingSTT(text="안녕")
+        tts = _ScriptedTTS(audio=b"FAKEMP3", ok=True, reason="ok")
+        server.STT = stt
+        server.TTS = tts
+
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"\x02" + b"first")
+                ws.send_bytes(b"\x02" + b"second")
+                seen = _drain_audio_turn(ws, max_msgs=120)
+
+        user_msgs = [o for o in seen if o.get("type") == "message" and o.get("role") == "user"]
+        asst_msgs = [o for o in seen if o.get("type") == "message" and o.get("role") == "assistant"]
+        audio_chunks = [o for o in seen if "_bytes" in o]
+        self.assertGreaterEqual(len(user_msgs), 1, f"첫 turn user msg 누락. seen={seen!r}")
+        self.assertGreaterEqual(len(asst_msgs), 1, f"첫 turn assistant msg 누락. seen={seen!r}")
+        self.assertGreaterEqual(len(audio_chunks), 1, f"첫 turn audio bytes 누락. seen={seen!r}")
+        self.assertFalse(
+            any(o.get("type") == "error" for o in seen),
+            f"두 번째 0x02 처리에서 error 발화 (silently drop 이어야 함). seen={seen!r}",
+        )
+
+    # --------------- 3. welcome 선점 ---------------
+    def test_welcome_preempted_by_audio_before_speaking(self):
+        """0.5s 환영 인사 sleep 중에 0x02 가 도착 → welcome 의
+        ``stream_end(is_welcome=True)`` 가 절대 발화되지 않아야 한다."""
+        stt = _RecordingSTT(text="안녕")
+        tts = _ScriptedTTS(audio=b"FAKEMP3", ok=True, reason="ok")
+        server.STT = stt
+        server.TTS = tts
+
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                # ready 직후 즉시 0x02 — welcome 의 0.5s sleep 진행 중에 도달.
+                ws.send_bytes(b"\x02" + b"webm")
+                seen = _drain_audio_turn(ws)
+
+        welcome_ends = [
+            o for o in seen
+            if o.get("type") == "stream_end" and o.get("is_welcome")
+        ]
+        self.assertEqual(
+            len(welcome_ends), 0,
+            f"welcome 이 선점됐어야 하는데 stream_end(is_welcome=True) 발화됨. seen={seen!r}",
+        )
+        # 본 응답은 정상 도착해야 한다.
+        self.assertTrue(
+            any(o.get("type") == "message" and o.get("role") == "assistant" for o in seen),
+            f"본 응답 assistant message 누락. seen={seen!r}",
+        )
+
+    def test_welcome_preempted_by_text_input(self):
+        """text_input 경로도 _preempt_welcome 을 호출 — 동일한 선점이 일어나야 함."""
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_text(json.dumps({"type": "text_input", "text": "안녕"}))
+                end, history = _drain_until(
+                    ws,
+                    lambda o: o.get("type") == "stream_end" and not o.get("is_welcome"),
+                    max_msgs=80,
+                )
+        self.assertIsNotNone(end, f"본 응답 stream_end 미수신. history={history!r}")
+        welcome_ends = [
+            o for o in history
+            if o.get("type") == "stream_end" and o.get("is_welcome")
+        ]
+        self.assertEqual(
+            len(welcome_ends), 0,
+            f"text_input 경로에서 welcome 이 선점됐어야 함. history={history!r}",
+        )
+
+    # --------------- 4. 연결 끊김 — 임시 파일 정리 ---------------
+    def test_disconnect_during_audio_cleans_temp_file(self):
+        """클라이언트가 STT 도중 disconnect 해도 finally 가 임시 .webm 정리.
+
+        state=listening 까지 drain 해 handle_audio 가 정확히 STT 단계에 들어간
+        시점에서 WebSocket 을 닫는다. disconnect 가 await emit 들을 silently
+        실패시키더라도 handle_audio 의 finally 가 임시 파일을 unlink 한다.
+        """
+        captured: List[str] = []
+
+        class _SlowSTT:
+            def transcribe(self, path):
+                captured.append(path)
+                # 100ms — drain → close 가 처리될 시간 확보. 빈 결과로 빠르게 종료.
+                time.sleep(0.1)
+                return ""
+
+        server.STT = _SlowSTT()
+
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"\x02" + b"webm")
+                # handle_audio 가 시작돼 state=listening 이 emit 된 시점까지 드레인.
+                # 이 시점에 STT.transcribe 가 thread 에서 막 호출됐다.
+                listening, _hist = _drain_until(
+                    ws,
+                    lambda o: o.get("type") == "state" and o.get("state") == "listening",
+                    max_msgs=20,
+                )
+                self.assertIsNotNone(listening, "state=listening 미수신 — handle_audio 진입 실패")
+                # 컨텍스트 종료 → close. handle_audio 의 await emit 들은 실패하지만
+                # finally 의 Path(path).unlink 는 동기적으로 실행된다.
+
+        # WebSocket close 후 서버측 handle_audio 가 finally 까지 도달할 시간 확보.
+        # 안전 마진으로 최대 2초 폴링.
+        deadline = time.monotonic() + 2.0
+        while (not captured or (captured and Path(captured[0]).exists())) \
+                and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        self.assertEqual(len(captured), 1, "STT.transcribe 가 호출되지 않음")
+        self.assertFalse(
+            Path(captured[0]).exists(),
+            f"disconnect 후에도 임시 .webm 가 남아있음: {captured[0]}",
+        )
+
+    # --------------- 5a. 3-Pillar 텔레메트리 키 ---------------
+    def test_audio_turn_telemetry_contains_pillar_keys(self):
+        """음성 turn 의 jsonl row 에 turn_pillar_meta() 의 3개 키가 모두 들어가야 한다.
+        (사이클 #9 — UserSession.turn_pillar_meta 참고: tool_count / vision_used / tool_ms.)
+        """
+        stt = _RecordingSTT(text="안녕")
+        tts = _ScriptedTTS(audio=b"FAKEMP3", ok=True, reason="ok")
+        server.STT = stt
+        server.TTS = tts
+
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"\x02" + b"webm")
+                _drain_audio_turn(ws)
+
+        rows = self._read_telemetry()
+        audio_rows = [r for r in rows if r.get("input_channel") == "audio"]
+        self.assertEqual(len(audio_rows), 1, f"audio turn 1건 기대. rows={rows!r}")
+        row = audio_rows[0]
+        for key in ("tool_count", "vision_used", "tool_ms"):
+            self.assertIn(key, row, f"pillar 키 '{key}' 누락. row={row!r}")
+        # _FakeBrain.think 가 도구를 호출하지 않으므로 카운터는 모두 0/False.
+        self.assertEqual(row["tool_count"], 0)
+        self.assertFalse(row["vision_used"])
+        self.assertEqual(row["tool_ms"], 0.0)
+
+    # --------------- 5b. 자동 사실 학습 (memory_event learned) ---------------
+    def test_audio_turn_emits_memory_event_learned_when_fact_extracted(self):
+        """음성 turn 의 사용자 발화에서 자기소개 패턴이 매칭되면
+        memory_event(kind='learned', facts=[...]) 가 user/assistant 메시지 사이에 emit."""
+        from sarvis.memory import extract_user_facts
+        sample = "제 이름은 민수입니다"
+        # 회귀 가드 — 본 테스트의 전제: 한국어 자기소개 패턴이 facts 를 추출해야 한다.
+        # ('사비스' 는 BANLIST 라 일부러 다른 이름 사용.)
+        self.assertTrue(
+            extract_user_facts(sample),
+            "memory.extract_user_facts 가 자기소개 패턴 추출에 실패 — 본 테스트의 전제가 무너짐",
+        )
+
+        stt = _RecordingSTT(text=sample)
+        tts = _ScriptedTTS(audio=b"FAKEMP3", ok=True, reason="ok")
+        server.STT = stt
+        server.TTS = tts
+
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"\x02" + b"webm")
+                seen = _drain_audio_turn(ws)
+
+        learned = [
+            o for o in seen
+            if o.get("type") == "memory_event" and o.get("kind") == "learned"
+        ]
+        self.assertEqual(
+            len(learned), 1,
+            f"memory_event(kind='learned') 1건 기대. seen={seen!r}",
+        )
+        self.assertIsInstance(learned[0].get("facts"), list)
+        keys = {f.get("key") for f in learned[0]["facts"]}
+        self.assertIn("name", keys, f"학습된 facts 에 name 누락: {learned[0]!r}")
+
+        # 순서: user message → memory_event(learned) → assistant message.
+        def _idx(pred):
+            for i, o in enumerate(seen):
+                if pred(o):
+                    return i
+            return -1
+
+        i_user = _idx(lambda o: o.get("type") == "message" and o.get("role") == "user")
+        i_learned = _idx(lambda o: o.get("type") == "memory_event" and o.get("kind") == "learned")
+        i_asst = _idx(lambda o: o.get("type") == "message" and o.get("role") == "assistant")
+        self.assertGreaterEqual(i_user, 0)
+        self.assertGreater(i_learned, i_user, "learned 가 user message 다음에 와야 함")
+        self.assertGreater(i_asst, i_learned, "assistant message 가 learned 다음에 와야 함")
+
+    # --------------- 1b. 0x04 멀티모달 음성 명령 분기 ---------------
+    def test_dispatcher_0x04_audio_command_persists_and_emits(self):
+        """0x04 = 멀티모달 음성 명령. payload = <caption_len:2 BE><caption_utf8><webm bytes>.
+        commands DB 적재 + 파일 저장 + command_saved 이벤트 발화. 이 경로는
+        '음성 명령(=voice 메모)' 의 핵심 부수효과로, 본 task 의 voice-adjacent
+        영역에 포함된다.
+        """
+        caption = "테스트 음성 메모"
+        cap_bytes = caption.encode("utf-8")
+        media = b"FAKEWEBMBYTES"
+        payload = bytes([0x04]) + len(cap_bytes).to_bytes(2, "big") + cap_bytes + media
+
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(payload)
+                saved, history = _drain_until(
+                    ws,
+                    lambda o: o.get("type") in ("command_saved", "error"),
+                    max_msgs=40,
+                )
+        self.assertIsNotNone(saved, f"command_saved/error 미수신. history={history!r}")
+        self.assertEqual(saved.get("type"), "command_saved", f"error 발화: {saved!r}")
+        self.assertEqual(saved.get("kind"), "audio")
+        self.assertEqual(saved.get("caption"), caption)
+        self.assertTrue(saved.get("has_audio"))
+        self.assertFalse(saved.get("has_image"))
+        self.assertFalse(saved.get("has_video"))
+        # 저장된 미디어 파일이 실제로 디스크에 존재해야 한다.
+        cmd_id = saved.get("id")
+        self.assertIsNotNone(cmd_id)
+        media_path = Path(server.COMMANDS_DIR) / f"{cmd_id}.webm"
+        self.assertTrue(media_path.exists(), f"미디어 파일 누락: {media_path}")
+        self.assertEqual(media_path.read_bytes(), media)
+        # 정리.
+        try:
+            media_path.unlink()
+        except Exception:
+            pass
+
+    # --------------- 5d. memory.add_message 예외 — 음성 turn 견고성 ---------------
+    def test_audio_turn_survives_memory_add_message_exception(self):
+        """session.memory.add_message 가 raise 해도 음성 turn 은 사용자에게
+        에러 없이 완주해야 한다 (handle_audio 의 try/except + traceback.print_exc)."""
+        stt = _RecordingSTT(text="안녕")
+        tts = _ScriptedTTS(audio=b"FAKEMP3", ok=True, reason="ok")
+        server.STT = stt
+        server.TTS = tts
+
+        mem = server.get_memory()
+        original_add = mem.add_message
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated memory failure")
+
+        mem.add_message = _boom  # type: ignore[assignment]
+        try:
+            with TestClient(server.app) as client:
+                with client.websocket_connect("/ws") as ws:
+                    ws.receive_json()  # ready
+                    ws.send_bytes(b"\x02" + b"webm")
+                    seen = _drain_audio_turn(ws)
+        finally:
+            mem.add_message = original_add  # type: ignore[assignment]
+
+        # 사용자에게는 에러 미노출 — 메모리 실패는 silent fallback (try/except + print).
+        self.assertFalse(
+            any(o.get("type") == "error" for o in seen),
+            f"메모리 실패가 사용자에게 error 로 노출됨. seen={seen!r}",
+        )
+        # user / assistant message + audio bytes 는 정상 도착해야 한다.
+        self.assertTrue(
+            any(o.get("type") == "message" and o.get("role") == "user" for o in seen),
+            f"user message 누락. seen={seen!r}",
+        )
+        self.assertTrue(
+            any(o.get("type") == "message" and o.get("role") == "assistant" for o in seen),
+            f"assistant message 누락. seen={seen!r}",
+        )
+        self.assertTrue(
+            any("_bytes" in o for o in seen),
+            f"audio bytes 누락. seen={seen!r}",
+        )
+        # 텔레메트리도 정상 기록 — error 필드 없어야 함.
+        rows = self._read_telemetry()
+        audio_rows = [r for r in rows if r.get("input_channel") == "audio"]
+        self.assertEqual(len(audio_rows), 1)
+        self.assertNotIn("error", audio_rows[0])
+
+    # --------------- 5c. recall 경로 (memory_event recall) ---------------
+    def test_audio_turn_emits_memory_event_recall_when_context_block_nonempty(self):
+        """저장된 fact 가 있으면 build_context 가 [기억] 블록을 주입 →
+        session._last_recall=True → _learn_and_signal 이 memory_event(kind='recall') emit."""
+        from sarvis.config import cfg
+        # 이 테스트만의 격리된 user_id 에 사실을 한 건 적재.
+        mem = server.get_memory()
+        mem.upsert_fact(cfg.memory_user_id, "name", "민수")
+
+        # facts 가 추출되지 않는 평범한 발화 — learned 는 발화되면 안 된다.
+        stt = _RecordingSTT(text="안녕하세요")
+        tts = _ScriptedTTS(audio=b"FAKEMP3", ok=True, reason="ok")
+        server.STT = stt
+        server.TTS = tts
+
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_bytes(b"\x02" + b"webm")
+                seen = _drain_audio_turn(ws)
+
+        recalls = [
+            o for o in seen
+            if o.get("type") == "memory_event" and o.get("kind") == "recall"
+        ]
+        self.assertEqual(
+            len(recalls), 1,
+            f"memory_event(kind='recall') 1건 기대. seen={seen!r}",
+        )
+        learned = [
+            o for o in seen
+            if o.get("type") == "memory_event" and o.get("kind") == "learned"
+        ]
+        self.assertEqual(
+            len(learned), 0,
+            f"평범한 발화에 learned 가 옴: {learned!r}",
         )
 
 
