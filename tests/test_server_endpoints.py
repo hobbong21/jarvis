@@ -925,6 +925,7 @@ class CompareModeWebSocketTests(unittest.TestCase):
                 telemetry.LOG_PATH.unlink()
         except Exception:
             pass
+        self._last_prompt = prompt
         with TestClient(server.app) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.receive_json()  # ready
@@ -996,6 +997,7 @@ class CompareModeWebSocketTests(unittest.TestCase):
         self.assertEqual(set(start.get("sources", [])), {"claude", "openai"})
 
         # 텔레메트리 — backend=compare, compare_sources 누적, reply_len 합산.
+        # Task #19: prompt_len/tts_reason/fallback_chain 도 회귀 가드 (요약/진화 입력 보존).
         entry = self._last_telemetry_entry()
         self.assertEqual(entry["backend"], "compare")
         self.assertEqual(set(entry["compare_sources"]), {"claude", "openai"})
@@ -1003,6 +1005,10 @@ class CompareModeWebSocketTests(unittest.TestCase):
         self.assertEqual(entry["reply_len"], len("안녕 친구") + len("Hello friend"))
         self.assertEqual(entry["tts_reason"], "compare_no_tts")
         self.assertEqual(entry["fallback_chain"], ["compare:claude+openai"])
+        self.assertEqual(entry["prompt_len"], len(self._last_prompt))
+        # 정상 경로에서는 error 필드가 없거나 None — turn_meta 의 setdefault 가
+        # 호출되지 않았어야 한다 (run_stream 가 정상 종료).
+        self.assertNotIn("error", entry)
 
     def test_compare_only_one_backend_responds(self):
         """한쪽(claude) 만 chunk + end 를 발화하고 다른쪽(openai) 은 침묵.
@@ -1028,10 +1034,16 @@ class CompareModeWebSocketTests(unittest.TestCase):
         self.assertEqual(end["text"], "단독 응답")
 
         # 텔레메트리 — compare_sources 에 응답한 백엔드만 누적, reply_len 도 그쪽 길이.
+        # Task #19: 단일 응답이어도 compare 모드의 고정 메타(tts_reason/fallback_chain)
+        # 와 prompt_len 은 동일하게 보존돼야 한다.
         entry = self._last_telemetry_entry()
         self.assertEqual(entry["backend"], "compare")
         self.assertEqual(entry["compare_sources"], ["claude"])
         self.assertEqual(entry["reply_len"], len("단독 응답"))
+        self.assertEqual(entry["tts_reason"], "compare_no_tts")
+        self.assertEqual(entry["fallback_chain"], ["compare:claude+openai"])
+        self.assertEqual(entry["prompt_len"], len(self._last_prompt))
+        self.assertNotIn("error", entry)
 
     def test_compare_both_backends_raise(self):
         """compare_stream 자체가 예외 — server 의 run_stream 가 system 소스로
@@ -1058,10 +1070,20 @@ class CompareModeWebSocketTests(unittest.TestCase):
         self.assertLess(idx_end, idx_done)
 
         # 텔레메트리 — system 소스가 누적되고 reply_len 은 안내 본문 길이.
+        # Task #19: 예외가 run_stream 에서 흡수되더라도
+        #   - error 필드에 백엔드 예외 타입(RuntimeError) 이 기록되고
+        #   - compare_sources 에는 'system' 이 포함되며
+        #   - 고정 메타(tts_reason/fallback_chain/prompt_len) 는 그대로 보존돼야
+        # /api/harness/telemetry 요약과 진화 입력이 깨지지 않는다.
         entry = self._last_telemetry_entry()
         self.assertEqual(entry["backend"], "compare")
         self.assertEqual(entry["compare_sources"], ["system"])
+        self.assertIn("system", entry["compare_sources"])
         self.assertEqual(entry["reply_len"], len(ends[0]["text"]))
+        self.assertEqual(entry["tts_reason"], "compare_no_tts")
+        self.assertEqual(entry["fallback_chain"], ["compare:claude+openai"])
+        self.assertEqual(entry["prompt_len"], len(self._last_prompt))
+        self.assertEqual(entry.get("error"), "RuntimeError")
 
     # ----------------------------------------------------------------------
     # Task #18 — server.respond_compare 가 두 백엔드 응답을 모두

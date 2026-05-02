@@ -717,6 +717,10 @@ async def websocket_endpoint(ws: WebSocket):
                     traceback.print_exc()
                     from .emotion import Emotion as _E
                     # 사이클 #6 핫픽스: compare 모드도 raw 예외 대신 친절 안내
+                    # Task #19: run_stream 가 예외를 흡수해 system 안내로 변환하더라도
+                    # 텔레메트리에는 error 타입을 남겨 /api/harness/telemetry 가 백엔드
+                    # 장애를 인식할 수 있게 한다 (사용자 UX 와 별개로 진화 입력 보존).
+                    turn_meta.setdefault("error", type(exc).__name__)
                     loop.call_soon_threadsafe(
                         queue.put_nowait,
                         ("system", None, _E.CONCERNED, _friendly_error(exc, "claude")),
