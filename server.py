@@ -9,6 +9,7 @@
     python server.py
 """
 import asyncio
+import functools
 import base64
 import json
 import os
@@ -875,9 +876,12 @@ async def websocket_endpoint(ws: WebSocket):
                         continue
                     async with busy:
                         await handle_audio(payload, emit, emit_bytes, session, build_context, _learn_and_signal)
-                elif kind == 0x03:
-                    # 멀티모달 명령 이미지 저장.
-                    # 페이로드 형식: <caption_len:2 BE><caption_utf8><JPEG bytes>
+                elif kind in (0x03, 0x04, 0x05):
+                    # 멀티모달 명령 미디어 저장.
+                    # 페이로드 형식: <caption_len:2 BE><caption_utf8><media bytes>
+                    #   0x03 = 이미지(JPEG, .jpg, kind=image|multimodal)
+                    #   0x04 = 음성(WebM, .webm,  kind=audio)
+                    #   0x05 = 영상(WebM, .webm,  kind=video)
                     if len(payload) < 2:
                         continue
                     clen = int.from_bytes(payload[:2], "big")
@@ -887,34 +891,44 @@ async def websocket_endpoint(ws: WebSocket):
                         caption = payload[2:2 + clen].decode("utf-8", errors="replace")
                     except Exception:
                         caption = ""
-                    jpeg = payload[2 + clen:]
-                    if not jpeg:
+                    blob = payload[2 + clen:]
+                    if not blob:
                         continue
+                    if kind == 0x03:
+                        ext, slot, k = ".jpg", "image", ("multimodal" if caption else "image")
+                    elif kind == 0x04:
+                        ext, slot, k = ".webm", "audio", "audio"
+                    else:  # 0x05
+                        ext, slot, k = ".webm", "video", "video"
                     try:
+                        # 키워드 인자 사용 — 시그니처 변경에도 깨지지 않도록.
                         cmd_id = await asyncio.to_thread(
-                            session.memory.log_command,
-                            session.memory_user_id,
-                            caption,
-                            "multimodal" if caption else "image",
-                            None,
-                            None,
-                            "done",
-                            None,
+                            functools.partial(
+                                session.memory.log_command,
+                                user_id=session.memory_user_id,
+                                command_text=caption,
+                                kind=k,
+                                status="done",
+                            )
                         )
-                        img_path = os.path.join(COMMANDS_DIR, f"{cmd_id}.jpg")
-                        await asyncio.to_thread(_write_bytes, img_path, jpeg)
+                        media_path = os.path.join(COMMANDS_DIR, f"{cmd_id}{ext}")
+                        await asyncio.to_thread(_write_bytes, media_path, blob)
+                        upd_kwargs: Dict[str, Any] = {f"{slot}_path": media_path}
                         await asyncio.to_thread(
-                            session.memory.update_command,
-                            cmd_id, None, None, img_path,
+                            functools.partial(
+                                session.memory.update_command, cmd_id, **upd_kwargs,
+                            )
                         )
                         await emit(
                             type="command_saved",
-                            id=cmd_id, kind="multimodal" if caption else "image",
-                            caption=caption, has_image=True,
+                            id=cmd_id, kind=k, caption=caption,
+                            has_image=(slot == "image"),
+                            has_audio=(slot == "audio"),
+                            has_video=(slot == "video"),
                         )
                     except Exception as e:
-                        print(f"[WS 0x03 command image save] {e}")
-                        await emit(type="error", message="명령 이미지를 저장하지 못했습니다.")
+                        print(f"[WS 0x{kind:02x} command media save] {e}")
+                        await emit(type="error", message="명령 미디어를 저장하지 못했습니다.")
                 continue
 
             # 텍스트 (JSON)
@@ -1096,6 +1110,8 @@ async def websocket_endpoint(ws: WebSocket):
                     "response_text": r["response_text"],
                     "status": r["status"],
                     "has_image": bool(r["image_path"]),
+                    "has_audio": bool(r.get("audio_path")),
+                    "has_video": bool(r.get("video_path")),
                     "created_at": r["created_at"],
                     "completed_at": r["completed_at"],
                     "meta": r["meta"],
@@ -1110,14 +1126,39 @@ async def websocket_endpoint(ws: WebSocket):
                     await emit(type="error", message="명령을 찾을 수 없습니다.")
                 else:
                     img_b64 = None
-                    if data.get("include_image") and row.get("image_path") \
+                    audio_b64 = None
+                    video_b64 = None
+                    # 큰 미디어를 base64 로 통째 보내면 WebSocket 프레임/브라우저
+                    # 메모리 압력이 커진다 → 8MiB 컷오프, 초과 시 has_* 플래그만.
+                    MEDIA_INLINE_MAX = 8 * 1024 * 1024
+                    include_media = bool(data.get("include_image")) or bool(data.get("include_media"))
+                    if include_media and row.get("image_path") \
                             and os.path.isfile(row["image_path"]):
                         try:
-                            blob = await asyncio.to_thread(_read_bytes, row["image_path"])
-                            img_b64 = base64.b64encode(blob).decode("ascii")
+                            if os.path.getsize(row["image_path"]) <= MEDIA_INLINE_MAX:
+                                blob = await asyncio.to_thread(_read_bytes, row["image_path"])
+                                img_b64 = base64.b64encode(blob).decode("ascii")
                         except OSError as e:
                             print(f"[WS command_get image read] {e}")
                             await emit(type="error", message="이미지를 불러올 수 없습니다.")
+                    if data.get("include_audio") and row.get("audio_path") \
+                            and os.path.isfile(row["audio_path"]):
+                        try:
+                            if os.path.getsize(row["audio_path"]) <= MEDIA_INLINE_MAX:
+                                blob = await asyncio.to_thread(_read_bytes, row["audio_path"])
+                                audio_b64 = base64.b64encode(blob).decode("ascii")
+                        except OSError as e:
+                            print(f"[WS command_get audio read] {e}")
+                            await emit(type="error", message="음성을 불러올 수 없습니다.")
+                    if data.get("include_video") and row.get("video_path") \
+                            and os.path.isfile(row["video_path"]):
+                        try:
+                            if os.path.getsize(row["video_path"]) <= MEDIA_INLINE_MAX:
+                                blob = await asyncio.to_thread(_read_bytes, row["video_path"])
+                                video_b64 = base64.b64encode(blob).decode("ascii")
+                        except OSError as e:
+                            print(f"[WS command_get video read] {e}")
+                            await emit(type="error", message="영상을 불러올 수 없습니다.")
                     await emit(
                         type="command_get",
                         id=row["id"], kind=row["kind"],
@@ -1125,10 +1166,14 @@ async def websocket_endpoint(ws: WebSocket):
                         response_text=row["response_text"],
                         status=row["status"],
                         has_image=bool(row["image_path"]),
+                        has_audio=bool(row.get("audio_path")),
+                        has_video=bool(row.get("video_path")),
                         created_at=row["created_at"],
                         completed_at=row["completed_at"],
                         meta=row["meta"],
                         image_b64=img_b64,
+                        audio_b64=audio_b64,
+                        video_b64=video_b64,
                     )
 
             elif mtype == "command_delete":

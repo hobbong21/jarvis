@@ -100,6 +100,8 @@ CREATE TABLE IF NOT EXISTS commands (
     kind          TEXT    NOT NULL DEFAULT 'text',
     command_text  TEXT    NOT NULL DEFAULT '',
     image_path    TEXT,
+    audio_path    TEXT,
+    video_path    TEXT,
     response_text TEXT,
     status        TEXT    NOT NULL DEFAULT 'pending',
     meta_json     TEXT,
@@ -132,6 +134,20 @@ def _connect(path: str) -> sqlite3.Connection:
     return conn
 
 
+def _migrate_add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, decl: str,
+) -> None:
+    """기존 DB 에 누락된 컬럼을 idempotent 하게 추가.
+
+    SQLite 는 `ALTER TABLE ADD COLUMN` 에 IF NOT EXISTS 를 지원하지 않으므로
+    PRAGMA table_info 로 현재 컬럼 목록을 본 뒤 분기.
+    """
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    cols = {r["name"] if isinstance(r, sqlite3.Row) else r[1] for r in rows}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def _ensure_schema(path: str) -> None:
     if path in _initialized_paths:
         return
@@ -145,6 +161,11 @@ def _ensure_schema(path: str) -> None:
         conn = _connect(path)
         try:
             conn.executescript(_SCHEMA_SQL)
+            # 사이클 #15: commands 테이블 audio_path/video_path 마이그레이션.
+            # 신규 DB 는 _SCHEMA_SQL 가 처음부터 컬럼 포함 → no-op,
+            # 기존 DB (사이클 #14 만 적용된 상태) 는 여기서 채워진다.
+            _migrate_add_column_if_missing(conn, "commands", "audio_path", "TEXT")
+            _migrate_add_column_if_missing(conn, "commands", "video_path", "TEXT")
         finally:
             conn.close()
         _initialized_paths.add(path)
@@ -584,8 +605,10 @@ class Memory:
         conv_id: Optional[int] = None,
         status: str = "pending",
         meta: Optional[Dict[str, Any]] = None,
+        audio_path: Optional[str] = None,
+        video_path: Optional[str] = None,
     ) -> int:
-        if kind not in ("text", "voice", "image", "multimodal"):
+        if kind not in ("text", "voice", "image", "audio", "video", "multimodal"):
             raise ValueError(f"invalid kind: {kind}")
         if status not in ("pending", "done", "error"):
             raise ValueError(f"invalid status: {status}")
@@ -596,11 +619,12 @@ class Memory:
             cur = conn.execute(
                 """
                 INSERT INTO commands(user_id, conv_id, kind, command_text,
-                                     image_path, status, meta_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                     image_path, audio_path, video_path,
+                                     status, meta_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, conv_id, kind, command_text, image_path,
-                 status, meta_blob, time.time()),
+                (user_id, conv_id, kind, command_text, image_path, audio_path,
+                 video_path, status, meta_blob, time.time()),
             )
             return int(cur.lastrowid)
 
@@ -610,6 +634,8 @@ class Memory:
         response_text: Optional[str] = None,
         status: Optional[str] = None,
         image_path: Optional[str] = None,
+        audio_path: Optional[str] = None,
+        video_path: Optional[str] = None,
     ) -> bool:
         if status is not None and status not in ("pending", "done", "error"):
             raise ValueError(f"invalid status: {status}")
@@ -623,6 +649,10 @@ class Memory:
                 sets.append("completed_at=?"); args.append(time.time())
         if image_path is not None:
             sets.append("image_path=?"); args.append(image_path)
+        if audio_path is not None:
+            sets.append("audio_path=?"); args.append(audio_path)
+        if video_path is not None:
+            sets.append("video_path=?"); args.append(video_path)
         if not sets:
             return False
         args.append(int(cmd_id))
@@ -686,20 +716,22 @@ class Memory:
         return out
 
     def delete_command(self, cmd_id: int) -> bool:
-        """행 삭제 + image_path 가 있으면 파일도 best-effort 정리."""
+        """행 삭제 + image/audio/video 파일도 best-effort 정리."""
         with _conn_ctx(self.path) as conn:
             row = conn.execute(
-                "SELECT image_path FROM commands WHERE id=?", (int(cmd_id),)
+                "SELECT image_path, audio_path, video_path FROM commands WHERE id=?",
+                (int(cmd_id),),
             ).fetchone()
             if not row:
                 return False
-            img = row["image_path"]
+            paths = [row["image_path"], row["audio_path"], row["video_path"]]
             conn.execute("DELETE FROM commands WHERE id=?", (int(cmd_id),))
-        if img and os.path.isfile(img):
-            try:
-                os.remove(img)
-            except OSError:
-                pass
+        for p in paths:
+            if p and os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
         return True
 
     # ── 타이머 / 이벤트 ────────────────────────────────────────────

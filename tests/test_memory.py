@@ -468,5 +468,127 @@ class CommandsTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
 
+class CommandsAudioVideoTests(unittest.TestCase):
+    """사이클 #15 — 명령에 음성/영상 함께 기록 (audio_path/video_path 컬럼)."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.mem = Memory(os.path.join(self.tmpdir.name, "mem.db"))
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    def test_log_audio_command(self) -> None:
+        ap = os.path.join(self.tmpdir.name, "v.webm")
+        with open(ap, "wb") as fh:
+            fh.write(b"OggS\x00")
+        cid = self.mem.log_command(
+            "u1", "이거 받아써줘", kind="audio", audio_path=ap,
+        )
+        row = self.mem.get_command(cid)
+        self.assertEqual(row["kind"], "audio")
+        self.assertEqual(row["audio_path"], ap)
+        self.assertIsNone(row["video_path"])
+        self.assertIsNone(row["image_path"])
+
+    def test_log_video_command(self) -> None:
+        vp = os.path.join(self.tmpdir.name, "clip.webm")
+        with open(vp, "wb") as fh:
+            fh.write(b"\x1a\x45\xdf\xa3")  # EBML header
+        cid = self.mem.log_command(
+            "u1", "이 영상 분석", kind="video", video_path=vp,
+        )
+        row = self.mem.get_command(cid)
+        self.assertEqual(row["kind"], "video")
+        self.assertEqual(row["video_path"], vp)
+
+    def test_log_command_kind_audio_and_video_accepted(self) -> None:
+        # kind 화이트리스트가 새 두 항목을 모두 받는다.
+        self.assertIsInstance(self.mem.log_command("u1", "x", kind="audio"), int)
+        self.assertIsInstance(self.mem.log_command("u1", "x", kind="video"), int)
+
+    def test_update_command_sets_audio_and_video_paths(self) -> None:
+        cid = self.mem.log_command("u1", "x")
+        ap = os.path.join(self.tmpdir.name, "u.webm")
+        vp = os.path.join(self.tmpdir.name, "u.mp4")
+        for p in (ap, vp):
+            with open(p, "wb") as fh:
+                fh.write(b"\x00")
+        ok = self.mem.update_command(cid, audio_path=ap, video_path=vp)
+        self.assertTrue(ok)
+        row = self.mem.get_command(cid)
+        self.assertEqual(row["audio_path"], ap)
+        self.assertEqual(row["video_path"], vp)
+
+    def test_delete_command_cleans_up_all_media_files(self) -> None:
+        ip = os.path.join(self.tmpdir.name, "del.jpg")
+        ap = os.path.join(self.tmpdir.name, "del.webm")
+        vp = os.path.join(self.tmpdir.name, "del.mp4")
+        for p in (ip, ap, vp):
+            with open(p, "wb") as fh:
+                fh.write(b"x")
+        cid = self.mem.log_command(
+            "u1", "전부 정리", kind="multimodal",
+            image_path=ip, audio_path=ap, video_path=vp,
+        )
+        self.assertTrue(self.mem.delete_command(cid))
+        for p in (ip, ap, vp):
+            self.assertFalse(os.path.isfile(p), f"{p} 남음")
+
+    def test_delete_command_missing_files_does_not_raise(self) -> None:
+        # 디스크 파일이 이미 없어졌어도 행 삭제는 성공.
+        cid = self.mem.log_command(
+            "u1", "x", kind="audio",
+            audio_path=os.path.join(self.tmpdir.name, "ghost.webm"),
+        )
+        self.assertTrue(self.mem.delete_command(cid))
+        self.assertIsNone(self.mem.get_command(cid))
+
+    def test_legacy_db_migrates_to_add_audio_and_video_columns(self) -> None:
+        """사이클 #14 만 적용된 DB 도 새 컬럼을 자동 ALTER 로 얻는다."""
+        import sqlite3
+        legacy = os.path.join(self.tmpdir.name, "legacy.db")
+        # 사이클 #14 시점 스키마(audio_path/video_path 없음) 직접 생성
+        c = sqlite3.connect(legacy)
+        try:
+            c.executescript("""
+                CREATE TABLE commands (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    conv_id INTEGER,
+                    kind TEXT NOT NULL DEFAULT 'text',
+                    command_text TEXT NOT NULL DEFAULT '',
+                    image_path TEXT,
+                    response_text TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    meta_json TEXT,
+                    created_at REAL NOT NULL,
+                    completed_at REAL
+                );
+                INSERT INTO commands(user_id, kind, command_text, status, created_at)
+                VALUES ('u1', 'text', '레거시 행', 'done', 1700000000.0);
+            """)
+            c.commit()
+        finally:
+            c.close()
+        # 같은 path 로 Memory 열면 _migrate_add_column_if_missing 가 돌아간다.
+        # _initialized_paths 캐시 우회 — 새 path 라 자동.
+        mem = Memory(legacy)
+        # 신규 컬럼 ALTER 됐는지: 직접 SELECT 가능해야.
+        c = sqlite3.connect(legacy)
+        try:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(commands)").fetchall()}
+        finally:
+            c.close()
+        self.assertIn("audio_path", cols)
+        self.assertIn("video_path", cols)
+        # 레거시 행이 보존되고 새 컬럼은 NULL 인지.
+        rows = mem.recent_commands("u1")
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["audio_path"])
+        self.assertIsNone(rows[0]["video_path"])
+        self.assertEqual(rows[0]["command_text"], "레거시 행")
+
+
 if __name__ == "__main__":
     unittest.main()
