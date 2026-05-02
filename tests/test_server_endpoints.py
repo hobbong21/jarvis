@@ -1181,5 +1181,145 @@ class CompareModeWebSocketTests(unittest.TestCase):
         )
 
 
+# ============================================================
+# Task #20: 음성 경로(log_user=False) 가 compare 모드를 자동 회피하는지 가드.
+# ============================================================
+# server.respond_internal 은 `cfg.llm_backend == "compare" and log_user` 일 때만
+# compare 분기로 진입한다(server.py 의 텍스트 입력 가드). 음성 흐름은 향후
+# log_user=False 로 호출될 수 있고, 이 가드가 깨지면 음성 사용자가 두 응답
+# (compare_chunk × 2 백엔드)을 동시에 받거나 TTS 가 silent 가 되는 회귀가 난다.
+# 사이클 #13 의 CompareModeWebSocketTests 는 텍스트 경로(log_user=True)만 다루므로
+# 이 분기를 별도 케이스로 고정한다.
+class _SpyCompareBrain(_FakeBrain):
+    """compare_stream / think_stream_with_fallback 호출을 인스턴스 단위로 기록.
+
+    인스턴스가 매 WS 연결마다 새로 만들어지므로 클래스-레벨 카운터로 관찰한다.
+    """
+
+    compare_calls: List[Tuple[str, str]] = []
+    think_calls: List[Tuple[str, str]] = []
+
+    def compare_stream(self, prompt: str, ctx: str):
+        _SpyCompareBrain.compare_calls.append((prompt, ctx))
+        # 실제 compare 응답이면 안 되지만, 가드 회귀가 발생해 호출되더라도
+        # 테스트가 hang 되지 않도록 빈 generator 형태로 즉시 종료한다.
+        if False:
+            yield ("claude", "", None, None)
+        return
+
+    def think_stream_with_fallback(
+        self, prompt: str, ctx: str, on_fallback=None,
+    ):
+        _SpyCompareBrain.think_calls.append((prompt, ctx))
+        yield ("음성", None, None)
+        yield (None, Emotion.NEUTRAL, "음성 응답 더미")
+
+
+class CompareModeVoiceGuardTests(unittest.TestCase):
+    """compare 모드에서 log_user=False 입력은 normal 단일 백엔드로 폴백돼야 한다."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from config import cfg
+        cls._orig_backend = cfg.llm_backend  # type: ignore[attr-defined]
+        cls._orig_brain = server.Brain        # type: ignore[attr-defined]
+        cfg.llm_backend = "compare"
+        server.Brain = _SpyCompareBrain
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        from config import cfg
+        cfg.llm_backend = cls._orig_backend   # type: ignore[attr-defined]
+        server.Brain = cls._orig_brain        # type: ignore[attr-defined]
+
+    def setUp(self) -> None:
+        _SpyCompareBrain.compare_calls = []
+        _SpyCompareBrain.think_calls = []
+
+    def test_compare_mode_with_log_user_false_skips_compare_and_streams_normal(self):
+        # 음성 경로 fake — server._text_input_log_user 를 patch 하여
+        # text_input 진입 시 log_user=False 로 respond_internal 을 호출하게 만든다.
+        with patch.object(server, "_text_input_log_user", lambda data: False):
+            with TestClient(server.app) as client:
+                with client.websocket_connect("/ws") as ws:
+                    ws.receive_json()  # ready
+                    ws.send_text(json.dumps({"type": "text_input", "text": "안녕"}))
+                    end, history = _drain_until(
+                        ws,
+                        lambda o: o.get("type") in ("stream_end", "compare_done", "error"),
+                        max_msgs=120,
+                    )
+
+        # 1) 일반 stream_end 가 도착해야 함 (compare_done 아님).
+        self.assertIsNotNone(end, f"stream_end 미수신. history={history!r}")
+        self.assertEqual(
+            end["type"], "stream_end",
+            f"compare 모드 + log_user=False 인데 stream_end 가 아닌 {end['type']!r} 도착. "
+            f"history={history!r}",
+        )
+        self.assertIn("text", end)
+        self.assertIn("emotion", end)
+
+        # 2) compare_* 메시지는 한 건도 발화돼선 안 됨.
+        compare_msgs = [
+            o for o in history
+            if isinstance(o.get("type"), str) and o["type"].startswith("compare_")
+        ]
+        self.assertEqual(
+            compare_msgs, [],
+            f"compare_* 메시지가 발화됨 (가드 깨짐). msgs={compare_msgs!r}",
+        )
+
+        # 3) Brain.compare_stream 은 호출되지 않아야 함 (mock spy).
+        self.assertEqual(
+            _SpyCompareBrain.compare_calls, [],
+            f"brain.compare_stream 가 호출됨 (가드 깨짐). calls={_SpyCompareBrain.compare_calls!r}",
+        )
+
+        # 4) 일반 단일 백엔드 경로(think_stream_with_fallback)가 호출됐어야 함.
+        self.assertEqual(
+            len(_SpyCompareBrain.think_calls), 1,
+            f"think_stream_with_fallback 1회 호출 기대. calls={_SpyCompareBrain.think_calls!r}",
+        )
+        self.assertEqual(_SpyCompareBrain.think_calls[0][0], "안녕")
+
+        # 5) log_user=False 이므로 user "message" 이벤트도 발화되지 않아야 함
+        # (respond_internal 의 log_user 가드는 메시지 echo + memory 로깅도 함께 차단).
+        user_msgs = [
+            o for o in history
+            if o.get("type") == "message" and o.get("role") == "user"
+        ]
+        self.assertEqual(
+            user_msgs, [],
+            f"log_user=False 인데 user message 가 emit 됨. msgs={user_msgs!r}",
+        )
+
+    def test_compare_mode_with_log_user_true_still_enters_compare(self):
+        """양성 케이스 — 같은 spy brain 으로 log_user=True (기본) 텍스트 입력은
+        여전히 compare 분기로 진입한다 (가드가 너무 광범위하지 않음을 확인)."""
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_text(json.dumps({"type": "text_input", "text": "안녕"}))
+                done, history = _drain_until(
+                    ws,
+                    lambda o: o.get("type") in ("compare_done", "stream_end", "error"),
+                    max_msgs=120,
+                )
+
+        # compare 분기로 들어가야 하므로 compare_stream 이 호출돼야 한다.
+        self.assertEqual(
+            len(_SpyCompareBrain.compare_calls), 1,
+            f"log_user=True + compare 모드인데 compare_stream 미호출. "
+            f"calls={_SpyCompareBrain.compare_calls!r}, history={history!r}",
+        )
+        # 일반 스트리밍 경로는 호출돼선 안 된다.
+        self.assertEqual(
+            _SpyCompareBrain.think_calls, [],
+            f"compare 진입했는데 think_stream_with_fallback 가 호출됨. "
+            f"calls={_SpyCompareBrain.think_calls!r}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

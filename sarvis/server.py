@@ -114,6 +114,20 @@ def _read_bytes(path: str) -> bytes:
         return fh.read()
 
 
+def _text_input_log_user(data: dict) -> bool:
+    """text_input 메시지의 log_user 플래그 결정.
+
+    프로덕션 경로: 텍스트 입력은 사용자 발화이므로 항상 True.
+
+    테스트 시 monkeypatch 가능 — 음성 흐름(handle_audio)은 respond_internal 을
+    거치지 않지만, 만약 향후 누군가 voice 결과를 respond_internal(log_user=False)
+    로 라우팅하면 compare 모드 분기(server.respond_internal 의 `and log_user`
+    가드)가 자동으로 회피되어야 한다. 이 헬퍼를 patch 하여 회귀 테스트가
+    "음성 경로 fake" 를 시뮬레이션할 수 있다 (Task #20).
+    """
+    return True
+
+
 print("[3/3] 얼굴 등록부 ...")
 FACE_REGISTRY = FaceRegistry(cfg.faces_dir)
 _known = FACE_REGISTRY.list_people()
@@ -954,7 +968,9 @@ async def websocket_endpoint(ws: WebSocket):
                     user_text = (data.get("text") or "").strip()
                     if not user_text:
                         continue
-                    await respond_internal(user_text, log_user=True)
+                    await respond_internal(
+                        user_text, log_user=_text_input_log_user(data),
+                    )
 
             elif mtype == "switch_backend":
                 target = data.get("backend", "claude")
