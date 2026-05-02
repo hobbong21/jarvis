@@ -74,3 +74,6 @@ memory.db-journal
 memory.db-wal
 memory.db-shm
 chromadb/
+
+# Runtime telemetry log (transient append-only)
+data/harness_telemetry.jsonl
