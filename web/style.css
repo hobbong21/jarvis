@@ -534,7 +534,8 @@ input, select { outline: none; }
 
 #orb, #orb-2 {
   width: min(520px, 78%);
-  height: min(520px, 78%);
+  height: auto;
+  aspect-ratio: 1 / 1;
   max-height: 55vh;
   display: block;
 }
