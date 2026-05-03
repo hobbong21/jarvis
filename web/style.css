@@ -1432,6 +1432,94 @@ input, select { outline: none; }
 .auth-msg.ok { color: var(--green); }
 .auth-msg.error { color: var(--red); }
 
+/* ── 사이클 #20 — 5각도 캡처 + 챌린지 UI ─────────────────────── */
+.auth-enroll-angles {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-soft, rgba(0,0,0,0.04));
+  border: 1px solid var(--border-soft, rgba(0,0,0,0.1));
+  border-radius: 8px;
+}
+.auth-angle-prompt {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-mid, #555);
+  text-align: center;
+}
+.auth-angle-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+.auth-angle-step {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 38px;
+  border: 1px solid var(--border, rgba(0,0,0,0.15));
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim, #888);
+  background: transparent;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.auth-angle-step.current {
+  border-color: var(--amber, #c96442);
+  color: var(--amber, #c96442);
+  background: rgba(201, 100, 66, 0.08);
+  font-weight: 600;
+  animation: authPulse 1.2s ease-in-out infinite;
+}
+.auth-angle-step.done {
+  border-color: var(--green, #6a9079);
+  color: var(--green, #6a9079);
+  background: rgba(106, 144, 121, 0.10);
+}
+.auth-angle-step.failed {
+  border-color: var(--red, #b85e5e);
+  color: var(--red, #b85e5e);
+  background: rgba(184, 94, 94, 0.10);
+}
+@keyframes authPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+}
+
+.auth-challenge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  margin: 6px 0 0;
+  background: rgba(139, 122, 184, 0.08);
+  border: 1px solid rgba(139, 122, 184, 0.3);
+  border-radius: 8px;
+}
+.auth-challenge-label {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--violet, #8b7ab8);
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.auth-challenge-text {
+  flex: 1;
+  font-size: 14px;
+  color: var(--text, #222);
+  font-weight: 500;
+}
+.auth-challenge-refresh {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 14px;
+  border-radius: 6px;
+}
+
 /* ============================================================
  * 사이클 #19 — Claude 스타일 최종 폴리시 (override)
  * 기존 다크 테마 잔존 데코를 가리고, warm minimal 분위기 강화.

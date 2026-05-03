@@ -299,9 +299,9 @@
       </div>
     </div>
 
-    <!-- 등록 폼 (미등록 상태) -->
+    <!-- 등록 폼 (미등록 상태) — 사이클 #20: 5각도 얼굴 캡처 -->
     <form id="auth-enroll-form" class="auth-enroll-form" hidden>
-      <p class="auth-help">아직 주인이 등록되지 않았습니다. 본인의 얼굴과 음성 패스프레이즈를 등록해 주세요.</p>
+      <p class="auth-help">아직 주인이 등록되지 않았습니다. 본인의 얼굴(5각도)과 음성 패스프레이즈를 등록해 주세요.</p>
       <label class="auth-field">
         <span>주인 이름</span>
         <input id="auth-enroll-name" type="text" required maxlength="40"
@@ -311,10 +311,30 @@
         <span>음성 패스프레이즈 (4자 이상)</span>
         <input id="auth-enroll-passphrase" type="text" required minlength="4" maxlength="80"
                placeholder="예: 사비스 안녕 나야" autocomplete="off">
-        <small>로그인할 때 이 문구를 그대로 말해야 합니다. 외우기 쉬운 짧은 문장을 권장합니다.</small>
+        <small>로그인할 때 이 문구를 그대로 말하거나, 매번 새로 발급되는 챌린지 문장을 따라 말하면 됩니다.</small>
       </label>
+
+      <!-- 5각도 캡처 진행 표시 -->
+      <div class="auth-enroll-angles" id="auth-enroll-angles" hidden>
+        <p class="auth-help auth-angle-prompt" id="auth-angle-prompt">
+          카메라를 보고 안내된 각도로 얼굴을 돌려주세요.
+        </p>
+        <div class="auth-angle-grid">
+          <div class="auth-angle-step" data-angle="front"><span>정면</span></div>
+          <div class="auth-angle-step" data-angle="left"><span>왼쪽</span></div>
+          <div class="auth-angle-step" data-angle="right"><span>오른쪽</span></div>
+          <div class="auth-angle-step" data-angle="up"><span>위</span></div>
+          <div class="auth-angle-step" data-angle="down"><span>아래</span></div>
+        </div>
+      </div>
+
       <div class="auth-actions">
-        <button type="submit" class="auth-btn primary">등록하기 (얼굴 캡처 + 저장)</button>
+        <button id="auth-enroll-start-btn" type="button" class="auth-btn primary">
+          5각도 얼굴 캡처 시작
+        </button>
+        <button id="auth-enroll-submit-btn" type="submit" class="auth-btn primary" hidden>
+          등록 완료 (저장)
+        </button>
       </div>
       <p id="auth-enroll-msg" class="auth-msg"></p>
     </form>
@@ -325,12 +345,21 @@
         등록된 주인: <strong id="auth-login-name"></strong>
       </p>
       <ol class="auth-login-steps">
-        <li>카메라를 정면으로 보세요. 얼굴이 인식되면 자동으로 다음 단계로 넘어갑니다.</li>
-        <li>음성 인증 버튼을 누른 후 등록한 패스프레이즈를 말씀해 주세요.</li>
+        <li>카메라를 정면으로 보세요. <strong>한 번 눈을 깜빡여 주세요</strong> — 라이브니스를 함께 검증합니다.</li>
+        <li>아래 음성 버튼을 누르고, <strong>패스프레이즈</strong> 또는 <strong>챌린지 문장</strong> 중 하나를 말씀해 주세요.</li>
       </ol>
+
+      <!-- 사이클 #20 — 챌린지 문장 표시 -->
+      <div class="auth-challenge" id="auth-challenge-box">
+        <span class="auth-challenge-label">챌린지 문장</span>
+        <span class="auth-challenge-text" id="auth-challenge-text">…</span>
+        <button id="auth-challenge-refresh" type="button" class="auth-btn ghost auth-challenge-refresh"
+                title="다른 챌린지 문장으로 변경">↻</button>
+      </div>
+
       <div class="auth-actions">
         <button id="auth-voice-btn" type="button" class="auth-btn primary" disabled>
-          🎙 음성 패스프레이즈 말하기
+          🎙 음성 인증 (패스프레이즈/챌린지 말하기)
         </button>
         <button id="auth-reset-btn" type="button" class="auth-btn ghost"
                 title="주인 등록을 처음부터 다시 합니다 (현재 등록 정보 삭제)">

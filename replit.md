@@ -2,6 +2,48 @@
 
 A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning → Model Selection → Task Execution → Response Generation). Features face recognition, voice interaction, and tool-augmented intelligence.
 
+## Cycle #20 — Owner Authentication 보강 (F-01: 5각도 + 라이브니스 + 챌린지)
+
+기획서 F-01("주인 인증") 의 보안 갭 보강. 사이클 #18 의 단일-각도 + 패스프레이즈만 매칭 한계를 다음 3축으로 강화.
+
+**구성:**
+- `sarvis/owner_auth.py` (재작성):
+  - **5각도 다중 인코딩** — `face_encodings: List[List[float]]` 저장, `verify_face_encoding` = `min(distance) ≤ 0.55`. 구버전 `face_encoding` 단일 필드도 자동 호환 (schema_version 1→2 마이그레이션).
+  - **챌린지 풀** — `VOICE_CHALLENGE_POOL` (10개 한국어 자연 문장), `random_challenge()` = `secrets.choice` (예측 불가).
+  - **`verify_voice(text, challenge_text=)`** = (ok, similarity, matched_against∈{passphrase,challenge,''}). 패스프레이즈 OR 챌린지 둘 중 하나 ≥ 0.78 시 통과 — 녹음 재생 공격 대응.
+  - **`detect_blink_in_window(ear_samples)`** — stateless. open(EAR≥0.24) → close(≤0.18) → open 전이 1회 이상이면 blinked. 윈도우 6.0s, 최소 4 프레임. 히스테리시스 적용.
+- `sarvis/vision.py`:
+  - **`compute_eye_aspect_ratio_from_jpeg`** — `face_recognition.face_landmarks(model="large")` → 양 눈 6점 → Soukupová & Čech EAR 평균. 미지원 환경엔 None 반환 (호출자 폴백).
+- `sarvis/server.py`:
+  - `auth_state` 확장: `ear_samples`, `blink_ok`, `blink_required`, `current_challenge`. `_is_authed` = `face_ok ∧ voice_ok ∧ (blink_ok ∨ ¬blink_required)`.
+  - `_try_face_login`: 인코딩 매치 → EAR 누적 → 깜빡임 검출. 통과해야 face_ok=True. landmarks 미지원 시 자동 우회(degraded).
+  - `_do_voice_login`: 현재 챌린지 전달, `matched_against` UI 노출, 통과 시 `_refresh_challenge`(1회용).
+  - `enroll_owner` 핸들러: `frames_b64` (5장 base64 JPEG) + `angles` 수신 → 각각 인코딩 → 저장. 미전송 시 구버전(라이브 1장 캡처) 폴백. `kept_angles` / `failed_angles` 결과 리포트.
+  - 신규 메시지: `auth_new_challenge` (챌린지 재발급), `auth_status` 확장 필드 (`blink_ok`, `blink_required`, `challenge`, `enroll_angles`, `enroll_angle_labels`, `face_encoding_count`, `schema_version`).
+- `web/index.html` + `web/style.css` + `web/app.js`:
+  - 등록: [5각도 얼굴 캡처 시작] → 각도별 안내 + 1.4s 후 자동 캡처 → 5칸 진행 그리드(current/done/failed) → [등록 완료] → `frames_b64` 일괄 전송. `captureCameraJpegBase64` (canvas, 480px 다운샘플, JPEG q=0.85).
+  - 로그인: 챌린지 박스 (보라톤) + ↻ 새로고침 버튼. 안내 문구에 "한 번 눈을 깜빡여 주세요" 라이브니스 명시. `auth_progress` 의 `voice_matched_against=='challenge'` 시 "챌린지 ✓" 라벨, 얼굴 매치 후 라이브니스 대기 시 "얼굴 ✓ · 깜빡임 대기" 표시.
+
+**보안 효과:**
+- 단일 정면 사진(인쇄/스마트폰 화면) 위조 → 깜빡임 미발생으로 차단.
+- 사전 녹음 패스프레이즈 재생 → 매번 바뀌는 챌린지 문장 미일치로 차단(50% 이상 비율 — 챌린지가 일치 안 하면 패스프레이즈와도 70%+ 어긋나야 함).
+- 머리 각도 변화에 견고 (5각도 인코딩 중 최소 거리 사용).
+
+**Architect 리뷰 후 P0 보안 패치 (cycle #20 내):**
+- `enroll_owner`: 등록된 시스템에서는 `_is_authed()` 본인만 재등록 허용 (계정 탈취 차단).
+- `auth_reset`: 등록된 시스템에서는 인증 본인만 reset 허용 — 비인증자가 `auth_reset → enroll_owner` 연쇄로 owner takeover 하던 우회 경로 차단.
+- `_do_voice_login`: 챌린지 활성 시 challenge **strict** 매칭만 허용 (passphrase OR 우회 제거). 통과/실패 모두 챌린지 1회용 폐기.
+- `blink_required`: 세션 시작 시 `is_face_landmarks_supported()` capability probe 1회로 결정 → 이후 변경 금지. EAR 일시 추출 실패는 `blink_ok=False` 안내만.
+- `frames_b64` 입력 검증: 최대 10장, 단일 300KB, 누적 2.5MB.
+- `completed_emitted` 가드: `auth_complete` 중복 emit 방지.
+
+**미적용 (사이클 #21 후보):**
+- 음성 화자 임베딩 (resemblyzer/d-vector) — `librosa`/`numba` ~150MB 의존성. 인터페이스 자리만 비워둠.
+- 데드맨 타임아웃(자리 비움 자동 잠금) + 다중 사용자 다중 owner.
+- E2E 회귀 테스트: 미인증 `auth_reset → enroll_owner` 연쇄가 거부되는지 자동화 검증.
+
+---
+
 ## Cycle #18 — Owner Authentication (Face + Voice Passphrase)
 
 서비스 시작 시 주인 인증을 강제하는 로그인 시스템.

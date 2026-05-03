@@ -1619,11 +1619,114 @@
   const authFaceStatus = $('auth-face-status');
   const authVoiceStatus = $('auth-voice-status');
   const authCamPreview = $('auth-cam-preview');
+  // 사이클 #20 — 5각도 캡처 + 챌린지
+  const authEnrollAngles = $('auth-enroll-angles');
+  const authAnglePrompt = $('auth-angle-prompt');
+  const authEnrollStartBtn = $('auth-enroll-start-btn');
+  const authEnrollSubmitBtn = $('auth-enroll-submit-btn');
+  const authChallengeBox = $('auth-challenge-box');
+  const authChallengeText = $('auth-challenge-text');
+  const authChallengeRefresh = $('auth-challenge-refresh');
 
-  let authState = { enrolled: false, face_ok: true, voice_ok: true, authed: true };
+  let authState = {
+    enrolled: false, face_ok: true, voice_ok: true, blink_ok: true,
+    blink_required: false, authed: true, challenge: null,
+  };
   let authVoiceRecording = false;
   let authMediaRecorder = null;
   let authChunks = [];
+
+  // 사이클 #20 — 5각도 캡처 시퀀스 상태
+  const ANGLE_LABELS_KO = {
+    front: '정면', left: '왼쪽', right: '오른쪽', up: '위', down: '아래',
+  };
+  const ANGLE_HINTS_KO = {
+    front: '카메라를 똑바로 봐주세요',
+    left: '얼굴을 살짝 왼쪽으로 돌려주세요',
+    right: '얼굴을 살짝 오른쪽으로 돌려주세요',
+    up: '얼굴을 살짝 위로 들어주세요',
+    down: '얼굴을 살짝 아래로 숙여주세요',
+  };
+  let enrollSequence = null;   // {angles:[], frames:[], idx:0, timer}
+
+  function captureCameraJpegBase64(quality = 0.85) {
+    // camVideo 의 현재 프레임을 JPEG base64 로 추출. 카메라 미준비 시 null.
+    if (!camStream || !camVideo || !camVideo.videoWidth) return null;
+    const w = camVideo.videoWidth;
+    const h = camVideo.videoHeight;
+    // 인코딩 비용 절감 — 너무 크면 480 너비로 축소.
+    const targetW = Math.min(w, 480);
+    const targetH = Math.round(h * (targetW / w));
+    const c = document.createElement('canvas');
+    c.width = targetW; c.height = targetH;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(camVideo, 0, 0, targetW, targetH);
+    const dataUrl = c.toDataURL('image/jpeg', quality);
+    const i = dataUrl.indexOf(',');
+    return i >= 0 ? dataUrl.slice(i + 1) : null;
+  }
+
+  function setAngleStepClass(angle, klass) {
+    const el = document.querySelector(`.auth-angle-step[data-angle="${angle}"]`);
+    if (!el) return;
+    el.classList.remove('current', 'done', 'failed');
+    if (klass) el.classList.add(klass);
+  }
+  function resetAngleSteps() {
+    document.querySelectorAll('.auth-angle-step').forEach((el) => {
+      el.classList.remove('current', 'done', 'failed');
+    });
+  }
+
+  function startEnrollCaptureSequence(angles) {
+    // 각도별로 프롬프트 표시 → 1.4초 후 캡처 → 다음 각도. 끝나면 submit 버튼 활성.
+    if (!camStream) {
+      ensureAuthCamera();
+      if (authEnrollMsg) {
+        authEnrollMsg.textContent = '카메라를 시작하는 중입니다. 잠시 후 다시 시도해주세요.';
+        authEnrollMsg.className = 'auth-msg error';
+      }
+      return;
+    }
+    enrollSequence = { angles: angles.slice(), frames: [], capturedAngles: [], idx: 0 };
+    if (authEnrollAngles) authEnrollAngles.hidden = false;
+    if (authEnrollStartBtn) authEnrollStartBtn.hidden = true;
+    if (authEnrollSubmitBtn) authEnrollSubmitBtn.hidden = true;
+    resetAngleSteps();
+    advanceEnrollCapture();
+  }
+
+  function advanceEnrollCapture() {
+    if (!enrollSequence) return;
+    const { angles, idx } = enrollSequence;
+    if (idx >= angles.length) {
+      // 완료 — 등록 버튼 노출.
+      if (authAnglePrompt) {
+        authAnglePrompt.textContent = `✓ ${enrollSequence.frames.length}장 캡처 완료. 아래 [등록 완료] 버튼을 눌러주세요.`;
+      }
+      if (authEnrollSubmitBtn) authEnrollSubmitBtn.hidden = false;
+      return;
+    }
+    const angle = angles[idx];
+    setAngleStepClass(angle, 'current');
+    if (authAnglePrompt) {
+      authAnglePrompt.textContent =
+        `(${idx + 1}/${angles.length}) ${ANGLE_LABELS_KO[angle] || angle} — ${ANGLE_HINTS_KO[angle] || ''}`;
+    }
+    setTimeout(() => {
+      const b64 = captureCameraJpegBase64();
+      if (b64) {
+        enrollSequence.frames.push(b64);
+        enrollSequence.capturedAngles.push(angle);
+        setAngleStepClass(angle, 'done');
+      } else {
+        setAngleStepClass(angle, 'failed');
+      }
+      enrollSequence.idx += 1;
+      // 다음 단계 살짝 텀.
+      setTimeout(advanceEnrollCapture, 350);
+    }, 1400);
+  }
 
   function showAuthOverlay() {
     if (!authOverlay) return;
@@ -1658,7 +1761,13 @@
     authState.enrolled = !!m.enrolled;
     authState.face_ok = !!m.face_ok;
     authState.voice_ok = !!m.voice_ok;
+    authState.blink_ok = ('blink_ok' in m) ? !!m.blink_ok : true;
+    authState.blink_required = !!m.blink_required;
     authState.authed = !!m.authed;
+    if ('challenge' in m) {
+      authState.challenge = m.challenge || null;
+      if (authChallengeText) authChallengeText.textContent = authState.challenge || '— (등록 후 발급)';
+    }
     if (m.authed) { hideAuthOverlay(); return; }
     showAuthOverlay();
     ensureAuthCamera();
@@ -1666,14 +1775,14 @@
       if (authEnrollForm) authEnrollForm.hidden = true;
       if (authLoginPanel) authLoginPanel.hidden = false;
       if (authLoginName) authLoginName.textContent = m.face_name || '주인';
-      if (authSubtitle) authSubtitle.textContent = '얼굴과 음성으로 본인을 확인합니다.';
+      if (authSubtitle) authSubtitle.textContent = '얼굴(라이브니스 포함)과 음성으로 본인을 확인합니다.';
     } else {
       if (authEnrollForm) authEnrollForm.hidden = false;
       if (authLoginPanel) authLoginPanel.hidden = true;
       if (authSubtitle) authSubtitle.textContent = '아직 주인이 등록되지 않았습니다. 본인을 등록해 주세요.';
     }
     setAuthStep(authStepFace, authFaceStatus, m.face_ok ? 'ok' : 'pending',
-                m.face_ok ? '✓ 통과' : '대기 중');
+                m.face_ok ? '✓ 통과' : (authState.blink_required ? '얼굴 + 깜빡임 대기' : '대기 중'));
     setAuthStep(authStepVoice, authVoiceStatus, m.voice_ok ? 'ok' : 'pending',
                 m.voice_ok ? '✓ 통과' : '대기 중');
     if (authVoiceBtn) authVoiceBtn.disabled = !m.face_ok || m.voice_ok;
@@ -1682,11 +1791,24 @@
   function applyAuthProgress(m) {
     if ('face_ok' in m) authState.face_ok = !!m.face_ok;
     if ('voice_ok' in m) authState.voice_ok = !!m.voice_ok;
-    setAuthStep(authStepFace, authFaceStatus, authState.face_ok ? 'ok' : 'pending',
-                authState.face_ok ? (m.degraded ? '✓ (간이)' : '✓ 통과') : '대기 중');
+    if ('blink_ok' in m) authState.blink_ok = !!m.blink_ok;
+    if ('challenge' in m && m.challenge) {
+      authState.challenge = m.challenge;
+      if (authChallengeText) authChallengeText.textContent = m.challenge;
+    }
+    let faceLabel;
+    if (authState.face_ok) {
+      faceLabel = m.degraded ? '✓ (간이)' : '✓ 통과';
+    } else if (m.face_match_ok && !authState.blink_ok) {
+      faceLabel = '얼굴 ✓ · 깜빡임 대기';
+    } else {
+      faceLabel = '대기 중';
+    }
+    setAuthStep(authStepFace, authFaceStatus, authState.face_ok ? 'ok' : 'pending', faceLabel);
     if ('voice_attempt_ok' in m) {
       if (m.voice_attempt_ok) {
-        setAuthStep(authStepVoice, authVoiceStatus, 'ok', '✓ 통과');
+        const tag = m.voice_matched_against === 'challenge' ? '챌린지 ✓' : '✓ 통과';
+        setAuthStep(authStepVoice, authVoiceStatus, 'ok', tag);
       } else {
         const heard = m.voice_attempt_text ? `들린 말: "${m.voice_attempt_text}"` : '불일치';
         setAuthStep(authStepVoice, authVoiceStatus, 'fail', heard);
@@ -1699,7 +1821,7 @@
       authLoginMsg.textContent = m.message || '';
       authLoginMsg.classList.remove('error', 'ok');
       if (m.voice_attempt_ok === false) authLoginMsg.classList.add('error');
-      else if (m.voice_attempt_ok === true || m.face_match_ok) authLoginMsg.classList.add('ok');
+      else if (m.voice_attempt_ok === true || authState.face_ok) authLoginMsg.classList.add('ok');
     }
     if (authVoiceBtn) authVoiceBtn.disabled = !authState.face_ok || authState.voice_ok;
   }
@@ -1724,6 +1846,42 @@
     if (!authEnrollMsg) return;
     authEnrollMsg.textContent = m.message || '';
     authEnrollMsg.className = 'auth-msg ' + (m.ok ? 'ok' : 'error');
+    if (m.ok) {
+      // 시퀀스 정리 — UI 깔끔하게.
+      enrollSequence = null;
+      resetAngleSteps();
+      if (authEnrollAngles) authEnrollAngles.hidden = true;
+    } else if (Array.isArray(m.failed_angles) && m.failed_angles.length) {
+      m.failed_angles.forEach((a) => setAngleStepClass(a, 'failed'));
+    }
+  }
+
+  if (authEnrollStartBtn) {
+    authEnrollStartBtn.addEventListener('click', () => {
+      // 이름/패스프레이즈 사전 검증 → 5각도 캡처 시퀀스 시작.
+      const name = (authEnrollName?.value || '').trim();
+      const pass = (authEnrollPass?.value || '').trim();
+      if (!name || pass.length < 4) {
+        if (authEnrollMsg) {
+          authEnrollMsg.textContent = '이름과 4자 이상의 패스프레이즈를 먼저 입력해주세요.';
+          authEnrollMsg.className = 'auth-msg error';
+        }
+        return;
+      }
+      if (!camStream) {
+        if (authEnrollMsg) {
+          authEnrollMsg.textContent = '카메라를 먼저 시작해주세요 (권한 허용 필요).';
+          authEnrollMsg.className = 'auth-msg error';
+        }
+        ensureAuthCamera();
+        return;
+      }
+      if (authEnrollMsg) {
+        authEnrollMsg.textContent = '5각도 얼굴 캡처를 시작합니다. 안내에 따라 얼굴을 돌려주세요.';
+        authEnrollMsg.className = 'auth-msg';
+      }
+      startEnrollCaptureSequence(['front', 'left', 'right', 'up', 'down']);
+    });
   }
 
   if (authEnrollForm) {
@@ -1736,21 +1894,40 @@
         authEnrollMsg.className = 'auth-msg error';
         return;
       }
-      if (!camStream) {
-        authEnrollMsg.textContent = '카메라가 시작되지 않았습니다. 권한을 허용해주세요.';
+      // 5각도 시퀀스 결과 사용 — 없으면 구버전(서버 측 라이브 캡처 1장) 폴백.
+      const frames = enrollSequence ? enrollSequence.frames : [];
+      const angles = enrollSequence ? enrollSequence.capturedAngles : [];
+      if (frames.length === 0) {
+        authEnrollMsg.textContent = '얼굴 캡처가 완료되지 않았습니다. [5각도 얼굴 캡처 시작] 버튼부터 눌러주세요.';
         authEnrollMsg.className = 'auth-msg error';
-        ensureAuthCamera();
         return;
       }
-      authEnrollMsg.textContent = '얼굴 캡처 + 등록 중...';
+      authEnrollMsg.textContent = `${frames.length}장 인코딩 + 등록 중...`;
       authEnrollMsg.className = 'auth-msg';
-      send({ type: 'enroll_owner', face_name: name, voice_passphrase: pass });
+      send({
+        type: 'enroll_owner',
+        face_name: name,
+        voice_passphrase: pass,
+        frames_b64: frames,
+        angles: angles,
+      });
+    });
+  }
+
+  if (authChallengeRefresh) {
+    authChallengeRefresh.addEventListener('click', () => {
+      send({ type: 'auth_new_challenge' });
     });
   }
 
   if (authResetBtn) {
     authResetBtn.addEventListener('click', () => {
       if (!confirm('주인 등록을 초기화하고 처음부터 다시 등록하시겠습니까?')) return;
+      enrollSequence = null;
+      resetAngleSteps();
+      if (authEnrollAngles) authEnrollAngles.hidden = true;
+      if (authEnrollStartBtn) authEnrollStartBtn.hidden = false;
+      if (authEnrollSubmitBtn) authEnrollSubmitBtn.hidden = true;
       send({ type: 'auth_reset' });
     });
   }

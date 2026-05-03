@@ -7,6 +7,7 @@ FaceRegistry  : 웹 등록용 — 사람 이름 ↔ 얼굴 JPEG 저장 (Claude V
 from __future__ import annotations
 
 import base64
+import math
 import os
 import pickle
 import re
@@ -78,6 +79,76 @@ def _get_face_recognition():
     return _face_recognition_mod
 
 # cv2 상태 로그는 백그라운드 로더에서 실패 시에만 출력 (_ensure_cv2 내부)
+
+
+def is_face_landmarks_supported() -> bool:
+    """face_recognition.face_landmarks 사용 가능 여부 — 라이브니스 capability probe.
+
+    사이클 #20 — 세션 시작 시 1회 호출해 `blink_required` 를 결정. EAR 추출이
+    한두 번 실패한다고 영구 우회되는 위험을 차단하기 위함. face_recognition
+    모듈이 import 되고 cv2 가 로드돼 있으면 True.
+    """
+    return _get_face_recognition() is not None and _ensure_cv2()
+
+
+def compute_eye_aspect_ratio_from_jpeg(jpeg_bytes: bytes) -> Optional[float]:
+    """JPEG 에서 가장 큰 얼굴의 양 눈 EAR(평균) 반환.
+
+    사이클 #20 — 라이브니스(눈 깜빡임) 검출용. EAR(Eye Aspect Ratio) 는
+    Soukupová & Čech (2016) 의 정의를 따른다:
+        EAR = (||p2-p6|| + ||p3-p5||) / (2 * ||p1-p4||)
+    눈을 뜨면 ~0.30, 감으면 ~0.10 수준. 시계열로 모아 깜빡임 패턴(open→close→open)
+    을 검출 — `owner_auth.detect_blink_in_window` 참고.
+
+    face_recognition.face_landmarks(model="large") 가 반환하는 left_eye/right_eye
+    각각 6점을 사용. 미설치/검출 실패 시 None 반환 → 호출자가 폴백 처리.
+    """
+    fr = _get_face_recognition()
+    if fr is None or not _ensure_cv2():
+        return None
+    try:
+        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return None
+        small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        landmarks_list = fr.face_landmarks(rgb, model="large")
+        if not landmarks_list:
+            return None
+
+        def _eye_span(lm: Dict) -> float:
+            pts = (lm.get("left_eye") or []) + (lm.get("right_eye") or [])
+            if not pts:
+                return 0.0
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            return (max(xs) - min(xs)) * (max(ys) - min(ys))
+
+        lm = max(landmarks_list, key=_eye_span)
+
+        def _ear(eye_pts: List[Tuple[int, int]]) -> float:
+            if len(eye_pts) < 6:
+                return 0.0
+            p1, p2, p3, p4, p5, p6 = eye_pts[:6]
+            def _d(a, b):
+                return math.hypot(a[0] - b[0], a[1] - b[1])
+            num = _d(p2, p6) + _d(p3, p5)
+            den = 2.0 * _d(p1, p4)
+            return num / den if den > 0 else 0.0
+
+        ears: List[float] = []
+        le = lm.get("left_eye") or []
+        re_ = lm.get("right_eye") or []
+        if len(le) >= 6:
+            ears.append(_ear(le))
+        if len(re_) >= 6:
+            ears.append(_ear(re_))
+        if not ears:
+            return None
+        return float(sum(ears) / len(ears))
+    except Exception:
+        return None
 
 
 def compute_face_encoding_from_jpeg(jpeg_bytes: bytes) -> Optional[List[float]]:

@@ -33,8 +33,21 @@ from .emotion import Emotion
 from .memory import get_memory, extract_user_facts
 from .stt_filter import clean_stt_text, build_dynamic_initial_prompt
 from .tools import ToolExecutor
-from .vision import FaceRegistry, WebVision, compute_face_encoding_from_jpeg
-from .owner_auth import OwnerAuth
+from .vision import (
+    FaceRegistry,
+    WebVision,
+    compute_eye_aspect_ratio_from_jpeg,
+    compute_face_encoding_from_jpeg,
+    is_face_landmarks_supported,
+)
+from .owner_auth import (
+    OwnerAuth,
+    detect_blink_in_window,
+    random_challenge,
+    ENROLL_FACE_ANGLES,
+    ENROLL_FACE_LABELS_KO,
+    BLINK_WINDOW_SECONDS,
+)
 
 # Harness Phase 4 — Fan-out 분석 + Evolution 텔레메트리
 from .analysis import parallel_analyze, analysis_to_context
@@ -405,16 +418,47 @@ async def websocket_endpoint(ws: WebSocket):
     # 막히지 않고, 클라이언트는 "주인 등록" UI 만 띄움.
     # 등록 → 두 단계 모두 통과 전엔 모든 명령 차단.
     _enrolled = OWNER_AUTH.is_enrolled()
+    # ── 사이클 #20 — 라이브니스 capability probe (세션 시작 1회) ──
+    # face_recognition + cv2 가 모두 가용해야 EAR 측정이 가능. 가용한 환경에서는
+    # 깜빡임 강제, 미지원 환경에서는 처음부터 우회. EAR 추출이 일시적으로 실패
+    # 했다고 라이브니스가 영구 우회되는 보안 결함(architect 지적)을 방지.
+    _landmarks_supported = is_face_landmarks_supported()
     auth_state: Dict[str, Any] = {
         "face_ok": not _enrolled,
         "voice_ok": not _enrolled,
         "last_face_attempt": 0.0,
         "last_voice_attempt": 0.0,
         "welcome_started": False,
+        # 중복 auth_complete emit 방지 (idempotent guard).
+        "completed_emitted": False,
+        # ── 사이클 #20 (F-01 보강) — 라이브니스/챌린지 ──
+        # 눈 깜빡임 검출용 EAR 시계열. (timestamp, ear) 튜플. 윈도우는
+        # 가장 최근 BLINK_WINDOW_SECONDS 만 유지.
+        "ear_samples": [],
+        # 깜빡임 통과 여부. 라이브니스 미지원(landmarks 없음) 환경에선
+        # 처음부터 통과(blink_required=False)로 둔다.
+        "blink_ok": (not _enrolled) or (not _landmarks_supported),
+        # 세션 시작 시 1회 결정 → 이후 변경하지 않음 (영구 우회 차단).
+        "blink_required": _enrolled and _landmarks_supported,
+        # 현재 챌린지 — 로그인 시작 시 발급, 검증 후 폐기. 미등록이면 None.
+        "current_challenge": (random_challenge() if _enrolled else None),
     }
 
     def _is_authed() -> bool:
-        return bool(auth_state["face_ok"] and auth_state["voice_ok"])
+        return bool(
+            auth_state["face_ok"]
+            and auth_state["voice_ok"]
+            and (auth_state["blink_ok"] or not auth_state["blink_required"])
+        )
+
+    def _refresh_challenge() -> Optional[str]:
+        """등록 상태에서 챌린지 1개 재발급. 미등록이면 None."""
+        if not OWNER_AUTH.is_enrolled():
+            auth_state["current_challenge"] = None
+            return None
+        c = random_challenge()
+        auth_state["current_challenge"] = c
+        return c
 
     async def _emit_auth_status():
         info = OWNER_AUTH.info()
@@ -424,9 +468,17 @@ async def websocket_endpoint(ws: WebSocket):
             face_name=info["face_name"],
             voice_passphrase_len=info["voice_passphrase_len"],
             has_face_encoding=info["has_face_encoding"],
+            face_encoding_count=info.get("face_encoding_count", 0),
+            face_angles=info.get("face_angles", []),
+            schema_version=info.get("schema_version", 1),
             face_ok=auth_state["face_ok"],
             voice_ok=auth_state["voice_ok"],
+            blink_ok=auth_state["blink_ok"],
+            blink_required=auth_state["blink_required"],
             authed=_is_authed(),
+            challenge=auth_state.get("current_challenge"),
+            enroll_angles=list(ENROLL_FACE_ANGLES),
+            enroll_angle_labels=ENROLL_FACE_LABELS_KO,
         )
 
     await _emit_auth_status()
@@ -927,8 +979,13 @@ async def websocket_endpoint(ws: WebSocket):
     # ── 사이클 #18: 인증 게이트 헬퍼 ────────────────────────────────
     # 등록된 상태에서 인증 미완료일 때 허용되는 JSON 메시지 화이트리스트.
     # (등록/리셋/상태 조회 + 모델 카탈로그 같은 무해한 메타 호출만)
+    # 사이클 #20 (architect 지적) — `enroll_owner` 는 화이트리스트에서 제외.
+    # 이미 등록된 시스템에서는 비인증자가 owner 재등록으로 계정 탈취가 가능했음.
+    # 재등록은 명시적 `auth_reset` (등록 정보 삭제) 후에만 허용한다.
     PRE_AUTH_ALLOWED_TYPES = {
-        "enroll_owner", "auth_reset", "auth_status_request",
+        "enroll_owner",  # 미등록 시점에서만 의미 있음 — 핸들러 내부에서 추가 검증.
+        "auth_reset", "auth_status_request",
+        "auth_new_challenge",  # 사이클 #20 — 챌린지 재발급 요청
         "models_list", "list_faces",
     }
 
@@ -972,20 +1029,58 @@ async def websocket_endpoint(ws: WebSocket):
                     message="음성이 너무 짧거나 명확하지 않습니다. 다시 말씀해주세요.",
                 )
                 return
-            ok = OWNER_AUTH.verify_voice(text)
-            sim = OWNER_AUTH.voice_similarity_to(text)
+            challenge = auth_state.get("current_challenge")
+            # 사이클 #20 — 챌린지 강제 (architect 지적 — challenge 활성 시 passphrase
+            # OR 우회는 챌린지 도입 목적과 충돌). 챌린지 활성이면 verify_voice 에
+            # passphrase 인자를 막기 위해 challenge 만 전달하고, OwnerAuth 내부 OR
+            # 로직을 우회하는 strict path 를 사용.
+            if challenge:
+                # strict — 챌린지 매칭만 허용.
+                from difflib import SequenceMatcher as _SM
+                from .owner_auth import (
+                    normalize_voice as _norm,
+                    VOICE_MATCH_THRESHOLD as _TH,
+                )
+                spoken_n = _norm(text)
+                chal_n = _norm(challenge)
+                if spoken_n and chal_n and spoken_n == chal_n:
+                    sim = 1.0
+                elif spoken_n and chal_n:
+                    sim = _SM(None, spoken_n, chal_n).ratio()
+                else:
+                    sim = 0.0
+                ok = sim >= _TH
+                matched_against = "challenge" if ok else ""
+            else:
+                # 챌린지 미발급 (미등록 또는 발급 실패) — passphrase 만 평가.
+                ok, sim, matched_against = OWNER_AUTH.verify_voice(text, challenge_text=None)
+
             if ok:
                 auth_state["voice_ok"] = True
+                # 챌린지는 1회용 — 통과/실패 무관하게 다음 시도를 위해 새로 발급.
+                _refresh_challenge()
+                msg = "챌린지 문장 일치 — 음성 인증 통과"
+            else:
+                # 실패 시도 챌린지 폐기 + 재발급 (재시도 표면 축소 — architect 지적).
+                _refresh_challenge()
+                msg = (
+                    f"챌린지 문장과 일치하지 않습니다 (유사도 {sim:.2f}). "
+                    f"새로 발급된 문장을 또렷하게 말씀해주세요."
+                )
             await emit(
                 type="auth_progress",
                 face_ok=auth_state["face_ok"],
                 voice_ok=auth_state["voice_ok"],
+                blink_ok=auth_state["blink_ok"],
                 voice_attempt_text=text,
                 voice_attempt_ok=ok,
                 voice_similarity=round(sim, 3),
-                message=("음성 인증 통과" if ok else "음성 패스프레이즈가 일치하지 않습니다."),
+                voice_matched_against=matched_against or "",
+                challenge=auth_state.get("current_challenge"),
+                message=msg,
             )
-            if _is_authed():
+            if _is_authed() and not auth_state["completed_emitted"]:
+                auth_state["completed_emitted"] = True
                 await emit(type="auth_complete", face_name=OWNER_AUTH.face_name)
                 _start_welcome_if_authed()
         finally:
@@ -995,14 +1090,22 @@ async def websocket_endpoint(ws: WebSocket):
                 pass
 
     async def _try_face_login(jpeg_bytes: bytes) -> None:
-        """0x01 프레임으로 얼굴 매치 시도. 인코딩 없으면 박스 감지로 폴백."""
+        """0x01 프레임으로 얼굴 매치 + 라이브니스(눈 깜빡임) 시도.
+
+        사이클 #20 — 단순 인코딩 매칭만으론 인쇄 사진 위조에 취약. 매 프레임
+        EAR 를 누적해 윈도우 내 (open → close → open) 깜빡임이 1회 이상
+        검출되어야 face_ok = True. `blink_required` 는 세션 시작 시 capability
+        probe 로 결정되며, EAR 추출이 일시적으로 실패한다고 영구 우회되지 않음
+        (architect 지적). 일반 깜빡임(150~300ms)을 잡기 위해 throttle 0.18s.
+        """
         if not OWNER_AUTH.is_enrolled() or auth_state["face_ok"]:
             return
         now = time.time()
-        if now - auth_state["last_face_attempt"] < 1.0:
+        if now - auth_state["last_face_attempt"] < 0.18:
             return
         auth_state["last_face_attempt"] = now
 
+        # 1) 얼굴 매칭 (인코딩 또는 박스 폴백).
         matched = False
         degraded = False
         if OWNER_AUTH.has_face_encoding:
@@ -1013,24 +1116,64 @@ async def websocket_endpoint(ws: WebSocket):
                 matched = True
         else:
             # 폴백: 등록 시 인코딩이 저장되지 않은 환경 (face_recognition 미설치).
-            # 얼굴 박스가 감지되면 통과 — 보안은 약하지만 시스템이 동작 함.
             if session.vision.face_boxes:
                 matched = True
                 degraded = True
 
-        if matched:
-            auth_state["face_ok"] = True
-            await emit(
-                type="auth_progress",
-                face_ok=True,
-                voice_ok=auth_state["voice_ok"],
-                face_match_ok=True,
-                degraded=degraded,
-                message=("얼굴 인증 통과 (간이 모드)" if degraded else "얼굴 인증 통과"),
+        if not matched:
+            return
+
+        # 2) 라이브니스 — EAR 시계열 누적 + 깜빡임 검출.
+        if not auth_state["blink_required"]:
+            # capability probe 가 미지원 판정한 환경 — 라이브니스 우회.
+            auth_state["blink_ok"] = True
+            blink_msg = "라이브니스 우회 (landmarks 미지원 환경)"
+        else:
+            ear = await asyncio.to_thread(
+                compute_eye_aspect_ratio_from_jpeg, jpeg_bytes,
             )
-            if _is_authed():
-                await emit(type="auth_complete", face_name=OWNER_AUTH.face_name)
-                _start_welcome_if_authed()
+            if ear is not None:
+                samples = auth_state["ear_samples"]
+                samples.append((now, ear))
+                # 윈도우 밖 샘플 정리.
+                cutoff = now - BLINK_WINDOW_SECONDS
+                while samples and samples[0][0] < cutoff:
+                    samples.pop(0)
+                blinked, stats = detect_blink_in_window(samples)
+                if blinked:
+                    auth_state["blink_ok"] = True
+                    blink_msg = "눈 깜빡임 감지 — 라이브니스 통과"
+                else:
+                    auth_state["blink_ok"] = False
+                    blink_msg = (
+                        f"눈을 한 번 깜빡여 주세요 "
+                        f"(샘플 {stats['count']}, EAR {stats['min']:.2f}~{stats['max']:.2f})"
+                    )
+            else:
+                # 일시적 landmarks 추출 실패 — blink_required 는 유지, 사용자에게만 안내.
+                auth_state["blink_ok"] = False
+                blink_msg = "얼굴이 잘 보이게 정면을 봐주세요 (눈 인식 일시 실패)"
+
+        # 라이브니스 통과 전에는 face_ok 도 보류 — 둘 다 통과해야 face_ok=True.
+        if auth_state["blink_ok"]:
+            auth_state["face_ok"] = True
+
+        await emit(
+            type="auth_progress",
+            face_ok=auth_state["face_ok"],
+            voice_ok=auth_state["voice_ok"],
+            blink_ok=auth_state["blink_ok"],
+            face_match_ok=True,
+            degraded=degraded,
+            message=(
+                ("얼굴 인증 통과" if not degraded else "얼굴 인증 통과 (간이 모드)")
+                + " · " + blink_msg
+            ),
+        )
+        if _is_authed() and not auth_state["completed_emitted"]:
+            auth_state["completed_emitted"] = True
+            await emit(type="auth_complete", face_name=OWNER_AUTH.face_name)
+            _start_welcome_if_authed()
 
     try:
         while True:
@@ -1203,20 +1346,60 @@ async def websocket_endpoint(ws: WebSocket):
                 await _emit_auth_status()
                 continue
 
+            if mtype == "auth_new_challenge":
+                # 사이클 #20 — 사용자가 챌린지를 다시 받고 싶을 때 (잘 안 들렸을 때 등).
+                _refresh_challenge()
+                await _emit_auth_status()
+                continue
+
             if mtype == "auth_reset":
                 # 등록 해제 + 세션 인증 상태 초기화. 재등록을 위한 명시적 리셋.
+                # P0 보안 (architect 2차 지적): auth_reset 도 owner takeover 의
+                # 우회 경로였다 — 비인증자가 auth_reset → enroll_owner 연쇄로
+                # 계정 탈취 가능. 등록된 시스템에서는 _is_authed() 인증된
+                # 본인만 reset 허용.
+                if OWNER_AUTH.is_enrolled() and not _is_authed():
+                    await emit(
+                        type="auth_reset_ok", ok=False,
+                        message=(
+                            "주인 인증이 완료된 상태에서만 등록을 초기화할 수 "
+                            "있습니다. 얼굴/음성 인증을 먼저 완료해주세요."
+                        ),
+                    )
+                    continue
                 OWNER_AUTH.reset()
                 auth_state["face_ok"] = True
                 auth_state["voice_ok"] = True
+                auth_state["blink_ok"] = True
+                auth_state["blink_required"] = False
+                auth_state["ear_samples"] = []
+                auth_state["current_challenge"] = None
                 auth_state["welcome_started"] = False
+                auth_state["completed_emitted"] = False
                 await _emit_auth_status()
-                await emit(type="auth_reset_ok",
+                await emit(type="auth_reset_ok", ok=True,
                            message="주인 등록을 초기화했습니다. 다시 등록해주세요.")
                 continue
 
             if mtype == "enroll_owner":
-                # body: {face_name, voice_passphrase}. 카메라 프레임은 이미
-                # 0x01 로 push_jpeg 됨 → crop_largest_face_jpeg 로 추출.
+                # 사이클 #20 — 5각도 캡처 지원.
+                # body: {face_name, voice_passphrase, frames_b64?: [base64 JPEG x N], angles?: [str]}
+                # frames_b64 가 있으면 다중 인코딩으로 등록. 없으면 구버전 호환:
+                # 현재 카메라 프레임 1장(crop_largest_face_jpeg) 사용.
+
+                # P0 보안 (architect 지적): 이미 주인이 등록된 시스템에서는
+                # 비인증자가 enroll_owner 로 계정 탈취 불가. `auth_reset` 으로
+                # 명시적 초기화 후에만 재등록 허용.
+                if OWNER_AUTH.is_enrolled() and not _is_authed():
+                    await emit(
+                        type="enroll_owner_result", ok=False,
+                        message=(
+                            "이미 주인이 등록되어 있습니다. 재등록을 원하시면 "
+                            "기존 주인이 인증 후 [주인 재등록] 을 눌러주세요."
+                        ),
+                    )
+                    continue
+
                 face_name = (data.get("face_name") or "").strip()
                 passphrase = (data.get("voice_passphrase") or "").strip()
                 if not face_name or not passphrase:
@@ -1225,37 +1408,137 @@ async def websocket_endpoint(ws: WebSocket):
                         message="이름과 음성 패스프레이즈를 모두 입력해주세요.",
                     )
                     continue
-                crop = session.vision.crop_largest_face_jpeg(require_face=True)
-                if not crop:
+
+                # P1: frames_b64 입력 검증 — pre-auth DoS 차단.
+                MAX_FRAMES = 10
+                MAX_FRAME_BYTES = 300_000        # base64 디코드 후 ~300KB
+                MAX_TOTAL_BYTES = 2_500_000      # 누적 2.5MB 상한
+                raw_frames = data.get("frames_b64") or []
+                if not isinstance(raw_frames, list):
+                    raw_frames = []
+                if len(raw_frames) > MAX_FRAMES:
                     await emit(
                         type="enroll_owner_result", ok=False,
-                        message="얼굴이 명확히 보이지 않습니다. 카메라를 정면으로 보고 다시 시도해주세요.",
+                        message=f"전송된 프레임 수가 너무 많습니다 (최대 {MAX_FRAMES}장).",
                     )
                     continue
-                # 인코딩 계산 (face_recognition 가능 시).
-                enc = await asyncio.to_thread(
-                    compute_face_encoding_from_jpeg, crop,
-                )
+                frames_b64: List[str] = []
+                total_bytes = 0
+                for fb in raw_frames:
+                    if not isinstance(fb, str):
+                        continue
+                    # base64 길이는 원본 바이트의 ~4/3.
+                    approx_bytes = (len(fb) * 3) // 4
+                    if approx_bytes > MAX_FRAME_BYTES:
+                        continue  # 너무 큰 단일 프레임 폐기.
+                    total_bytes += approx_bytes
+                    if total_bytes > MAX_TOTAL_BYTES:
+                        break
+                    frames_b64.append(fb)
+                angles = data.get("angles") or []
+                if not isinstance(angles, list):
+                    angles = []
+
+                encs: List[List[float]] = []
+                kept_angles: List[str] = []
+                primary_crop: Optional[bytes] = None
+                failed_angles: List[str] = []
+
+                if isinstance(frames_b64, list) and frames_b64:
+                    # 다중 각도 — 각 프레임에서 인코딩 시도.
+                    import base64 as _b64
+                    for idx, fb in enumerate(frames_b64):
+                        if not isinstance(fb, str):
+                            continue
+                        try:
+                            jpeg = _b64.b64decode(fb)
+                        except Exception:
+                            continue
+                        if not jpeg or len(jpeg) < 200:
+                            continue
+                        enc = await asyncio.to_thread(
+                            compute_face_encoding_from_jpeg, jpeg,
+                        )
+                        angle_label = angles[idx] if idx < len(angles) else f"frame{idx}"
+                        if enc:
+                            encs.append(enc)
+                            kept_angles.append(str(angle_label))
+                            if primary_crop is None:
+                                primary_crop = jpeg
+                        else:
+                            failed_angles.append(str(angle_label))
+                    if primary_crop is None:
+                        # 인코딩이 하나도 안 됐으면 첫 프레임이라도 보존 (Claude Vision 식별용).
+                        try:
+                            primary_crop = _b64.b64decode(frames_b64[0])
+                        except Exception:
+                            primary_crop = None
+
+                if not encs:
+                    # 구버전 폴백 — 라이브 카메라에서 얼굴 1장 잘라 인코딩.
+                    crop = session.vision.crop_largest_face_jpeg(require_face=True)
+                    if not crop:
+                        await emit(
+                            type="enroll_owner_result", ok=False,
+                            message=(
+                                "얼굴이 명확히 보이지 않습니다. 카메라를 정면으로 "
+                                "보고 다시 시도해주세요."
+                            ),
+                            failed_angles=failed_angles,
+                        )
+                        continue
+                    enc1 = await asyncio.to_thread(
+                        compute_face_encoding_from_jpeg, crop,
+                    )
+                    if enc1:
+                        encs = [enc1]
+                        kept_angles = ["front"]
+                    primary_crop = crop
+
                 try:
-                    OWNER_AUTH.enroll(face_name, passphrase, face_encoding=enc)
+                    OWNER_AUTH.enroll(
+                        face_name,
+                        passphrase,
+                        face_encodings=encs if encs else None,
+                        face_encoding=encs[0] if encs else None,
+                        face_angles=kept_angles or None,
+                    )
                     # FaceRegistry 에도 등록 — 기존 도구가 얼굴 사진을 참조할 수 있도록.
-                    try:
-                        FACE_REGISTRY.register(face_name, crop)
-                    except Exception:
-                        traceback.print_exc()
+                    if primary_crop:
+                        try:
+                            FACE_REGISTRY.register(face_name, primary_crop)
+                        except Exception:
+                            traceback.print_exc()
                     # 등록자는 자동 로그인 — 막 본인 얼굴/문구를 셋업했으므로.
                     auth_state["face_ok"] = True
                     auth_state["voice_ok"] = True
+                    auth_state["blink_ok"] = True
+                    # blink_required 는 세션 시작 시 capability probe 결과를 유지.
+                    # (라이브니스 미지원 환경에서 강제로 True 로 바꾸지 않음.)
+                    auth_state["blink_required"] = _landmarks_supported
+                    auth_state["ear_samples"] = []
+                    auth_state["completed_emitted"] = False
+                    _refresh_challenge()
                     await emit(
                         type="enroll_owner_result", ok=True,
                         face_name=face_name,
-                        has_face_encoding=enc is not None,
-                        message=f"주인으로 등록되었습니다, {face_name} 님. 환영합니다.",
+                        has_face_encoding=bool(encs),
+                        face_encoding_count=len(encs),
+                        kept_angles=kept_angles,
+                        failed_angles=failed_angles,
+                        message=(
+                            f"주인으로 등록되었습니다, {face_name} 님. "
+                            f"({len(encs)}개 각도 인식 성공"
+                            + (f", {len(failed_angles)}개 실패" if failed_angles else "")
+                            + ") 환영합니다."
+                        ),
                         faces=FACE_REGISTRY.list_people(),
                     )
                     await _emit_auth_status()
-                    await emit(type="auth_complete", face_name=face_name)
-                    _start_welcome_if_authed()
+                    if not auth_state["completed_emitted"]:
+                        auth_state["completed_emitted"] = True
+                        await emit(type="auth_complete", face_name=face_name)
+                        _start_welcome_if_authed()
                 except ValueError as ve:
                     await emit(type="enroll_owner_result", ok=False, message=str(ve))
                 except Exception as e:
