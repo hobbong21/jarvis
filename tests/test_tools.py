@@ -456,6 +456,34 @@ class WebSearchEnhancedTests(unittest.TestCase):
         self.assertIn("사과", out)
         self.assertIn("바나나", out)
 
+    def test_cache_key_is_case_insensitive(self):
+        """Apple 과 apple 은 같은 검색 — 첫 호출 결과가 둘째 호출에서 캐시 적중."""
+        fake_ddgs = MagicMock()
+        fake_ddgs.text.return_value = iter([
+            {"title": "Apple Inc", "body": "tech", "href": "https://apple.com"},
+        ])
+        fake_module = MagicMock(DDGS=MagicMock(return_value=fake_ddgs))
+        with patch.dict(sys.modules, {"duckduckgo_search": fake_module}):
+            r1 = self.exec._t_web_search("Apple")
+            r2 = self.exec._t_web_search("apple")
+            r3 = self.exec._t_web_search("APPLE")
+        self.assertEqual(r1, r2)
+        self.assertEqual(r2, r3)
+        # DDGS().text 는 1번만 호출 (나머지는 캐시 적중)
+        self.assertEqual(fake_ddgs.text.call_count, 1)
+
+    def test_dedupe_by_domain_fills_max_total_when_all_same_domain(self):
+        """모든 결과가 같은 도메인이어도 max_total 까지 결과를 채워 빈 응답 회피."""
+        results = [
+            {"href": f"https://example.com/{i}", "title": f"T{i}", "body": "x"}
+            for i in range(5)
+        ]
+        out = ToolExecutor._dedupe_by_domain(
+            results, max_per_domain=1, max_total=4,
+        )
+        # 첫 1개는 primary, 나머지 3개는 overflow 에서 채움 → 총 4개 보장
+        self.assertEqual(len(out), 4)
+
     def test_web_answer_falls_back_to_snippets_when_fetch_fails(self):
         fake_ddgs = MagicMock()
         fake_ddgs.text.return_value = iter([

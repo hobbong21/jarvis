@@ -80,6 +80,14 @@ class MetaEvaluator(HAAgent):
     _ABANDON_HIGH = 0.50
     _DIAG_CONF_LOW = 0.40
     _RESOLVED_LOW = 0.30
+    # 같은 시그널의 자기-이슈를 24h 내 재발화 금지 (idempotency + feedback loop 차단).
+    # MetaEvaluator 가 자기 이슈를 만들어 pending 큐를 늘리고, 그 결과 approval_rate
+    # 가 더 낮아져 다음 사이클에 또 자기 이슈를 만드는 양성 피드백 루프 회피.
+    _SELF_ISSUE_COOLDOWN_SEC = 24 * 3600.0
+    # 시그널 키 — _maybe_emit_self_issues 가 발화를 결정할 때 사용하는 4 종류.
+    _SELF_ISSUE_KINDS = (
+        "low_approval", "high_abandon", "low_diag_conf", "low_resolved",
+    )
 
     # ── 진입점 ──────────────────────────────────────────────────────
     def evaluate(self, window_sec: float = 7 * 24 * 3600.0) -> HarnessHealthReport:
@@ -139,7 +147,12 @@ class MetaEvaluator(HAAgent):
     # ── 측정 ────────────────────────────────────────────────────────
     def _compute_funnel(self, cutoff: float) -> Dict[str, int]:
         """카테고리별 카운트가 아닌 윈도우 내 총 카운트를 집계.
-        memory 에 윈도우 필터링 SQL 이 없어서 recent fetch 후 cutoff 비교."""
+
+        Feedback loop 회피: harness_meta 카테고리 이슈에서 파생된 제안은
+        denominator 에 포함하지 않는다. 자기 이슈가 만든 pending 제안이
+        approval_rate 분모를 부풀려 또 다른 자기 이슈를 트리거하는 positive
+        feedback 을 차단.
+        """
         m = self.memory
         issues = [i for i in m.ha_issues_recent(limit=200)
                   if (i.get("created_at") or 0) >= cutoff]
@@ -149,17 +162,39 @@ class MetaEvaluator(HAAgent):
                       if (s.get("created_at") or 0) >= cutoff]
         proposals = [p for p in m.ha_proposals_list(limit=500)
                      if (p.get("created_at") or 0) >= cutoff]
-        approved = sum(1 for p in proposals if p.get("status") == "approved")
-        rejected = sum(1 for p in proposals if p.get("status") == "rejected")
-        pending = sum(1 for p in proposals if p.get("status") == "pending")
+
+        # harness_meta 자기 이슈에서 파생된 제안 ID 집합 — funnel 에서 제외.
+        meta_issue_ids = {
+            i["issue_id"] for i in issues if i.get("category") == "harness_meta"
+        }
+        meta_diag_ids = {
+            d["diagnosis_id"] for d in diagnoses
+            if d.get("issue_id") in meta_issue_ids
+        }
+        meta_strat_ids = {
+            s["strategy_id"] for s in strategies
+            if s.get("diagnosis_id") in meta_diag_ids
+        }
+        user_proposals = [
+            p for p in proposals if p.get("strategy_id") not in meta_strat_ids
+        ]
+        # User-facing 이슈만 카운트 (harness_meta 제외)
+        user_issues = [i for i in issues
+                       if i.get("category") != "harness_meta"]
+
+        approved = sum(1 for p in user_proposals if p.get("status") == "approved")
+        rejected = sum(1 for p in user_proposals if p.get("status") == "rejected")
+        pending = sum(1 for p in user_proposals if p.get("status") == "pending")
         return {
-            "issue_count": len(issues),
-            "diag_count": len(diagnoses),
-            "strategy_count": len(strategies),
-            "proposal_count": len(proposals),
+            "issue_count": len(user_issues),
+            "diag_count": len(diagnoses) - len(meta_diag_ids),
+            "strategy_count": len(strategies) - len(meta_strat_ids),
+            "proposal_count": len(user_proposals),
             "approved_count": approved,
             "rejected_count": rejected,
             "pending_count": pending,
+            # 자기-이슈 카운트 (참고용, denominator 분리)
+            "self_issue_count": len(meta_issue_ids),
         }
 
     @staticmethod
@@ -224,6 +259,34 @@ class MetaEvaluator(HAAgent):
                 out[k] += 1
         return out
 
+    def _recent_self_issue_kinds(self) -> set:
+        """24h 내 발화된 자기-이슈의 시그널 종류를 메타데이터에서 추출.
+        cooldown 비교에 사용 — 반환 set 에 포함된 kind 는 재발화 안 함."""
+        if self.memory is None:
+            return set()
+        now = time.time()
+        seen: set = set()
+        try:
+            for c in self.memory.ha_issues_recent(limit=50):
+                if c.get("category") != "harness_meta":
+                    continue
+                if (now - float(c.get("created_at") or 0)) > self._SELF_ISSUE_COOLDOWN_SEC:
+                    continue
+                # signal 텍스트로 kind 식별 (간단한 substring 매칭 — 안정적인
+                # 비교를 위해 발화 시 signal 첫 단어를 키워드로 통일).
+                sig = (c.get("signal") or "")
+                if "채택률" in sig:
+                    seen.add("low_approval")
+                elif "이슈→제안" in sig or "전환 실패율" in sig:
+                    seen.add("high_abandon")
+                elif "진단 confidence" in sig:
+                    seen.add("low_diag_conf")
+                elif "resolved 비율" in sig:
+                    seen.add("low_resolved")
+        except Exception as ex:
+            print(f"[MetaEvaluator] cooldown 조회 실패: {ex!r}")
+        return seen
+
     # ── 자기 이슈 발화 ──────────────────────────────────────────────
     def _maybe_emit_self_issues(
         self,
@@ -233,11 +296,17 @@ class MetaEvaluator(HAAgent):
         confidence: Dict[str, float],
         outcomes: Dict[str, int],
     ) -> List[str]:
-        """임계 위반 시 Observer 와 동일 형식의 IssueCard 를 영속 + emit."""
+        """임계 위반 시 Observer 와 동일 형식의 IssueCard 를 영속 + emit.
+        24h cooldown — 같은 종류의 자기 이슈가 활성이면 재발화 안 함."""
         emitted: List[str] = []
+        recent = self._recent_self_issue_kinds()
 
         prop = funnel["proposal_count"]
-        if prop >= self._MIN_SAMPLE and rates["approval_rate"] < self._APPROVAL_LOW:
+        if (
+            "low_approval" not in recent
+            and prop >= self._MIN_SAMPLE
+            and rates["approval_rate"] < self._APPROVAL_LOW
+        ):
             emitted.append(self._emit_self_issue(
                 category="harness_meta",
                 severity="medium",
@@ -253,7 +322,11 @@ class MetaEvaluator(HAAgent):
             ))
 
         issues_n = funnel["issue_count"]
-        if issues_n >= self._MIN_SAMPLE and rates["abandonment_rate"] > self._ABANDON_HIGH:
+        if (
+            "high_abandon" not in recent
+            and issues_n >= self._MIN_SAMPLE
+            and rates["abandonment_rate"] > self._ABANDON_HIGH
+        ):
             emitted.append(self._emit_self_issue(
                 category="harness_meta",
                 severity="medium",
@@ -269,7 +342,11 @@ class MetaEvaluator(HAAgent):
             ))
 
         n_diag = int(confidence.get("n_diagnoses") or 0)
-        if n_diag >= self._MIN_SAMPLE and confidence["avg_diagnosis_conf"] < self._DIAG_CONF_LOW:
+        if (
+            "low_diag_conf" not in recent
+            and n_diag >= self._MIN_SAMPLE
+            and confidence["avg_diagnosis_conf"] < self._DIAG_CONF_LOW
+        ):
             emitted.append(self._emit_self_issue(
                 category="harness_meta",
                 severity="low",
@@ -288,7 +365,10 @@ class MetaEvaluator(HAAgent):
         outc_observed = outc_total - outcomes.get("pending", 0)
         if outc_observed >= self._MIN_SAMPLE:
             resolved_rate = self._safe_div(outcomes["resolved"], outc_observed)
-            if resolved_rate < self._RESOLVED_LOW:
+            if (
+                "low_resolved" not in recent
+                and resolved_rate < self._RESOLVED_LOW
+            ):
                 emitted.append(self._emit_self_issue(
                     category="harness_meta",
                     severity="high",

@@ -74,6 +74,16 @@ _TEMPLATES: Dict[str, Dict[str, Any]] = {
         "before": "(현 상태)",
         "after_template": "변경 없음 — 다음 사이클 재검토. 사유: {rationale}",
     },
+    # 사이클 #29: MetaEvaluator 발 harness_meta 카테고리.
+    # 하네스 자체 룰을 손대는 제안이므로 target 을 별도 prefix 로 구분 →
+    # Validator 가 위험도를 분리 산정 가능 (현재는 fallback risk 0.5).
+    "harness_meta": {
+        "target": "harness:self_tuning",
+        "reversible": True,
+        "before": "(현재 하네스 임계/룰)",
+        "after_template":
+            "하네스 자기 조정: {summary}\n근거: {rationale}\n예상 효과: {impact}",
+    },
 }
 
 

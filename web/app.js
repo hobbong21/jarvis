@@ -519,6 +519,12 @@
       if (on) secondary.removeAttribute('hidden');
       else secondary.setAttribute('hidden', '');
     }
+    // 비교 모드에선 좌측에 큰 오브 2개가 나오므로 채팅 헤더의 작은 아바타는 숨김
+    // (3-orb 동시 노출의 시각적 잡음 회피).
+    if (chatAvatarEl) {
+      if (on) chatAvatarEl.setAttribute('hidden', '');
+      else chatAvatarEl.removeAttribute('hidden');
+    }
     if (on) {
       // 진입 시 둘 다 neutral 로 초기화
       if (mainOrb) mainOrb.setEmotion('neutral');
@@ -974,13 +980,14 @@
         previewBtn.disabled = true;
         previewBtn.textContent = '⏳ 합성 중...';
         send({ type: 'preview_voice', preset: id });
-        // 6초 후 자동 복원 (서버 응답이 없을 경우)
+        // 12초 후 자동 복원 (서버 응답이 없거나 느린 네트워크 대비).
+        // 정상 응답은 voice_preview 메시지에서 즉시 복원하므로 이 타이머는 안전망.
         setTimeout(() => {
           if (previewBtn.disabled) {
             previewBtn.disabled = false;
             previewBtn.textContent = '▶ 미리듣기';
           }
-        }, 6000);
+        }, 12000);
       });
     }
     if (applyBtn) {

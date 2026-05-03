@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 
 # numpy / sounddevice 는 사용하는 함수 안에서만 임포트 (배포 cold start 지연 방지)
 from .config import cfg
@@ -471,37 +471,55 @@ class EdgeTTS:
     _FALLBACK_PITCH = "-5Hz"
 
     async def _synthesize_async(self, text: str) -> str:
-        """Edge-TTS 합성. 설정 음성으로 실패하면 기본 음성으로 1회 폴백."""
-        import edge_tts
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-            path = f.name
+        """Edge-TTS 합성. 설정 음성으로 실패하면 기본 음성으로 1회 폴백.
 
-        async def _try(voice: str, rate: str, pitch: str) -> bool:
+        시도별로 *별도 temp 파일* 을 사용 — 부분 쓰기로 corrupt 된 파일을 다음
+        시도가 같은 경로에 덮어쓰며 Edge-TTS 의 append/truncate 동작 차이로
+        잡음 mp3 가 만들어지는 회귀 차단.
+        """
+        import edge_tts
+
+        async def _try(voice: str, rate: str, pitch: str) -> Optional[str]:
+            """성공 시 합성된 파일 경로, 실패 시 None. 부분 파일은 항상 정리."""
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                attempt_path = f.name
             try:
                 communicate = edge_tts.Communicate(
-                    text, voice=voice, rate=rate, pitch=pitch
+                    text, voice=voice, rate=rate, pitch=pitch,
                 )
-                await communicate.save(path)
-                # 빈 파일이면 실패로 간주
-                return os.path.getsize(path) > 0
+                await communicate.save(attempt_path)
+                if os.path.getsize(attempt_path) > 0:
+                    return attempt_path
             except Exception as exc:
-                print(f"[TTS] 합성 실패 (voice={voice}): {type(exc).__name__}: {exc}")
-                return False
+                print(f"[TTS] 합성 실패 (voice={voice}): "
+                      f"{type(exc).__name__}: {exc}")
+            # 실패 — 부분 파일 정리 + None 반환
+            try:
+                os.unlink(attempt_path)
+            except OSError:
+                pass
+            return None
 
         # 1차: 사용자 설정 음성
-        if await _try(cfg.tts_voice, cfg.tts_rate, cfg.tts_pitch):
-            return path
+        primary_path = await _try(cfg.tts_voice, cfg.tts_rate, cfg.tts_pitch)
+        if primary_path is not None:
+            return primary_path
 
         # 2차: 기본 폴백 음성 — 카탈로그가 stale 해도 항상 작동
-        if (cfg.tts_voice != EdgeTTS._FALLBACK_VOICE
-                and await _try(EdgeTTS._FALLBACK_VOICE,
-                               EdgeTTS._FALLBACK_RATE,
-                               EdgeTTS._FALLBACK_PITCH)):
-            print(f"[TTS] '{cfg.tts_voice}' 합성 실패 → 기본 음성으로 폴백")
-            return path
+        if cfg.tts_voice != EdgeTTS._FALLBACK_VOICE:
+            fallback_path = await _try(
+                EdgeTTS._FALLBACK_VOICE,
+                EdgeTTS._FALLBACK_RATE,
+                EdgeTTS._FALLBACK_PITCH,
+            )
+            if fallback_path is not None:
+                print(f"[TTS] '{cfg.tts_voice}' 합성 실패 → 기본 음성으로 폴백")
+                return fallback_path
 
-        # 둘 다 실패 — 빈 파일을 반환 (synthesize_bytes_verified 가 audio verify 단계에서 차단)
-        return path
+        # 둘 다 실패 — 빈 임시 파일을 반환 (synthesize_bytes_verified 가
+        # audio verify 단계에서 빈 파일을 차단하고 retry 로 처리).
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            return f.name
 
     def synthesize_bytes(self, text: str) -> bytes:
         """텍스트 → MP3 바이트. 검증 게이트 통과한 경우만 합성."""

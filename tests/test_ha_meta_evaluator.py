@@ -264,6 +264,73 @@ class MetaEvaluatorScopeTests(unittest.TestCase):
             )
 
 
+class MetaEvaluatorCooldownTests(unittest.TestCase):
+    """버그 수정: 자기-이슈 cooldown — 24h 내 같은 종류 재발화 금지 (feedback loop 차단)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.m = _fresh_memory(self._tmp.name)
+        self.me = MetaEvaluator(memory=self.m)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_repeated_evaluate_does_not_emit_duplicate_self_issues(self):
+        """5건 거부 → 첫 evaluate() 자기-이슈 발화. 두 번째 evaluate() 는 cooldown 으로 침묵."""
+        for i in range(5):
+            _seed_proposal(self.m, proposal_id=f"P-low-{i}",
+                           proposal_status="rejected")
+        report1 = self.me.evaluate(window_sec=24 * 3600)
+        self.assertGreater(len(report1.self_issues), 0)
+        n_meta_after_first = sum(
+            1 for c in self.m.ha_issues_recent(limit=50)
+            if c["category"] == "harness_meta"
+        )
+
+        report2 = self.me.evaluate(window_sec=24 * 3600)
+        n_meta_after_second = sum(
+            1 for c in self.m.ha_issues_recent(limit=50)
+            if c["category"] == "harness_meta"
+        )
+        # 두 번째 호출은 새 자기-이슈를 만들지 않아야 함
+        self.assertEqual(n_meta_after_first, n_meta_after_second,
+                         "cooldown 위반 — 24h 내 자기-이슈 중복 발화")
+
+    def test_funnel_excludes_harness_meta_proposals(self):
+        """자기 이슈에서 파생된 proposal 은 funnel/approval_rate denominator 에서 제외."""
+        # User-facing 1개 + harness_meta 1개 — 둘 다 pending
+        _seed_proposal(self.m, proposal_id="P-user", issue_category="spike")
+
+        # harness_meta 이슈 + 강제로 strategy/proposal chain 생성
+        self.m.ha_issue_insert(
+            issue_id="ISS-META", category="harness_meta", severity="medium",
+            evidence=[], signal="채택률 0%", narrative="self",
+            confidence=0.7,
+        )
+        self.m.ha_diagnosis_insert(
+            diagnosis_id="D-META", issue_id="ISS-META", hypotheses=[],
+            root_cause="meta", confidence=0.5,
+            recommended_action="adjust", five_whys=[],
+        )
+        self.m.ha_strategy_insert(
+            strategy_id="S-META", diagnosis_id="D-META",
+            category="heuristic_threshold", summary="s", rationale=None,
+            expected_impact=None, cost_estimate=None,
+        )
+        self.m.ha_proposal_insert(
+            proposal_id="P-META", strategy_id="S-META",
+            target="harness:self_tuning", before_text="b", after_text="a",
+            reversible=True, risk_level="low", risk_score=0.1, validation={},
+        )
+
+        report = self.me.evaluate(window_sec=24 * 3600)
+        # user-facing 만 카운트 (1개)
+        self.assertEqual(report.funnel["proposal_count"], 1,
+                         f"harness_meta 제안이 분모에 포함됨: {report.funnel}")
+        # 자기 이슈는 별도 추적
+        self.assertEqual(report.funnel["self_issue_count"], 1)
+
+
 class StrategistHarnessMetaTests(unittest.TestCase):
     """Strategist 가 harness_meta 카테고리 이슈에 대해 새 룰을 적용하는지."""
 

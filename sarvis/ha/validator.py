@@ -28,6 +28,9 @@ _TARGET_RISK: Dict[str, float] = {
     "brain.router:": 0.40,
     "alerts:": 0.10,
     "noop": 0.05,
+    # 사이클 #29: 하네스 자기 조정 (MetaEvaluator → Strategist harness_meta).
+    # Observer 임계 등 reversible 한 룰 변경이므로 observer: 와 동등한 위험.
+    "harness:": 0.30,
 }
 
 
