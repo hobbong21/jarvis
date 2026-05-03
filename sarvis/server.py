@@ -1740,11 +1740,24 @@ async def websocket_endpoint(ws: WebSocket):
                 if len(sample_text) > 120:
                     sample_text = sample_text[:120]
                 try:
-                    from .config import get_voice_preset
+                    from .config import (
+                        get_voice_preset, SUPPORTED_KO_VOICES,
+                    )
                     preset = get_voice_preset(preset_id) if preset_id else None
                     voice = preset["voice"] if preset else cfg.tts_voice
                     rate = preset["rate"] if preset else cfg.tts_rate
                     pitch = preset["pitch"] if preset else cfg.tts_pitch
+
+                    # Edge-TTS 가 실제 제공하지 않는 음성이면 합성 시도 자체를 차단.
+                    # apply_voice_preset 와 동일한 가드를 미리듣기에도 적용.
+                    if voice not in SUPPORTED_KO_VOICES:
+                        await emit(
+                            type="error",
+                            message=(
+                                "⚠ 음성 미리듣기 실패: 지원되지 않는 음성"
+                            ),
+                        )
+                        continue
 
                     import edge_tts
                     import tempfile as _tf
@@ -2720,8 +2733,13 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
         turn_meta["stt_text_len"] = len(cleaned)
         # 1글자 답변은 화이트리스트("네", "예", "응") 에 속할 때만 살린다.
         # 그 외 1글자는 Whisper 가 노이즈를 한 음절로 환각한 결과일 가능성이 높음.
+        # "예.", "네!" 처럼 구두점 붙은 STT 결과도 통과시킨다 (양끝 구두점 strip 후 비교).
         _SHORT_AFFIRMATIVES = {"네", "예", "응"}
-        if not cleaned or (len(cleaned) < 2 and cleaned not in _SHORT_AFFIRMATIVES):
+        cleaned_for_short_check = cleaned.strip(" .,!?。、")
+        if not cleaned or (
+            len(cleaned_for_short_check) < 2
+            and cleaned_for_short_check not in _SHORT_AFFIRMATIVES
+        ):
             if text and not cleaned:
                 turn_meta["stt_hallucination_dropped"] = text[:80]
             await emit(type="state", state="idle")

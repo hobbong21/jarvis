@@ -75,10 +75,11 @@ class ExpandedHallucinationTests(unittest.TestCase):
     """확장된 환각 패턴 — 유튜브 인트로/사인오프, 영어 환각, URL, 반복 토큰 등."""
 
     def test_youtube_intro_dropped(self) -> None:
+        # "안녕하세요 사비스입니다" 는 SARVIS 자기 소개로 통과시킴
+        # (test_sarvis_self_intro_preserved 참조).
         for s in [
             "안녕하세요 여러분",
             "여러분 안녕하세요",
-            "안녕하세요 사비스입니다",
             "오늘은 인공지능에 대해 알아보겠습니다",
             "지금까지 김철수였습니다",
             "이상 박영희였습니다",
@@ -157,6 +158,20 @@ class GenuineSpeechPreservedTests(unittest.TestCase):
         # 사이클 #17 기존 회귀 테스트와 동일 — 단독 "감사합니다" 만 차단
         s = "도와주셔서 감사합니다"
         self.assertEqual(clean_stt_text(s), s)
+
+    def test_sarvis_self_intro_preserved(self) -> None:
+        """버그 수정: '안녕하세요 사비스입니다' 는 SARVIS 의 자기 소개라 차단되면 안 됨.
+        Whisper 가 무음에서 이 문자열을 환각하는 케이스보다, 사용자/SARVIS 가 실제로
+        말하는 케이스가 훨씬 흔하므로 negative lookahead 로 보호."""
+        s = "안녕하세요 사비스입니다"
+        self.assertEqual(clean_stt_text(s), s,
+                         "사비스 자기소개는 통과되어야 함")
+
+    def test_other_self_intro_still_dropped(self) -> None:
+        """단, 사비스가 아닌 다른 이름의 '안녕하세요 ○○입니다' 는 여전히 차단."""
+        for s in ["안녕하세요 김철수입니다", "안녕하세요 박영희입니다"]:
+            with self.subTest(s=s):
+                self.assertEqual(clean_stt_text(s), "")
 
     def test_normal_questions_preserved(self) -> None:
         cases = [

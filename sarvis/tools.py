@@ -366,7 +366,9 @@ class ToolExecutor:
         """검색 결과를 도메인별 빈도 제한으로 다양화.
 
         같은 사이트에서 N개가 잡히면 1개만 살리고 나머지는 뒤쪽으로 밀어
-        다양한 출처가 상위에 오게 한다. 0건 시 입력 그대로 반환.
+        다양한 출처가 상위에 오게 한다. 단 모든 결과가 동일 도메인일 경우에도
+        최소 min(len(results), max_total) 개는 보장 — overflow 를 도메인 무시
+        하고 채워 사용자에게 빈 결과를 돌려주지 않는다.
         """
         if not results:
             return results
@@ -387,9 +389,10 @@ class ToolExecutor:
                 overflow.append(r)
             if len(primary) >= max_total:
                 break
-        # 부족하면 overflow 로 채움
-        if len(primary) < max_total:
-            primary.extend(overflow[: max_total - len(primary)])
+        # 부족하면 overflow 로 채움 — 도메인 제한 무시하고 max_total 까지 확보.
+        if len(primary) < max_total and overflow:
+            need = max_total - len(primary)
+            primary.extend(overflow[:need])
         return primary
 
     @staticmethod
@@ -661,7 +664,8 @@ class ToolExecutor:
         except Exception as e:
             return f"검색 실패: {e}"
 
-        ck = f"search::{query}"
+        # 캐시 키는 lowercase 로 정규화 — "Apple" 과 "apple" 은 같은 검색.
+        ck = f"search::{(query or '').strip().lower()}"
         cached = self._cache_get(ck)
         if cached:
             return cached
@@ -713,7 +717,7 @@ class ToolExecutor:
         except Exception as e:
             return f"검색 실패: {e}"
 
-        ck = f"answer::{query}"
+        ck = f"answer::{(query or '').strip().lower()}"
         cached = self._cache_get(ck)
         if cached:
             return cached
@@ -754,15 +758,28 @@ class ToolExecutor:
                     ex.submit(self._fetch_clean_text, url, 8000, 5.0): i
                     for i, url in urls
                 }
-                for fut in as_completed(fut_to_idx, timeout=12):
-                    i = fut_to_idx[fut]
-                    try:
-                        bodies[i] = fut.result() or ""
-                    except Exception:
-                        bodies[i] = ""
+                try:
+                    for fut in as_completed(fut_to_idx, timeout=12):
+                        i = fut_to_idx[fut]
+                        try:
+                            bodies[i] = fut.result() or ""
+                        except Exception:
+                            bodies[i] = ""
+                except Exception:
+                    # as_completed timeout 등 — 이미 끝난 future 의 결과는 회수.
+                    for fut, i in fut_to_idx.items():
+                        if i in bodies:
+                            continue
+                        if fut.done():
+                            try:
+                                bodies[i] = fut.result(timeout=0) or ""
+                            except Exception:
+                                bodies[i] = ""
         except Exception:
-            # 병렬화 실패 시 순차 폴백
+            # ThreadPoolExecutor 자체 실패 — 순차 폴백 (이미 받은 결과 보존, 누락 분만 재시도)
             for i, url in urls:
+                if i in bodies:
+                    continue
                 try:
                     bodies[i] = self._fetch_clean_text(url, max_chars=8000)
                 except Exception:
