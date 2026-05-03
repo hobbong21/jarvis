@@ -1100,7 +1100,7 @@ class CompareModeWebSocketTests(unittest.TestCase):
           (emotion="neutral|claude", "happy|openai") = 총 3건.
         - 한쪽만 응답: user prompt 1건 + 응답한 backend assistant 1건 = 총 2건.
         """
-        from config import cfg
+        from sarvis.config import cfg
         mem = server.get_memory()
         user_id = cfg.memory_user_id
 
@@ -1221,7 +1221,7 @@ class CompareModeVoiceGuardTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        from config import cfg
+        from sarvis.config import cfg
         cls._orig_backend = cfg.llm_backend  # type: ignore[attr-defined]
         cls._orig_brain = server.Brain        # type: ignore[attr-defined]
         cfg.llm_backend = "compare"
@@ -1229,7 +1229,7 @@ class CompareModeVoiceGuardTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        from config import cfg
+        from sarvis.config import cfg
         cfg.llm_backend = cls._orig_backend   # type: ignore[attr-defined]
         server.Brain = cls._orig_brain        # type: ignore[attr-defined]
 
