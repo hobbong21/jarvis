@@ -2084,8 +2084,22 @@
     mTitle.disabled = !!active;
     mStatus.textContent = active ? "진행 중" : "대기";
     mStatus.dataset.state = active ? "active" : "";
+    // 사이클 #26 — 회의 시작 시 정리 영역 펼치고 dock 자동 오픈.
+    // 종료 시엔 영역을 유지(요약/스크립트 검토 가능). 첫 로드 시엔 init() 가 hidden 처리.
+    if (active) {
+      const area = $("meeting-active-area");
+      if (area) area.hidden = false;
+      const panels = $("prod-panels");
+      const fab = $("prod-toggle");
+      if (panels && panels.hidden) {
+        panels.hidden = false;
+        if (fab) fab.setAttribute("aria-expanded", "true");
+      }
+    }
   }
   setMeetingActive(false);
+  // 페이지 첫 진입 시점엔 정리 영역 자체 hidden (회의 시작/종료 후엔 펼침 유지).
+  { const a = $("meeting-active-area"); if (a) a.hidden = true; }
 
   mStartBtn.addEventListener("click", () => {
     mTrans.innerHTML = "";

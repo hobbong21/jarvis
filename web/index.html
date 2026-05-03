@@ -388,13 +388,15 @@
         <button id="meeting-start-btn" class="prod-btn primary" type="button">시작</button>
         <button id="meeting-end-btn" class="prod-btn" type="button" disabled>종료+요약</button>
       </div>
-      <div class="prod-row">
-        <input id="meeting-text" type="text" placeholder="발언 텍스트 입력 후 Enter (또는 ↩)"
-               maxlength="500" class="prod-input">
-        <button id="meeting-add-btn" class="prod-btn" type="button" disabled>추가</button>
+      <div id="meeting-active-area" class="meeting-active-only" hidden>
+        <div class="prod-row">
+          <input id="meeting-text" type="text" placeholder="발언 텍스트 입력 후 Enter (또는 ↩)"
+                 maxlength="500" class="prod-input">
+          <button id="meeting-add-btn" class="prod-btn" type="button" disabled>추가</button>
+        </div>
+        <div id="meeting-transcript" class="prod-list prod-transcript" aria-live="polite"></div>
+        <div id="meeting-summary" class="prod-summary" hidden></div>
       </div>
-      <div id="meeting-transcript" class="prod-list prod-transcript" aria-live="polite"></div>
-      <div id="meeting-summary" class="prod-summary" hidden></div>
     </section>
 
     <!-- 사이클 #22 — My Sarvis (HARN-05 미니) -->
