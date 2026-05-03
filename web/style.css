@@ -1835,6 +1835,42 @@ input, select { outline: none; }
 /* HTML `hidden` 글로벌 속성이 .prod-panels 의 display:flex 에 의해
    덮어써지지 않도록 강제. 메인 화면에서 dock 카드가 자동 노출되는 회귀 방지. */
 .prod-panels[hidden] { display: none !important; }
+
+/* ── 사이클 #27 — 실시간 음성 자막 (Web Speech API) ─────────── */
+.live-caption {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; margin: 0 16px 8px;
+  background: var(--bg-soft); border: 1px solid var(--accent-d);
+  border-radius: 10px; font-size: 14px; color: var(--text);
+  min-height: 38px; max-height: 96px; overflow-y: auto;
+  box-shadow: var(--shadow-sm);
+}
+.live-caption[hidden] { display: none !important; }
+.live-caption .live-caption-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); flex: 0 0 8px;
+  animation: live-caption-pulse 1.2s ease-in-out infinite;
+}
+.live-caption .live-caption-text {
+  flex: 1 1 auto; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+}
+.live-caption .live-caption-text .interim {
+  color: var(--text-mid); font-style: italic; opacity: 0.85;
+}
+@keyframes live-caption-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.85); }
+  50%      { opacity: 1;   transform: scale(1.15); }
+}
+@media (max-width: 640px) {
+  .live-caption {
+    margin: 0 12px;
+    position: fixed;
+    left: 0; right: 0;
+    bottom: calc(var(--safe-bottom) + 132px);
+    z-index: 50;
+  }
+}
 .prod-card {
   background: var(--bg-panel); border: 1px solid var(--border-soft);
   border-radius: 10px; padding: 10px 12px;

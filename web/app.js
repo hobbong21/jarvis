@@ -475,6 +475,109 @@
     }
   }
 
+  // ---------- 사이클 #27 — Web Speech API (실시간 한국어 자막) ----------
+  // Chrome/Edge/Safari 의 webkitSpeechRecognition 으로 즉시 문자 변환.
+  // 미지원 브라우저(Firefox 등) 는 자동으로 기존 Whisper 흐름으로 폴백.
+  const SR_Class = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let speechRec = null;                 // 현재 활성 SpeechRecognition 인스턴스
+  let speechFinalSegments = [];         // isFinal 누적 텍스트
+  let currentMicStream = null;          // 시각화/VAD 용 별도 stream (SR 와 병행)
+  let _liveCaptionEl = null;
+  let _liveCaptionTextEl = null;
+  function _ensureCaptionRefs() {
+    if (!_liveCaptionEl) _liveCaptionEl = document.getElementById('live-caption');
+    if (_liveCaptionEl && !_liveCaptionTextEl) {
+      _liveCaptionTextEl = _liveCaptionEl.querySelector('.live-caption-text');
+    }
+  }
+  function showLiveCaption(finalTxt, interimTxt) {
+    _ensureCaptionRefs();
+    if (!_liveCaptionEl || !_liveCaptionTextEl) return;
+    _liveCaptionEl.hidden = false;
+    const f = (finalTxt || '').trim();
+    const i = (interimTxt || '').trim();
+    let html = '';
+    if (f) html += escapeHtml(f);
+    if (i) {
+      if (f) html += ' ';
+      html += '<span class="interim">' + escapeHtml(i) + '</span>';
+    }
+    if (!html) html = '<span class="interim">듣고 있어요…</span>';
+    _liveCaptionTextEl.innerHTML = html;
+  }
+  function hideLiveCaption() {
+    _ensureCaptionRefs();
+    if (_liveCaptionEl) {
+      _liveCaptionEl.hidden = true;
+      if (_liveCaptionTextEl) _liveCaptionTextEl.innerHTML = '';
+    }
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+  function startWebSpeech() {
+    if (!SR_Class) return false;
+    try {
+      speechRec = new SR_Class();
+      speechRec.lang = 'ko-KR';
+      speechRec.continuous = true;
+      speechRec.interimResults = true;
+      speechRec.maxAlternatives = 1;
+      speechFinalSegments = [];
+      showLiveCaption('', '');
+      speechRec.onresult = (e) => {
+        let interim = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const r = e.results[i];
+          if (r.isFinal) {
+            const t = (r[0] && r[0].transcript || '').trim();
+            if (t) speechFinalSegments.push(t);
+            // 사용자가 한 번 발화한 시점 = continuous idle timer 취소 대상
+            try { markUserSpoke && markUserSpoke(); } catch {}
+          } else {
+            interim += (r[0] && r[0].transcript || '');
+          }
+        }
+        showLiveCaption(speechFinalSegments.join(' '), interim);
+      };
+      speechRec.onerror = (e) => {
+        const code = e && e.error;
+        // no-speech / aborted 는 정상 종료의 일부 — 무시
+        if (code === 'no-speech' || code === 'aborted' || code === 'audio-capture') return;
+        console.warn('[speech] error:', code);
+      };
+      speechRec.onend = () => {
+        // recording 이 아직 ON 이면 (continuous 가 끊긴 케이스) 자동 재시작
+        if (recording && speechRec) {
+          try { speechRec.start(); return; } catch {}
+        }
+        speechRec = null;
+      };
+      speechRec.start();
+      return true;
+    } catch (err) {
+      console.warn('[speech] start failed, falling back:', err);
+      speechRec = null;
+      return false;
+    }
+  }
+  function finalizeSpeechRecognition() {
+    const rec = speechRec;
+    speechRec = null;  // onend 의 자동 재시작 차단
+    if (rec) {
+      try { rec.onend = null; rec.onresult = null; rec.onerror = null; } catch {}
+      try { rec.stop(); } catch {}
+    }
+    const finalText = speechFinalSegments.join(' ').trim();
+    speechFinalSegments = [];
+    hideLiveCaption();
+    if (finalText) {
+      send({ type: 'text_input', text: finalText });
+    }
+  }
+
   // ---------- 마이크 / 녹음 ----------
   micBtn.addEventListener('click', toggleRecording);
   if (mobileMicBtn) mobileMicBtn.addEventListener('click', toggleRecording);
@@ -530,22 +633,29 @@
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true },
       });
-      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : 'audio/webm';
-      mediaRecorder = new MediaRecorder(stream, { mimeType: mime });
-      recordedChunks = [];
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) recordedChunks.push(e.data);
-      };
-      mediaRecorder.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(recordedChunks, { type: mime });
-        if (blob.size < 800) return;
-        const buf = await blob.arrayBuffer();
-        sendBinary(0x02, buf);
-      };
-      mediaRecorder.start();
+      currentMicStream = stream;
+      // 사이클 #27 — Web Speech API 우선 사용. 브라우저 내장이 한국어 정확도/지연이
+      // Whisper-tiny 보다 압도적으로 좋고, interim 결과로 실시간 자막도 가능.
+      // 미지원 브라우저(Firefox 등) 는 자동으로 기존 MediaRecorder→Whisper 흐름.
+      const useWebSpeech = startWebSpeech();
+      if (!useWebSpeech) {
+        const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
+          : 'audio/webm';
+        mediaRecorder = new MediaRecorder(stream, { mimeType: mime });
+        recordedChunks = [];
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) recordedChunks.push(e.data);
+        };
+        mediaRecorder.onstop = async () => {
+          try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+          const blob = new Blob(recordedChunks, { type: mime });
+          if (blob.size < 800) return;
+          const buf = await blob.arrayBuffer();
+          sendBinary(0x02, buf);
+        };
+        mediaRecorder.start();
+      }
       recording = true;
       markVoiceTurn(true);  // 음성으로 시작한 turn → 응답 후 자동 시작 자격
       micBtn.classList.add('recording');
@@ -597,8 +707,17 @@
     micBtn.classList.remove('recording');
     if (mobileMicBtn) mobileMicBtn.classList.remove('recording');
     micLabel.textContent = 'SPEAK';
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    // 사이클 #27 — Web Speech 경로: SR finalize + 시각화용 mic stream 정리.
+    // 미지원 브라우저(Whisper 경로) 는 mediaRecorder.onstop 에서 stream 을 정리.
+    if (speechRec) {
+      finalizeSpeechRecognition();
+      if (currentMicStream) {
+        try { currentMicStream.getTracks().forEach((t) => t.stop()); } catch {}
+        currentMicStream = null;
+      }
+    } else if (mediaRecorder && mediaRecorder.state !== 'inactive') {
       mediaRecorder.stop();
+      currentMicStream = null;  // tracks 는 onstop 에서 정리
     }
   }
 
