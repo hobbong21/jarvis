@@ -211,8 +211,53 @@ class SpeechRecorder:
 
 
 # ============================================================
-# 3. STT (Faster-Whisper)
+# 3. STT — 라우팅 (OpenAI Whisper API ▸ faster-whisper 폴백)
 # ============================================================
+def _build_stt_prompt(extra_prompt: str = "") -> str:
+    base = (cfg.whisper_initial_prompt or "").strip()
+    extra = (extra_prompt or "").strip()
+    if base and extra:
+        return base + " " + extra
+    return extra or base
+
+
+class OpenAIWhisperSTT:
+    """사이클 #27 (옵션 D) — OpenAI Whisper API 백엔드.
+
+    Web Speech API 마이그레이션 후 폴백 경로(Firefox 등) 에서만 호출됨.
+    로컬 모델보다 정확도·환각 내성 모두 우수. 분당 비용은 발생.
+    numpy 배열은 미지원 — 호출자는 항상 파일 경로(str) 를 넘긴다 (server.py 기준).
+    """
+
+    def __init__(self):
+        from openai import OpenAI
+
+        if not os.getenv("OPENAI_API_KEY"):
+            raise RuntimeError("OPENAI_API_KEY 미설정")
+        self.client = OpenAI()
+        self.model = cfg.openai_stt_model
+        print(f"      STT 백엔드: OpenAI ({self.model})")
+
+    def transcribe(self, audio, extra_prompt: str = "") -> str:
+        if not isinstance(audio, str) or not os.path.exists(audio):
+            print("[STT/openai] 파일 경로만 지원 (numpy 미지원)")
+            return ""
+        prompt = _build_stt_prompt(extra_prompt).strip()
+        try:
+            with open(audio, "rb") as f:
+                resp = self.client.audio.transcriptions.create(
+                    model=self.model,
+                    file=f,
+                    language=cfg.whisper_language,
+                    prompt=prompt or None,
+                    temperature=0.0,
+                )
+            return (getattr(resp, "text", "") or "").strip()
+        except Exception as e:
+            print(f"[STT/openai] 트랜스크립션 실패: {type(e).__name__}: {e}")
+            return ""
+
+
 class WhisperSTT:
     def __init__(self):
         from faster_whisper import WhisperModel
@@ -225,45 +270,66 @@ class WhisperSTT:
             except ImportError:
                 device = "cpu"
         compute_type = "float16" if device == "cuda" else "int8"
-        print(f"      Whisper 로딩: {cfg.whisper_model} ({device}/{compute_type})")
+        print(f"      STT 백엔드: faster-whisper {cfg.whisper_model} ({device}/{compute_type})")
         self.model = WhisperModel(
             cfg.whisper_model, device=device, compute_type=compute_type
         )
+        # 사이클 #27 (옵션 C) — Silero VAD 사전 로드.
+        # faster-whisper 가 내부적으로 silero 를 호출하므로 모델 캐시를 워밍해두면
+        # 첫 트랜스크립션 시 추가 다운로드 지연이 사라진다.
+        self._silero = None
+        if cfg.use_silero_vad:
+            try:
+                from silero_vad import load_silero_vad
+                self._silero = load_silero_vad()
+                print("      Silero VAD 사전로드 OK")
+            except Exception as e:
+                print(f"      Silero VAD 로드 스킵: {type(e).__name__}: {e}")
 
     def transcribe(self, audio, extra_prompt: str = "") -> str:
         """numpy 배열 또는 파일 경로(str) 모두 지원 (faster-whisper 가 내부적으로 디코드).
 
-        한국어 인식 품질을 끌어올리는 옵션:
-        - initial_prompt: 한국어 패턴/호출어 힌트 (오인식 감소). 사이클 #17 에서
-          호출자가 사용자별 어휘를 덧붙일 수 있도록 `extra_prompt` 로 동적 주입.
-        - temperature=0.0: 결정적 디코딩 (환각 감소)
-        - condition_on_previous_text=False: 이전 발화에 휘둘리는 환각 차단
-        - compression_ratio_threshold/no_speech_threshold: 무음/잡음 컷오프
-        - vad_parameters: 짧은 무음에서 자르지 않게 완화
+        사이클 #27 (옵션 1·C) 강화:
+        - beam_size·VAD threshold/min_silence/speech_pad 모두 cfg 로 외부화
+        - compression_ratio·no_speech threshold 보수화 → 환각 감소
         """
-        base_prompt = (cfg.whisper_initial_prompt or "").strip()
-        extra = (extra_prompt or "").strip()
-        if base_prompt and extra:
-            initial = base_prompt + " " + extra
-        else:
-            initial = extra or base_prompt
+        initial = _build_stt_prompt(extra_prompt)
         try:
             segments, _ = self.model.transcribe(
                 audio,
                 language=cfg.whisper_language,
-                beam_size=5,
+                beam_size=cfg.whisper_beam_size,
                 vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 500},
+                vad_parameters={
+                    "threshold": cfg.whisper_vad_threshold,
+                    "min_silence_duration_ms": cfg.whisper_min_silence_ms,
+                    "speech_pad_ms": cfg.whisper_speech_pad_ms,
+                },
                 initial_prompt=initial or None,
                 temperature=0.0,
                 condition_on_previous_text=False,
-                compression_ratio_threshold=2.4,
-                no_speech_threshold=0.5,
+                compression_ratio_threshold=cfg.whisper_compression_ratio,
+                no_speech_threshold=cfg.whisper_no_speech_threshold,
             )
             return " ".join(s.text for s in segments).strip()
         except Exception as e:
             print(f"[STT] 트랜스크립션 실패: {type(e).__name__}: {e}")
             return ""
+
+
+def make_stt():
+    """사이클 #27 — STT 백엔드 라우팅. cfg.stt_backend 와 OPENAI_API_KEY 유무에
+    따라 OpenAIWhisperSTT 또는 WhisperSTT 를 반환. OpenAI 초기화 실패 시
+    안전하게 faster-whisper 로 폴백한다.
+    """
+    backend = (cfg.stt_backend or "auto").lower()
+    has_openai = bool(os.getenv("OPENAI_API_KEY"))
+    if backend == "openai" or (backend == "auto" and has_openai):
+        try:
+            return OpenAIWhisperSTT()
+        except Exception as e:
+            print(f"      OpenAI STT 초기화 실패 → faster-whisper 폴백: {e}")
+    return WhisperSTT()
 
 
 # ============================================================

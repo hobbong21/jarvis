@@ -26,7 +26,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .audio_io import EdgeTTS, WhisperSTT
+from .audio_io import EdgeTTS, WhisperSTT, OpenAIWhisperSTT, make_stt
 from .brain import Brain, _friendly_error, _model_switch_friendly
 from .config import cfg
 from .emotion import Emotion
@@ -102,15 +102,16 @@ def _split_first_sentence(text: str) -> Tuple[str, str]:
     return text, ""
 
 
-# STT: Whisper 는 모델 다운로드가 오래 걸릴 수 있으므로 백그라운드 스레드로 로드
-STT: Optional["WhisperSTT"] = None
+# STT: 사이클 #27 — make_stt() 가 OpenAI Whisper API ▸ faster-whisper 폴백을 자동 선택.
+# 로컬 모델은 다운로드가 오래 걸릴 수 있으므로 백그라운드 스레드로 로드.
+STT = None  # type: Optional[object]
 
 def _load_stt():
     global STT
-    print("[1/3] STT (Whisper) — 백그라운드 로딩 시작 ...")
+    print("[1/3] STT — 백그라운드 로딩 시작 ...")
     try:
-        STT = WhisperSTT()
-        print("      Whisper 모델 준비 완료.")
+        STT = make_stt()
+        print("      STT 준비 완료.")
     except Exception as e:
         print(f"      STT 초기화 실패: {e}")
 

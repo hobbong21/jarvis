@@ -96,6 +96,15 @@ class Config:
     wake_keyword_path: str = os.getenv("SARVIS_KEYWORD_PATH", "")
 
     # ============ STT ============
+    # 사이클 #27 (옵션 D) — STT 백엔드 라우팅.
+    #   "auto"           : OPENAI_API_KEY 있으면 OpenAI, 없으면 faster-whisper
+    #   "openai"         : OpenAI Whisper API 강제 (키 없으면 실패)
+    #   "faster_whisper" : 로컬 faster-whisper 강제 (브라우저 폴백 경로 전용)
+    # Web Speech API 마이그레이션 후 Whisper 는 Firefox 등 미지원 브라우저에서만
+    # 호출되므로, OpenAI API 폴백이 가장 비용·품질 균형이 좋다.
+    stt_backend: str = os.getenv("SARVIS_STT_BACKEND", "auto").lower()
+    openai_stt_model: str = os.getenv("SARVIS_OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
+
     # Whisper 모델: tiny / base / small / medium / large-v3 (faster-whisper)
     # 한국어 정확도는 medium 부터 크게 향상. 기본 medium, env 로 오버라이드 가능.
     whisper_model: str = os.getenv("SARVIS_WHISPER_MODEL", "medium")
@@ -106,6 +115,17 @@ class Config:
         "SARVIS_WHISPER_PROMPT",
         "다음은 한국어 자연어 대화입니다. 사비스, 안녕하세요, 알려줘, 부탁해, 감사합니다.",
     )
+    # 사이클 #27 (옵션 1·C) — faster-whisper transcribe 옵션 강화 (env 오버라이드).
+    # beam_size↑·VAD min_silence↓·speech_pad↑·threshold 보수화 → 한국어 정확도 향상.
+    whisper_beam_size: int = int(os.getenv("SARVIS_WHISPER_BEAM_SIZE", "10"))
+    whisper_min_silence_ms: int = int(os.getenv("SARVIS_WHISPER_MIN_SILENCE_MS", "300"))
+    whisper_speech_pad_ms: int = int(os.getenv("SARVIS_WHISPER_SPEECH_PAD_MS", "200"))
+    whisper_vad_threshold: float = float(os.getenv("SARVIS_WHISPER_VAD_THRESHOLD", "0.4"))
+    whisper_compression_ratio: float = float(os.getenv("SARVIS_WHISPER_COMPRESSION_RATIO", "1.8"))
+    whisper_no_speech_threshold: float = float(os.getenv("SARVIS_WHISPER_NO_SPEECH_THRESHOLD", "0.6"))
+    # 사이클 #27 (옵션 C) — Silero VAD 사전 로드 (faster-whisper 의 vad_filter 가
+    # 이미 silero 를 사용하지만, 명시적 로드로 모델 캐시 워밍 + 향후 사전 분할 사용).
+    use_silero_vad: bool = os.getenv("SARVIS_USE_SILERO_VAD", "1") == "1"
     silence_threshold: float = 0.012
     silence_duration: float = 1.5
     max_recording: float = 15.0
