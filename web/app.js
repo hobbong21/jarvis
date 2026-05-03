@@ -14,10 +14,18 @@
   const memoryMini = $('memory-mini');
   const memoryMiniStatus = $('memory-mini-status');
   let memoryMiniTimer = null;
+  // 사이클 #19 — 감정 → 한국어 레이블 + 글리프. UI 가 더 자연스럽게 표현.
   const EMOTION_GLYPHS = {
-    neutral: '😐', happy: '😊', surprised: '😲', thinking: '🤔',
-    speaking: '🗣️', listening: '👂', sad: '😔', angry: '😠', error: '⚠️',
+    neutral: '◔', happy: '✦', surprised: '✧', thinking: '◌',
+    speaking: '◉', listening: '◍', sad: '◐', angry: '◈', error: '◇',
+    concerned: '◍', alert: '◈',
   };
+  const EMOTION_LABELS_KO = {
+    neutral: '차분함', happy: '기쁨', surprised: '놀람', thinking: '생각 중',
+    speaking: '말하는 중', listening: '듣는 중', sad: '안타까움', angry: '경계',
+    error: '오류', concerned: '걱정', alert: '주의',
+  };
+  const koEmotionLabel = (k) => EMOTION_LABELS_KO[(k || 'neutral').toLowerCase()] || k || '차분함';
   function flashMemory(kind, label, ms) {
     if (!memoryMini) return;
     if (memoryMiniTimer) { clearTimeout(memoryMiniTimer); memoryMiniTimer = null; }
@@ -314,19 +322,19 @@
         beginCompareBubbles(m.sources || ['claude', 'openai']);
         setOrbEmotion('claude', 'thinking');
         setOrbEmotion('openai', 'thinking');
-        setSubEmotion('claude', 'THINKING');
-        setSubEmotion('openai', 'THINKING');
+        setSubEmotion('claude', koEmotionLabel('thinking'));
+        setSubEmotion('openai', koEmotionLabel('thinking'));
         break;
       case 'compare_chunk':
         appendCompareChunk(m.source, m.text || '');
         // 첫 청크부터 speaking 으로 전환
         setOrbEmotion(m.source, 'speaking');
-        setSubEmotion(m.source, 'SPEAKING');
+        setSubEmotion(m.source, koEmotionLabel('speaking'));
         break;
       case 'compare_end':
         finalizeCompareBubble(m.source, m.text || '', m.emotion || 'neutral');
         setOrbEmotion(m.source, m.emotion || 'neutral');
-        setSubEmotion(m.source, (m.emotion || 'NEUTRAL').toUpperCase());
+        setSubEmotion(m.source, koEmotionLabel(m.emotion || 'neutral'));
         break;
       case 'compare_done':
         if (isMobile()) markTabBadge('chat');
@@ -413,8 +421,9 @@
     if (!emotionMini) return;
     const key = (name || 'neutral').toLowerCase();
     emotionMini.dataset.emotion = key;
-    if (emotionMiniText) emotionMiniText.textContent = key.toUpperCase();
-    if (emotionMiniGlyph) emotionMiniGlyph.textContent = EMOTION_GLYPHS[key] || '😐';
+    // 사이클 #19: 한국어 자연어 레이블 (UPPERCASE 영문 → 부드러운 한국어).
+    if (emotionMiniText) emotionMiniText.textContent = EMOTION_LABELS_KO[key] || key;
+    if (emotionMiniGlyph) emotionMiniGlyph.textContent = EMOTION_GLYPHS[key] || '◔';
   }
 
   function setEmotion(name) {
@@ -427,7 +436,8 @@
     // 헤더가 좁아 표시 안 함 (orb-pane 의 sub-emotion 라벨이 대신함).
     if (compareMode) return;
     mainOrb.setEmotion(name);
-    emotionLabel.textContent = (name || 'neutral').toUpperCase();
+    const key = (name || 'neutral').toLowerCase();
+    emotionLabel.textContent = EMOTION_LABELS_KO[key] || key;
     updateEmotionMini(name);
   }
 
@@ -453,8 +463,8 @@
       // 진입 시 둘 다 neutral 로 초기화
       if (mainOrb) mainOrb.setEmotion('neutral');
       if (secondOrb) secondOrb.setEmotion('neutral');
-      setSubEmotion('claude', 'NEUTRAL');
-      setSubEmotion('openai', 'NEUTRAL');
+      setSubEmotion('claude', koEmotionLabel('neutral'));
+      setSubEmotion('openai', koEmotionLabel('neutral'));
     }
   }
 
@@ -932,7 +942,7 @@
       dot.style.cssText = `
         position:absolute; top:6px; right:calc(50% - 14px);
         width:8px; height:8px; border-radius:50%;
-        background:var(--accent); box-shadow:0 0 6px rgba(0,217,255,0.8);
+        background:var(--accent); box-shadow:0 0 6px rgba(201,100,66,0.8);
       `;
       btn.style.position = 'relative';
       btn.appendChild(dot);
@@ -1558,12 +1568,12 @@
       const bw = (right - left) * scaleX;
       const bh = (bottom - top) * scaleY;
       const grad = ctx.createLinearGradient(x, y, x, y + bh);
-      grad.addColorStop(0, 'rgba(0,217,255,0.9)');
-      grad.addColorStop(1, 'rgba(0,217,255,0.3)');
+      grad.addColorStop(0, 'rgba(201,100,66,0.9)');
+      grad.addColorStop(1, 'rgba(201,100,66,0.3)');
       ctx.strokeStyle = grad;
       ctx.strokeRect(x, y, bw, bh);
       const cs = Math.min(bw, bh) * 0.18;
-      ctx.strokeStyle = '#00d9ff';
+      ctx.strokeStyle = '#C96442';
       ctx.lineWidth = 2.5;
       [ [x, y, cs, 0, cs, 0],
         [x + bw, y, -cs, 0, -cs, 0],
@@ -1577,9 +1587,9 @@
         ctx.stroke();
       });
       const label = name || `FACE ${idx + 1}`;
-      ctx.fillStyle = 'rgba(0,217,255,0.85)';
+      ctx.fillStyle = 'rgba(201,100,66,0.85)';
       ctx.fillRect(x, y - 16, ctx.measureText(label).width + 8, 16);
-      ctx.fillStyle = '#03070c';
+      ctx.fillStyle = '#FAF9F7';
       ctx.fillText(label, x + 4, y);
     });
     if (_faceBoxTimeout) clearTimeout(_faceBoxTimeout);

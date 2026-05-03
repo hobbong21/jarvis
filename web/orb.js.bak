@@ -1,21 +1,13 @@
 /* ===== SARVIS Emotion Orb — Canvas2D, multi-style ===== */
 
-/* ── 사이클 #19: Claude 스타일 따뜻한 감정 팔레트 ───────────────
- * 다크 사이파이 네온 → muted, 자연스러운 톤. 각 감정은 의미적으로 매칭되는
- * 색상 + 펄스 속도를 가진다 (예: thinking=violet/slow, listening=warm amber).
- * 배경이 라이트(#FAF9F7) 라서 too-bright 컬러는 안 보이므로, 채도/명도 적당히. */
 const PALETTES = {
-  neutral:   { primary: [201, 100, 66],  glow: [232, 165, 130], pulseRate: 0.4, intensity: 0.35 },
-  listening: { primary: [217, 164, 65],  glow: [240, 200, 110], pulseRate: 1.5, intensity: 0.65 },
-  thinking:  { primary: [139, 122, 184], glow: [180, 165, 215], pulseRate: 1.8, intensity: 0.75 },
-  speaking:  { primary: [106, 144, 121], glow: [160, 195, 175], pulseRate: 2.6, intensity: 0.95 },
-  happy:     { primary: [217, 164, 65],  glow: [245, 215, 130], pulseRate: 1.2, intensity: 0.7  },
-  surprised: { primary: [217, 164, 65],  glow: [245, 215, 130], pulseRate: 2.0, intensity: 0.85 },
-  sad:       { primary: [91, 123, 160],  glow: [140, 170, 200], pulseRate: 0.6, intensity: 0.35 },
-  angry:     { primary: [200, 74, 63],   glow: [225, 130, 120], pulseRate: 2.4, intensity: 0.9  },
-  concerned: { primary: [139, 122, 184], glow: [180, 165, 215], pulseRate: 0.8, intensity: 0.45 },
-  alert:     { primary: [200, 74, 63],   glow: [225, 130, 120], pulseRate: 2.8, intensity: 1.0  },
-  error:     { primary: [200, 74, 63],   glow: [225, 130, 120], pulseRate: 2.4, intensity: 0.9  },
+  neutral:   { primary: [40, 140, 220],  glow: [0, 180, 255],   pulseRate: 0.5, intensity: 0.35 },
+  listening: { primary: [255, 170, 60],  glow: [255, 200, 80],  pulseRate: 1.6, intensity: 0.65 },
+  thinking:  { primary: [0, 200, 255],   glow: [50, 220, 255],  pulseRate: 2.4, intensity: 0.9  },
+  speaking:  { primary: [100, 240, 255], glow: [150, 255, 255], pulseRate: 3.2, intensity: 1.0  },
+  happy:     { primary: [100, 255, 180], glow: [160, 255, 210], pulseRate: 1.4, intensity: 0.75 },
+  concerned: { primary: [180, 100, 255], glow: [220, 160, 255], pulseRate: 1.0, intensity: 0.5  },
+  alert:     { primary: [255, 80, 100],  glow: [255, 140, 160], pulseRate: 2.8, intensity: 1.0  },
 };
 
 const ORB_STYLES = ['orbital', 'pulse', 'reactor', 'neural'];
