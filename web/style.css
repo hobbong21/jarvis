@@ -1831,6 +1831,9 @@ input, select { outline: none; }
   border: 1px solid var(--border-soft);
   border-radius: 14px; box-shadow: var(--shadow-lg);
 }
+/* HTML `hidden` 글로벌 속성이 .prod-panels 의 display:flex 에 의해
+   덮어써지지 않도록 강제. 메인 화면에서 dock 카드가 자동 노출되는 회귀 방지. */
+.prod-panels[hidden] { display: none !important; }
 .prod-card {
   background: var(--bg-panel); border: 1px solid var(--border-soft);
   border-radius: 10px; padding: 10px 12px;
