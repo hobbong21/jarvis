@@ -43,3 +43,8 @@ run = ["python", "-m", "sarvis.server"]
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 120000
+
+[userenv]
+
+[userenv.production]
+SARVIS_WHISPER_MODEL = "tiny"
