@@ -2333,6 +2333,14 @@
         case "ha_blocked":
           haStatus.textContent = "차단됨: " + (msg.message || "Kill Switch 활성");
           break;
+        case "ha_diagnostician_result":
+          if (!msg.ok) { haStatus.textContent = "Diagnostician: " + (msg.message || "실패"); break; }
+          haStatus.textContent = `Diagnostician 완료 — 진단 ${msg.count}건`;
+          haRenderDiagnoses(msg.diagnoses || []);
+          break;
+        case "ha_diagnoses_for_issue":
+          if (msg.ok) haRenderDiagnoses(msg.diagnoses || []);
+          break;
       }
     });
     // 초기 todo 목록 + My Sarvis 로드.
@@ -2374,14 +2382,39 @@
   }
   function haRenderDiary(d) {
     if (!d.ok && d.message) { haStatus.textContent = d.message; return; }
-    haStatus.textContent = `${d.stage || "S1"} · ${d.autonomy_level || "L0"} · ` +
+    haStatus.textContent = `${d.stage || "S2"} · ${d.autonomy_level || "L1"} · ` +
       `활성 ${(d.active_agents||[]).join(", ")}`;
     haRenderIssues(d.issues || []);
+    if ((d.diagnoses || []).length) haRenderDiagnoses(d.diagnoses);
+  }
+  function haRenderDiagnoses(diags) {
+    if (!haIssuesEl || !diags.length) return;
+    const html = diags.slice(0, 10).map(d => {
+      const root = escapeMs(d.root_cause || "(미정)");
+      const conf = (Number(d.confidence||0)*100).toFixed(0)+"%";
+      const rec = escapeMs(d.recommended_action || "");
+      const hyps = (d.hypotheses || []).slice(0, 3).map(h =>
+        `<li>${escapeMs(h.name)} — ${(Number(h.posterior||h.prior||0)*100).toFixed(0)}%` +
+        (h.source === "llm" ? " 🤖" : "") + "</li>").join("");
+      const whys = (d.five_whys || []).slice(0, 5).map(w =>
+        `<li>${escapeMs(w)}</li>`).join("");
+      return `<div class="ms-row">🔎 <b>${escapeMs(d.issue_id||"")}</b> — ${root}` +
+             ` <small>(신뢰도 ${conf}, ${escapeMs(d.method||"")})</small>` +
+             (whys ? `<details><summary>5 Whys</summary><ol class="ms-neg">${whys}</ol></details>` : "") +
+             (hyps ? `<ul class="ms-neg">${hyps}</ul>` : "") +
+             (rec ? `<small>다음: ${rec}</small>` : "") + "</div>";
+    }).join("");
+    haIssuesEl.insertAdjacentHTML("beforeend", html);
   }
   if (haObsBtn) haObsBtn.addEventListener("click", () => {
     const days = Number(haWindowSel?.value || 7);
     haStatus.textContent = "Observer 실행 중…";
     sendMsg({ type: "ha_run_observer", window_days: days });
+  });
+  const haDiagBtn = $("ha-diag-btn");
+  if (haDiagBtn) haDiagBtn.addEventListener("click", () => {
+    haStatus.textContent = "Diagnostician 실행 중…";
+    sendMsg({ type: "ha_run_diagnostician", limit: 20 });
   });
   if (haRefreshBtn) haRefreshBtn.addEventListener("click", () =>
     sendMsg({ type: "ha_growth_diary", limit: 10 }));

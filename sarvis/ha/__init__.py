@@ -14,9 +14,11 @@ from .safety import (
 )
 from .observer import Observer
 from .reporter import Reporter
+from .diagnostician import Diagnostician, DiagnosisResult
 
 __all__ = [
     "HAMessage", "HAAgent", "sign_payload", "AGENT_NAMES",
     "is_kill_switch_on", "activate_kill_switch", "deactivate_kill_switch",
     "KillSwitchActivated", "Observer", "Reporter",
+    "Diagnostician", "DiagnosisResult",
 ]

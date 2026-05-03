@@ -1,12 +1,42 @@
 # SARVIS — 개발 결과 보고서
 
 > 작성일: 2026-05-03
-> 대상 사이클: #18 ~ #23 (사용자 자율 진행 모드)
+> 대상 사이클: #18 ~ #24 (사용자 자율 진행 모드)
 > 기획서: `attached_assets/Sarvis_기획서_및_개발요구사항_*.docx` (80 페이지, 13개 기능 F-01 ~ F-13)
 > 보조 기획서 (사이클 #23~): `attached_assets/Sarvis_Harness_Agent_기획서_*.docx`
 > (HA v1.0, 16장 — 6대 에이전트 + Orchestrator + Meta-Evaluator)
 
-## 0. 사이클 #23 — HA Stage S1 (Read-Only) 요약 (이번 사이클)
+## 0a. 사이클 #24 — HA Stage S2 (Diagnostician, L1) 요약 (이번 사이클)
+
+Observer 가 만든 `ha_issues(status='open')` 를 입력으로, **5 Whys + 베이지안
+가설 랭킹** 휴리스틱(+옵션 LLM)으로 근본원인·가설 후보·권장 다음 액션을
+첨부한다. 변경 적용은 여전히 없음 (L1 = Diagnose-only).
+
+- **활성 에이전트** (3/8): Observer, **Diagnostician (신규)**, Reporter.
+- **자율 등급**: L1 (Diagnose-only).
+- **신규 모듈**: `sarvis/ha/diagnostician.py` (범주별 룰 트리 5종 +
+  Bayesian-풍 사후 확률 정규화 + 옵션 LLM 가설 보강 + Reporter emit).
+- **메모리**: `ha_diagnoses` 테이블 + 5 메서드 (`ha_diagnosis_insert`,
+  `ha_diagnoses_for_issue`, `ha_diagnoses_recent`, `ha_issues_open`,
+  `ha_issue_set_status`). 상태 전이 `open → diagnosed`.
+- **WS 2종 추가**: `ha_run_diagnostician`, `ha_diagnoses_for_issue`. 인증
+  게이트 + Kill Switch 게이트 동일 적용. Reporter One-Pager 자동 갱신
+  (진단 첨부된 이슈에 한해).
+- **UI**: "Diagnostician" 버튼 + 가설/근본원인/권장 액션 렌더러 추가.
+  Reporter `## Diagnosis` 섹션이 ha_diagnoses 에서 자동 채워짐.
+- **신규 테스트 17건**: Diagnostician 단위 11 + WS 2 + 5 Whys 1급 산출물 2
+  + DB append-only 트리거 (ha_messages/ha_diagnoses) 2. **회귀 674/674
+  통과** (이전 657 → +17).
+- **안전**: `_FORBIDDEN_WRITE` 7종 그대로 적용 + DB 레벨 append-only
+  트리거(`trg_ha_{messages,diagnoses}_no_{update,delete}`)로 감사 무결성
+  이중 보장. ha_kill_switch_log 는 open/close 페어 (UPDATE 설계상 필요)
+  라 트리거 제외 — 주석으로 명시.
+- **5 Whys 1급 산출물**: 카테고리별 5단계 인과 사슬을 룰 트리에 정의 →
+  `DiagnosisResult.five_whys` 필드 + `ha_diagnoses.five_whys_json` 영속
+  + `to_payload()` 직렬화 + Reporter "5 Whys 인과 사슬" 섹션 + UI
+  `<details>` 토글로 노출.
+
+## 0b. 사이클 #23 — HA Stage S1 (Read-Only) 요약
 
 새 첨부 보조 기획서를 SARVIS 단일 주인 환경에 맞게 축소 적용. 자율 진화
 시스템의 첫 슬라이스를 다음과 같이 구현:

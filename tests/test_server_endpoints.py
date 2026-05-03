@@ -1890,8 +1890,9 @@ class HAWebSocketTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(d)
                 self.assertTrue(d.get("ok"))
-                self.assertIn("S1", d["stage"])
-                self.assertEqual(d["active_agents"], ["Observer", "Reporter"])
+                self.assertIn("S2", d["stage"])
+                self.assertEqual(d["active_agents"],
+                                 ["Observer", "Diagnostician", "Reporter"])
 
     def test_ws_ha_run_observer_returns_issues(self):
         with TestClient(server.app) as client:
@@ -1956,6 +1957,43 @@ class HAWebSocketTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(r2)
                 self.assertFalse(r2["active"])
+
+    def test_ws_ha_run_diagnostician(self):
+        # Observer 가 만든 issue 를 Diagnostician 이 진단해 결과 반환.
+        # 빈 트래픽 1일 윈도우 → silence 카드 1건 → 진단 1건.
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({
+                    "type": "ha_run_observer", "window_days": 1,
+                }))
+                _drain_until(
+                    ws, lambda o: o.get("type") == "ha_observer_result",
+                    max_msgs=40,
+                )
+                ws.send_text(json.dumps({
+                    "type": "ha_run_diagnostician", "limit": 5,
+                }))
+                r, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_diagnostician_result",
+                    max_msgs=40,
+                )
+                self.assertIsNotNone(r)
+                self.assertTrue(r.get("ok"))
+                self.assertGreaterEqual(r["count"], 0)
+                self.assertIsInstance(r["diagnoses"], list)
+
+    def test_ws_ha_diagnoses_for_issue_missing_id(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({"type": "ha_diagnoses_for_issue"}))
+                r, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_diagnoses_for_issue",
+                    max_msgs=20,
+                )
+                self.assertIsNotNone(r)
+                self.assertFalse(r["ok"])
 
     def test_ws_ha_issues_list(self):
         with TestClient(server.app) as client:

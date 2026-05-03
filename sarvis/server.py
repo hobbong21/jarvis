@@ -159,6 +159,7 @@ TODOS = TodoStore()
 from .ha import (
     Observer as _HAObserver,
     Reporter as _HAReporter,
+    Diagnostician as _HADiagnostician,  # 사이클 #24
     is_kill_switch_on as _ha_kill_switch_on,
     activate_kill_switch as _ha_kill_switch_activate,
     deactivate_kill_switch as _ha_kill_switch_deactivate,
@@ -1955,6 +1956,7 @@ async def websocket_endpoint(ws: WebSocket):
                 "feedback_submit", "my_sarvis_summary",  # 사이클 #22
                 "ha_run_observer", "ha_issues_list", "ha_kill_switch",
                 "ha_optout", "ha_growth_diary",          # 사이클 #23
+                "ha_run_diagnostician", "ha_diagnoses_for_issue",  # 사이클 #24
             } and OWNER_AUTH.is_enrolled() and not _is_authed():
                 await emit(type="error", message="주인 인증이 필요합니다.")
                 continue
@@ -2011,7 +2013,8 @@ async def websocket_endpoint(ws: WebSocket):
             # ── 사이클 #23 (HA Stage S1) — Harness Agent ───────────────
             # 모든 ha_* 핸들러는 Kill Switch 활성 시 즉시 거부 + stdout 로그.
             elif mtype in {"ha_run_observer", "ha_issues_list",
-                           "ha_kill_switch", "ha_optout", "ha_growth_diary"}:
+                           "ha_kill_switch", "ha_optout", "ha_growth_diary",
+                           "ha_run_diagnostician", "ha_diagnoses_for_issue"}:
                 if mtype != "ha_kill_switch" and _ha_kill_switch_on():
                     print(f"[HA] kill_switch active — {mtype} 거부")
                     await emit(
@@ -2111,6 +2114,72 @@ async def websocket_endpoint(ws: WebSocket):
                         print(f"[HA] optout 실패: {ex!r}")
                         await emit(type="ha_optout", ok=False,
                                    message="옵트아웃 토글 실패")
+
+                elif mtype == "ha_run_diagnostician":
+                    try:
+                        limit = int(data.get("limit") or 20)
+                    except (TypeError, ValueError):
+                        limit = 20
+                    use_llm = bool(data.get("use_llm", False))
+                    try:
+                        diag = _HADiagnostician(
+                            memory=session.memory,
+                            brain=session.brain if use_llm else None,
+                        )
+                        results = await asyncio.wait_for(
+                            asyncio.to_thread(diag.run_pending, limit),
+                            timeout=15.0,
+                        )
+                        # Reporter 보강 — 진단 첨부된 이슈에 대해 One-Pager 갱신.
+                        rep = _HAReporter(memory=session.memory)
+                        for r in results:
+                            try:
+                                issues = await asyncio.to_thread(
+                                    session.memory.ha_issues_recent, 50,
+                                )
+                                match = next(
+                                    (i for i in issues
+                                     if i.get("issue_id") == r.issue_id),
+                                    None,
+                                )
+                                if match:
+                                    rep.write_one_pager(match)
+                            except Exception as ex:
+                                print(f"[HA] reporter 보강 실패: {ex!r}")
+                        await emit(
+                            type="ha_diagnostician_result",
+                            ok=True,
+                            count=len(results),
+                            diagnoses=[r.to_payload() for r in results],
+                        )
+                    except _HAKillSwitchActivated as ex:
+                        await emit(type="ha_blocked", request=mtype,
+                                   message=str(ex))
+                    except asyncio.TimeoutError:
+                        await emit(type="ha_diagnostician_result", ok=False,
+                                   message="Diagnostician 시간 초과 (15s)")
+                    except Exception as ex:
+                        print(f"[HA] diagnostician 실패: {ex!r}")
+                        await emit(type="ha_diagnostician_result", ok=False,
+                                   message=f"Diagnostician 실패: {ex}")
+
+                elif mtype == "ha_diagnoses_for_issue":
+                    issue_id = (data.get("issue_id") or "").strip()
+                    if not issue_id:
+                        await emit(type="ha_diagnoses_for_issue", ok=False,
+                                   message="issue_id 필요")
+                        continue
+                    try:
+                        limit = int(data.get("limit") or 5)
+                    except (TypeError, ValueError):
+                        limit = 5
+                    diags = await asyncio.to_thread(
+                        session.memory.ha_diagnoses_for_issue,
+                        issue_id, limit,
+                    )
+                    await emit(type="ha_diagnoses_for_issue", ok=True,
+                               issue_id=issue_id, count=len(diags),
+                               diagnoses=diags)
 
                 elif mtype == "ha_growth_diary":
                     try:

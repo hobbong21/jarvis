@@ -233,9 +233,10 @@ class ReporterTests(unittest.TestCase):
     def test_growth_diary_returns_stage_info(self):
         rep = self.Reporter(memory=self.mem)
         d = rep.growth_diary(limit=5)
-        self.assertIn("S1", d["stage"])
-        self.assertIn("L0", d["autonomy_level"])
-        self.assertEqual(d["active_agents"], ["Observer", "Reporter"])
+        self.assertIn("S2", d["stage"])
+        self.assertIn("L1", d["autonomy_level"])
+        self.assertEqual(d["active_agents"],
+                         ["Observer", "Diagnostician", "Reporter"])
         self.assertIsInstance(d["issues"], list)
         self.assertIsInstance(d["messages"], list)
 

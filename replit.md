@@ -2,7 +2,7 @@
 
 A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning → Model Selection → Task Execution → Response Generation). Features face recognition, voice interaction, and tool-augmented intelligence.
 
-## 기획서 업데이트 — v1.5 (2026-05-03) — Harness Agent 보조 문서 우선
+## 기획서 업데이트 — v1.6 (2026-05-03) — Harness Agent 보조 문서 우선
 
 **상위 문서** (Ch.17 도구) `attached_assets/Sarvis_기획서_및_개발요구사항_1777803382509.docx`
 는 그대로 유효. 추가로 **보조 문서** `attached_assets/Sarvis_Harness_Agent_기획서_1777804423173.docx`
@@ -18,8 +18,8 @@ Evaluators, Humble by Default.
 
 | 사이클 | Stage | 자율 등급 | 포함 에이전트 | 진입 기준(다음 단계) |
 |---|---|---|---|---|
-| **#23 (현재)** | S1 Read-Only | L0 | Observer + Reporter(미니) | Observer 정확도 ≥ 85% |
-| #24 | S2 Suggest | L1 | + Diagnostician + Reporter(전체) | 보고 승인률 ≥ 70% |
+| #23 | S1 Read-Only | L0 | Observer + Reporter(미니) | Observer 정확도 ≥ 85% |
+| **#24 (현재)** | S2 Diagnose | L1 | + Diagnostician + Reporter(전체) | 보고 승인률 ≥ 70% |
 | #25 | S3 Improve | L1 (모두 사람 승인) | + Strategist + Improver + Validator | 회귀율 ≤ 5% |
 | #26 | S4 Auto-Suggest | L2 (가역 변경 자동) | (동일) | 30일 자동 롤백 ≤ 2건 |
 | #27 | S5 Constrained Auto | L3 | + 자율성 등급 정책 | 6개월 + 외부 감사 |
@@ -33,6 +33,28 @@ Evaluators, Humble by Default.
 HA 자기 코드 수정, 사용자 데이터 외부 송출, 결제·삭제 직접 실행, Sarvis 안전
 프롬프트 섹션 수정, 자기 모니터링/감사/롤백 비활성화, Meta-Evaluator 입출력
 영향, Kill Switch 우회 — 모두 코드/권한 분리로 차단.
+
+## Cycle #24 — HA Stage S2 (Diagnostician, L1 — 진단까지)
+
+사이클 #23 의 Observer 가 만든 `ha_issues(status='open')` 를 입력으로,
+**5 Whys + 베이지안 가설 랭킹** 휴리스틱(+옵션 LLM)으로 근본원인·가설 후보·
+권장 다음 액션을 첨부. 변경 적용은 여전히 없음 (L1 = Diagnose-only).
+
+신규: `sarvis/ha/diagnostician.py`, Memory `ha_diagnoses` 테이블 + 5 메서드
+(`ha_diagnosis_insert`, `ha_diagnoses_for_issue`, `ha_diagnoses_recent`,
+`ha_issues_open`, `ha_issue_set_status`), WS 2종 (`ha_run_diagnostician`,
+`ha_diagnoses_for_issue`), UI "Diagnostician" 버튼 + 가설 렌더러,
+Reporter One-Pager `## Diagnosis` 섹션이 ha_diagnoses 에서 자동 채움.
+범주별 룰 트리 5종 (spike/drift/anomaly/cost/underutilization) + fallback.
+status 전이: `open → diagnosed`. emit: Diagnostician → Reporter.
+
+P0 보완 (architect 1차): five_whys 1급 산출물(DiagnosisResult/DB/Reporter/
+UI) + ha_messages·ha_diagnoses BEFORE UPDATE/DELETE 트리거(RAISE ABORT)
+로 DB 레벨 append-only 강제. ha_kill_switch_log 는 open/close UPDATE
+설계상 트리거 제외(주석 명시).
+
+테스트 +17 (Diagnostician 13 + WS 2 + 5 Whys 2 + DB 트리거 2). 회귀
+**674/674 통과**.
 
 ## Cycle #23 — HA Stage S1 Read-Only (Observer + Reporter 미니)
 

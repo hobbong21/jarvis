@@ -14,7 +14,7 @@
 | 에이전트 | 역할 | 출력 | SARVIS 적용 우선순위 |
 |---|---|---|---|
 | **Observer** | 트레이스 수집·요약·이상 패턴 표시 | Issue Card | ⭐ Stage S1 (즉시) |
-| **Diagnostician** | 약점 근본 원인 추론 (5 Whys + Bayesian) | Diagnosis Report | Stage S2 |
+| **Diagnostician** | 약점 근본 원인 추론 (5 Whys + Bayesian) | Diagnosis Report | ⭐ Stage S2 (사이클 #24) |
 | **Strategist** | 변경 후보 다수 생성 (8 카테고리, Do Nothing 강제) | Strategy List | Stage S3 |
 | **Improver** | 전략을 실제 패치로 구체화 (PR 형식) | Patch + Before/After | Stage S3 |
 | **Validator** | 회귀 셋·섀도·Canary 검증, 다중 평가자 | Validation Report | Stage S3 (회귀만) |

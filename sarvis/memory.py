@@ -184,6 +184,39 @@ CREATE TABLE IF NOT EXISTS ha_optout (
     opted_out_at   REAL    NOT NULL
 );
 
+-- 사이클 #24 (HA Stage S2) — Diagnostician 진단 결과.
+CREATE TABLE IF NOT EXISTS ha_diagnoses (
+    diagnosis_id        TEXT    PRIMARY KEY,
+    issue_id            TEXT    NOT NULL REFERENCES ha_issues(issue_id) ON DELETE CASCADE,
+    hypotheses_json     TEXT    NOT NULL DEFAULT '[]',
+    root_cause          TEXT,
+    confidence          REAL    NOT NULL DEFAULT 0.5,
+    recommended_action  TEXT,
+    five_whys_json      TEXT    NOT NULL DEFAULT '[]',
+    method              TEXT    NOT NULL DEFAULT 'heuristic',
+    created_at          REAL    NOT NULL
+);
+
+-- 사이클 #24 (architect P0 보완) — append-only DB 강제 트리거.
+-- ha_messages / ha_diagnoses / ha_kill_switch_log 는 코드 규약뿐 아니라
+-- DB 레벨에서도 UPDATE/DELETE 를 차단해 감사 무결성을 보장한다.
+CREATE TRIGGER IF NOT EXISTS trg_ha_messages_no_update
+BEFORE UPDATE ON ha_messages
+BEGIN SELECT RAISE(ABORT, 'ha_messages is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_ha_messages_no_delete
+BEFORE DELETE ON ha_messages
+BEGIN SELECT RAISE(ABORT, 'ha_messages is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_ha_diagnoses_no_update
+BEFORE UPDATE ON ha_diagnoses
+BEGIN SELECT RAISE(ABORT, 'ha_diagnoses is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_ha_diagnoses_no_delete
+BEFORE DELETE ON ha_diagnoses
+BEGIN SELECT RAISE(ABORT, 'ha_diagnoses is append-only'); END;
+-- (참고) ha_kill_switch_log 는 open/close 페어 (deactivated_at UPDATE) 가
+-- 설계상 필요해 append-only 트리거 대상에서 제외. 대신 일단 기록된 행은
+-- 코드 경로에서만 갱신되며, DELETE 는 평소 일어나지 않는다.
+CREATE INDEX IF NOT EXISTS idx_ha_diagnoses_issue ON ha_diagnoses(issue_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ha_issues_status ON ha_issues(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ha_issues_created ON ha_issues(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ha_messages_created ON ha_messages(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, timestamp);
@@ -293,6 +326,33 @@ def _ensure_schema(path: str) -> None:
                 )""",
                 "CREATE INDEX IF NOT EXISTS idx_ha_issues_created ON ha_issues(created_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_ha_messages_created ON ha_messages(created_at DESC)",
+                # 사이클 #24
+                """CREATE TABLE IF NOT EXISTS ha_diagnoses (
+                    diagnosis_id TEXT PRIMARY KEY,
+                    issue_id TEXT NOT NULL REFERENCES ha_issues(issue_id) ON DELETE CASCADE,
+                    hypotheses_json TEXT NOT NULL DEFAULT '[]',
+                    root_cause TEXT,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    recommended_action TEXT,
+                    five_whys_json TEXT NOT NULL DEFAULT '[]',
+                    method TEXT NOT NULL DEFAULT 'heuristic',
+                    created_at REAL NOT NULL
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_ha_diagnoses_issue ON ha_diagnoses(issue_id, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_ha_issues_status ON ha_issues(status, created_at DESC)",
+                # append-only 강제 트리거 (architect P0 보완)
+                "CREATE TRIGGER IF NOT EXISTS trg_ha_messages_no_update "
+                "BEFORE UPDATE ON ha_messages BEGIN "
+                "SELECT RAISE(ABORT, 'ha_messages is append-only'); END",
+                "CREATE TRIGGER IF NOT EXISTS trg_ha_messages_no_delete "
+                "BEFORE DELETE ON ha_messages BEGIN "
+                "SELECT RAISE(ABORT, 'ha_messages is append-only'); END",
+                "CREATE TRIGGER IF NOT EXISTS trg_ha_diagnoses_no_update "
+                "BEFORE UPDATE ON ha_diagnoses BEGIN "
+                "SELECT RAISE(ABORT, 'ha_diagnoses is append-only'); END",
+                "CREATE TRIGGER IF NOT EXISTS trg_ha_diagnoses_no_delete "
+                "BEFORE DELETE ON ha_diagnoses BEGIN "
+                "SELECT RAISE(ABORT, 'ha_diagnoses is append-only'); END",
             ):
                 conn.execute(ddl)
             # 사이클 #16: knowledge 테이블이 없는 레거시 DB 도 자동 생성.
@@ -1136,6 +1196,103 @@ class Memory:
                 (time.time(),),
             )
             return cur.rowcount > 0
+
+    def ha_issues_open(self, limit: int = 20) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ha_issues WHERE status='open' "
+                "ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["evidence"] = json.loads(d.pop("evidence_json", "[]"))
+            except json.JSONDecodeError:
+                d["evidence"] = []
+            out.append(d)
+        return out
+
+    def ha_issue_set_status(self, issue_id: str, status: str) -> bool:
+        if status not in ("open", "diagnosed", "in_progress",
+                          "resolved", "rejected"):
+            raise ValueError(f"invalid status: {status}")
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                "UPDATE ha_issues SET status=? WHERE issue_id=?",
+                (status, issue_id),
+            )
+            return cur.rowcount > 0
+
+    def ha_diagnosis_insert(
+        self,
+        diagnosis_id: str,
+        issue_id: str,
+        hypotheses: List[Dict[str, Any]],
+        root_cause: Optional[str],
+        confidence: float,
+        recommended_action: Optional[str],
+        five_whys: Optional[List[str]] = None,
+        method: str = "heuristic",
+    ) -> None:
+        try:
+            conf = float(confidence)
+        except (TypeError, ValueError):
+            raise ValueError("invalid confidence")
+        if not (0.0 <= conf <= 1.0):
+            raise ValueError(f"confidence out of range: {conf}")
+        whys = list(five_whys or [])
+        with _conn_ctx(self.path) as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO ha_diagnoses(diagnosis_id, issue_id, "
+                    "hypotheses_json, root_cause, confidence, "
+                    "recommended_action, five_whys_json, method, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (diagnosis_id, issue_id,
+                     json.dumps(hypotheses, ensure_ascii=False),
+                     root_cause, conf, recommended_action,
+                     json.dumps(whys, ensure_ascii=False),
+                     method, time.time()),
+                )
+            except sqlite3.IntegrityError as ex:
+                raise ValueError(f"diagnosis_id 중복: {diagnosis_id}") from ex
+
+    def ha_diagnoses_for_issue(
+        self, issue_id: str, limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 50))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ha_diagnoses WHERE issue_id=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (issue_id, limit),
+            ).fetchall()
+        return [self._row_to_diagnosis(r) for r in rows]
+
+    def ha_diagnoses_recent(self, limit: int = 20) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ha_diagnoses ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_diagnosis(r) for r in rows]
+
+    @staticmethod
+    def _row_to_diagnosis(r) -> Dict[str, Any]:
+        d = dict(r)
+        try:
+            d["hypotheses"] = json.loads(d.pop("hypotheses_json", "[]"))
+        except json.JSONDecodeError:
+            d["hypotheses"] = []
+        try:
+            d["five_whys"] = json.loads(d.pop("five_whys_json", "[]"))
+        except (json.JSONDecodeError, KeyError):
+            d["five_whys"] = []
+        return d
 
     def ha_observer_input(
         self, window_sec: float = 24 * 3600.0, exclude_optout: bool = True,

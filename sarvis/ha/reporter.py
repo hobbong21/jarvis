@@ -36,6 +36,42 @@ class Reporter(HAAgent):
     # Stage S1: 보고서 파일 + ha_messages append 만. 코드/안전 프롬프트 수정 불가.
     write_scope = {"ha_messages", "reports_files"}
 
+    def _render_diagnosis_section(self, issue_id: str) -> str:
+        """이슈에 연결된 최신 Diagnosis 가 있으면 마크다운으로 렌더, 없으면 안내."""
+        if self.memory is None or not issue_id:
+            return ("- (Stage S1 — Diagnostician 미활성)\n"
+                    "- Stage S2 에서 5 Whys + 베이지안 가설 랭킹 자동 첨부.")
+        try:
+            diags = self.memory.ha_diagnoses_for_issue(issue_id, limit=1)
+        except Exception:
+            diags = []
+        if not diags:
+            return ("- (대기 중) 다음 진단 사이클에서 Diagnostician 자동 분석 예정.\n"
+                    "- 즉시 진단: WS `ha_run_diagnostician`.")
+        d = diags[0]
+        hyps = d.get("hypotheses") or []
+        lines = [f"- **근본원인 (1위 가설)**: {d.get('root_cause') or '(미정)'}",
+                 f"- **신뢰도**: {float(d.get('confidence') or 0):.2f}",
+                 f"- **방법**: `{d.get('method', 'heuristic')}`"]
+        if d.get("recommended_action"):
+            lines.append(f"- **권장 다음 액션**: {d['recommended_action']}")
+        whys = d.get("five_whys") or []
+        if whys:
+            lines.append("- **5 Whys 인과 사슬**:")
+            for w in whys[:5]:
+                lines.append(f"  - {w}")
+        if hyps:
+            lines.append("- **가설 랭킹**:")
+            for i, h in enumerate(hyps[:5], 1):
+                post = h.get("posterior", h.get("prior", 0.0))
+                tag = " 🤖" if h.get("source") == "llm" else ""
+                lines.append(
+                    f"  {i}. {h.get('name')} — 사후 {float(post):.2f}{tag}"
+                )
+                if h.get("check"):
+                    lines.append(f"     · 점검: {h['check']}")
+        return "\n".join(lines)
+
     def write_one_pager(self, issue: Dict[str, Any]) -> Path:
         """Issue Card → One-Pager 마크다운 파일 (기획서 §4.6.2)."""
         ensure_running()
@@ -59,8 +95,7 @@ class Reporter(HAAgent):
 - **증거 트레이스**: {len(issue.get('evidence', issue.get('evidence_traces', []) or []))} 건
 
 ## Diagnosis (진단)
-- Stage S1 에서는 진단을 수행하지 않음 (Observer 만 활성).
-- Stage S2 에서 Diagnostician 이 5 Whys + Bayesian 분석 예정.
+{self._render_diagnosis_section(issue.get("issue_id", ""))}
 
 ## Proposal (제안)
 - (해당 없음 — Read-Only 단계)
@@ -98,17 +133,23 @@ class Reporter(HAAgent):
         """
         ensure_running()
         if self.memory is None:
-            return {"issues": [], "messages": [], "stage": "S1"}
+            return {"issues": [], "messages": [], "stage": "S2",
+                    "diagnoses": []}
         issues = self.memory.ha_issues_recent(limit=limit)
         msgs = self.memory.ha_messages_recent(limit=limit)
+        try:
+            diagnoses = self.memory.ha_diagnoses_recent(limit=limit)
+        except Exception:
+            diagnoses = []
         return {
-            "stage": "S1 — Read-Only (Observer + Reporter)",
-            "autonomy_level": "L0 (Observe-only)",
+            "stage": "S2 — Diagnose (Observer + Diagnostician + Reporter)",
+            "autonomy_level": "L1 (Diagnose-only, 변경 적용 없음)",
             "issues": issues,
             "messages": msgs,
-            "active_agents": ["Observer", "Reporter"],
+            "diagnoses": diagnoses,
+            "active_agents": ["Observer", "Diagnostician", "Reporter"],
             "pending_agents": [
-                "Diagnostician (S2)", "Strategist (S3)",
-                "Improver (S3)", "Validator (S3)", "MetaEvaluator (S4)",
+                "Strategist (S3)", "Improver (S3)",
+                "Validator (S3)", "MetaEvaluator (S4)",
             ],
         }
