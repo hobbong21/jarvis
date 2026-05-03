@@ -13,6 +13,7 @@ from .emotion import Emotion
 from .tools import ToolExecutor
 from .ui import SarvisUI
 from .vision import VisionSystem
+from .action import ActionEvent, ActionLoop, ActionRecognizer
 
 
 class SarvisCore:
@@ -48,8 +49,23 @@ class SarvisCore:
         print("[5/6] TTS (Edge-TTS) ...")
         self.tts = EdgeTTS()
 
-        print("[6/6] 호출어 감지 (Porcupine) ...")
+        print("[6/7] 호출어 감지 (Porcupine) ...")
         self.wake = WakeWordListener(on_wake=self._on_wake)
+
+        print("[7/7] 행동인식 (MediaPipe + YOLO) ...")
+        self.action_recognizer: Optional[ActionRecognizer] = None
+        self.action_loop: Optional[ActionLoop] = None
+        if cfg.action_enabled:
+            try:
+                self.action_recognizer = ActionRecognizer(on_event=self._on_action_event)
+                self.action_loop = ActionLoop(self.action_recognizer)
+            except Exception as e:
+                print(f"      행동인식 초기화 실패 (계속 진행): {e}")
+        else:
+            print("      비활성 (SARVIS_ACTION_ENABLED=0)")
+        # 메인 60fps 루프 → 워커는 ~10fps. 매 6프레임마다 1회 submit.
+        self._action_skip_n = max(1, int(60 / max(1, cfg.action_target_fps)))
+        self._action_skip_i = 0
 
         # ===== UI에 노출되는 공유 상태 =====
         self.state = "idle"
@@ -85,10 +101,14 @@ class SarvisCore:
     # -------- 라이프사이클 --------
     def start(self):
         self.wake.start()
+        if self.action_loop is not None:
+            self.action_loop.start()
         threading.Thread(target=self._welcome, daemon=True).start()
 
     def shutdown(self):
         self.wake.stop()
+        if self.action_loop is not None:
+            self.action_loop.stop()
         self.vision.release()
 
     # -------- 콜백들 --------
@@ -107,6 +127,29 @@ class SarvisCore:
         if self._busy.is_set():
             return
         threading.Thread(target=self._handle_conversation, daemon=True).start()
+
+    def _on_action_event(self, ev: ActionEvent):
+        """행동인식 워커가 이벤트 발화 시 호출 (워커 스레드 컨텍스트)."""
+        if ev.kind == "wake_gesture":
+            # 손을 들면 호출어와 동일한 효과 (대화 진입).
+            print(f"[Action] 손 들기 감지 (conf={ev.confidence:.2f}) → 호출어 대체")
+            self._on_wake()
+        elif ev.kind == "fall_detected":
+            # 대화 중이라도 안전 알림은 발화. busy면 _respond 가 자체 가드함.
+            print(f"[Action] 넘어짐 감지 (conf={ev.confidence:.2f})")
+            if self._busy.is_set():
+                return  # 추후: 큐잉으로 개선 가능
+            prompt = (
+                "방금 카메라에서 사용자가 넘어진 정황이 감지됐어. "
+                "놀라거나 걱정스러운 톤으로 즉시 사용자에게 괜찮은지 짧게 물어봐. "
+                "도구는 호출하지 마."
+            )
+            threading.Thread(
+                target=self._respond, args=(prompt, False), daemon=True
+            ).start()
+        elif ev.kind == "activity_changed":
+            # 별도 발화 없음. _build_context 가 다음 대화 차례에 자동 반영.
+            print(f"[Action] 활동 변화: {ev.payload}")
 
     # -------- 대화 처리 --------
     def _handle_conversation(self):
@@ -189,6 +232,11 @@ class SarvisCore:
             parts.append(f"카메라에 보이는 사람: {cam_user}")
         else:
             parts.append("카메라에 등록된 사람 없음")
+        if self.action_recognizer is not None:
+            activity = self.action_recognizer.get_current_activity()
+            if activity:
+                detail = self.action_recognizer.get_current_activity_detail()
+                parts.append(f"현재 활동: {detail or activity}")
         return ", ".join(parts)
 
     def _add_log(self, role: str, text: str):
@@ -270,6 +318,10 @@ def main():
             if frame is not None:
                 core.vision.update_face_recognition(frame)
                 core.maybe_auto_greet()
+                if core.action_loop is not None:
+                    core._action_skip_i = (core._action_skip_i + 1) % core._action_skip_n
+                    if core._action_skip_i == 0:
+                        core.action_loop.submit(frame)
 
             ui.render_main(
                 frame=frame,

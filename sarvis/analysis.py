@@ -9,6 +9,7 @@
   emotion_hint : str   — "happy" | "sad" | "angry" | "anxious" | "neutral"
   face         : str   — vision 에서 식별된 사용자명 (없으면 "")
   memory_hint  : list[str] — recall 도구가 도움이 될만한 키워드 후보 (최대 3개)
+  activity     : str   — action_recognizer 가 분류한 현재 활동 (없으면 "")
   ms           : float — 전체 fan-out 소요 (계측용)
 """
 from __future__ import annotations
@@ -79,6 +80,25 @@ async def _face_context(session) -> str:
         return ""
 
 
+async def _activity_context(session) -> str:
+    """action_recognizer 가 분류한 활동 라벨/디테일. 없으면 빈 문자열."""
+    try:
+        ar = getattr(session, "action_recognizer", None)
+        if ar is None:
+            return ""
+        detail = getattr(ar, "get_current_activity_detail", None)
+        if callable(detail):
+            d = detail() or ""
+            if d:
+                return d
+        label = getattr(ar, "get_current_activity", None)
+        if callable(label):
+            return label() or ""
+        return ""
+    except (AttributeError, TypeError):
+        return ""
+
+
 async def _memory_hint(text: str) -> List[str]:
     """기억 키워드 추천. recall 도구 호출 전에 LLM 에 힌트로 전달."""
     t = text.lower()
@@ -94,19 +114,21 @@ async def _safe(coro, default):
 
 
 async def parallel_analyze(text: str, session=None) -> Dict:
-    """4개 분석기를 동시 실행 (asyncio.gather). 각각 200ms 타임아웃."""
+    """5개 분석기를 동시 실행 (asyncio.gather). 각각 200ms 타임아웃."""
     t0 = time.monotonic()
-    intent, emo, face, mem = await asyncio.gather(
+    intent, emo, face, mem, activity = await asyncio.gather(
         _safe(_intent(text), "smalltalk"),
         _safe(_emotion_hint(text), "neutral"),
         _safe(_face_context(session), ""),
         _safe(_memory_hint(text), []),
+        _safe(_activity_context(session), ""),
     )
     return {
         "intent": intent,
         "emotion_hint": emo,
         "face": face,
         "memory_hint": mem,
+        "activity": activity,
         "ms": (time.monotonic() - t0) * 1000.0,
     }
 
@@ -128,4 +150,7 @@ def analysis_to_context(analysis: Dict) -> str:
     mem = analysis.get("memory_hint") or []
     if mem:
         parts.append(f"기억키워드={','.join(mem)}")
+    activity = analysis.get("activity")
+    if activity:
+        parts.append(f"활동={activity}")
     return ", ".join(parts)
