@@ -1234,6 +1234,24 @@ async def websocket_endpoint(ws: WebSocket):
                 kind = data[0]
                 payload = data[1:]
                 if kind == 0x01:
+                    # 사이클 #28 — 첫 카메라 프레임에서 제스처 콜백 부착(아이딤포턴트).
+                    # 콜백은 vision 의 GestureDetector 워커 스레드에서 호출되므로,
+                    # 메인 이벤트 루프에 안전하게 emit 을 스케줄.
+                    if getattr(session.vision, "_gesture_callback", None) is None:
+                        _loop = asyncio.get_event_loop()
+                        def _on_gesture(ev, _loop=_loop):
+                            try:
+                                asyncio.run_coroutine_threadsafe(
+                                    emit(type="gesture", name=ev.name,
+                                         confidence=float(ev.confidence)),
+                                    _loop,
+                                )
+                            except Exception:
+                                pass
+                        try:
+                            session.vision.attach_gesture_callback(_on_gesture)
+                        except Exception as _e:
+                            print(f"[server] 제스처 콜백 부착 실패: {_e}")
                     detected = session.vision.push_jpeg(payload)
                     if detected:
                         fw, fh = session.vision.get_frame_size()

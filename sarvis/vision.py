@@ -314,6 +314,29 @@ class WebVision:
         self.current_user: Optional[str] = None
         self.face_boxes: List[Tuple[int, int, int, int]] = []
         self._last_face_check: float = 0.0
+        # 사이클 #28 — 제스처 인식 (MediaPipe). 콜백이 부착됐을 때만 동작.
+        self._gesture_detector = None  # type: ignore[assignment]
+        self._gesture_callback = None  # type: Optional[callable]
+
+    def attach_gesture_callback(self, callback) -> None:
+        """제스처 이벤트 수신 콜백 부착. callback(GestureEvent) 시그니처.
+
+        세션 생성 직후 server.py 가 호출. None 으로 detach 가능. 첫 호출 시
+        GestureDetector 가 만들어지고, push_jpeg 마다 push_frame 으로 흘러간다.
+        """
+        if callback is None:
+            self._gesture_callback = None
+            return
+        self._gesture_callback = callback
+        if self._gesture_detector is None:
+            try:
+                from .gestures import GestureDetector
+                self._gesture_detector = GestureDetector(
+                    on_event=lambda ev: self._gesture_callback and self._gesture_callback(ev)
+                )
+            except Exception as e:
+                print(f"[vision] GestureDetector 초기화 실패: {e}")
+                self._gesture_detector = None
 
     def push_jpeg(self, data: bytes) -> bool:
         """브라우저가 WebSocket으로 보낸 JPEG 바이트를 디코드해 저장."""
@@ -329,6 +352,13 @@ class WebVision:
             self._frame_ts = time.time()
             self._frame_w = w
             self._frame_h = h
+
+        # 사이클 #28 — 제스처 검출 (내부에서 throttle/예외 흡수).
+        if self._gesture_detector is not None:
+            try:
+                self._gesture_detector.push_frame(frame)
+            except Exception:
+                pass
 
         now = time.time()
         if now - self._last_face_check >= 1.0:
@@ -377,6 +407,14 @@ class WebVision:
         with self._lock:
             self._frame = None
         self.face_boxes = []
+        # 사이클 #28 — 제스처 워커 스레드/모델 자원 해제.
+        try:
+            if self._gesture_detector is not None:
+                self._gesture_detector.close()
+        except Exception:
+            pass
+        self._gesture_detector = None
+        self._gesture_callback = None
 
     def update_face_recognition(self, frame):
         """no-op — push_jpeg 내부에서 감지 처리."""

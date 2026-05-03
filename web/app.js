@@ -281,6 +281,12 @@
       case 'emotion':
         setEmotion(m.emotion);
         break;
+      case 'gesture':
+        // 사이클 #28 — 서버가 MediaPipe 로 감지한 손/포즈 제스처.
+        // (a) 손 제스처 명령: thumbs_up=확인, open_palm=정지, fist=취소
+        // (b) 손 들기로 호출: raised_hand → 마이크 자동 시작
+        handleGestureEvent(m.name, Number(m.confidence) || 0);
+        break;
       case 'message':
         addLog(m.role, m.text);
         if (isMobile() && m.role === 'assistant') markTabBadge('chat');
@@ -472,6 +478,64 @@
       if (secondOrb) secondOrb.setEmotion('neutral');
       setSubEmotion('claude', koEmotionLabel('neutral'));
       setSubEmotion('openai', koEmotionLabel('neutral'));
+    }
+  }
+
+  // ---------- 사이클 #28 — 제스처 명령 핸들러 (MediaPipe Hands+Pose) ----------
+  // 서버가 보낸 'gesture' 이벤트를 사용자 액션으로 매핑.
+  //   raised_hand  → 마이크 자동 시작 (멀리서 호출)
+  //   open_palm   → 사비스 발화 즉시 정지 (barge-in)
+  //   thumbs_up   → "네" 텍스트 입력
+  //   fist        → "아니요" 텍스트 입력
+  //   peace       → 토스트만 (보조)
+  // 모든 액션은 카메라가 켜져 있을 때만 발동 (관측 모드 ON 시).
+  const GESTURE_LABEL = {
+    raised_hand: '✋ 손 들기 감지 — 마이크를 켭니다',
+    open_palm:   '🖐 정지',
+    thumbs_up:   '👍 확인 (네)',
+    fist:        '✊ 취소 (아니요)',
+    peace:       '✌ 평화',
+  };
+  let _lastGestureActionTs = 0;
+  // opt-in: 손 들기로 마이크 자동 시작 허용 여부 (localStorage 영속화).
+  // 기본 ON. 사용자는 콘솔에서 sarvisGestureWake(false) 로 끌 수 있음.
+  let _gestureWakeEnabled = (() => {
+    try { return localStorage.getItem('sarvis_gesture_wake') !== '0'; }
+    catch { return true; }
+  })();
+  window.sarvisGestureWake = function(on) {
+    _gestureWakeEnabled = !!on;
+    try { localStorage.setItem('sarvis_gesture_wake', on ? '1' : '0'); } catch {}
+    flash(`제스처 호출 ${on ? '켜짐' : '꺼짐'}`, 'info');
+    return _gestureWakeEnabled;
+  };
+  function handleGestureEvent(name, confidence) {
+    const now = Date.now();
+    // 클라이언트 추가 디바운스 — 서버 쿨다운(2s) 외에 빠른 연쇄 차단
+    if (now - _lastGestureActionTs < 800) return;
+    // 카메라가 꺼져 있으면 어떤 제스처도 무시 (안전 가드)
+    if (!camStream) return;
+    _lastGestureActionTs = now;
+    const label = GESTURE_LABEL[name] || `제스처: ${name}`;
+    try { flash(label, 'info'); } catch {}
+    if (name === 'raised_hand') {
+      // 명시적 안전 게이트: opt-in 토글 + 카메라 활성 + 미녹음 상태
+      if (_gestureWakeEnabled && !recording) {
+        interruptTts();
+        toggleRecording();
+      }
+    } else if (name === 'open_palm') {
+      interruptTts();
+    } else if (name === 'thumbs_up') {
+      interruptTts();
+      markVoiceTurn(false);
+      cancelContinuousAutoStart();
+      send({ type: 'text_input', text: '네' });
+    } else if (name === 'fist') {
+      interruptTts();
+      markVoiceTurn(false);
+      cancelContinuousAutoStart();
+      send({ type: 'text_input', text: '아니요' });
     }
   }
 
