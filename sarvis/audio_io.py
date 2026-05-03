@@ -1,13 +1,79 @@
 """음성 입출력 — 호출어 감지, 음성 녹음/인식, 음성 합성"""
 import asyncio
 import os
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
-from typing import Callable
+from typing import Callable, Tuple
 
 # numpy / sounddevice 는 사용하는 함수 안에서만 임포트 (배포 cold start 지연 방지)
 from .config import cfg
+
+
+# ============================================================
+# TTS 오디오 출력 검증 — 합성 결과가 실제로 들리는 음성인지 확인
+# ============================================================
+_AUDIO_VERIFY_ATTEMPTS = 2          # 합성+검증 총 시도 횟수
+_MIN_AUDIO_DURATION_S = 0.05        # 50ms 미만 = 사실상 빈 파일/무음
+
+
+def _verify_audio_bytes(audio: bytes) -> Tuple[bool, str]:
+    """합성된 MP3 바이트가 재생 가능한 음성을 담고 있는지 ffprobe 로 검증.
+
+    반환값: (ok, reason_slug)
+      - ("ok",              True ): 정상
+      - ("synth_empty",     False): 0바이트
+      - ("ffprobe_missing", True ): ffprobe 미설치 → 검증 스킵하고 통과 (graceful degrade)
+      - ("synth_corrupt",   False): ffprobe 가 파일 파싱 실패
+      - ("synth_silent",    False): 오디오 스트림이 없거나 길이가 ~0
+    """
+    if not audio:
+        return False, "synth_empty"
+
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        # 검증 도구가 없는 환경(서버리스/슬림 컨테이너) 에서는 차단하지 않고 통과.
+        # 호출자에게 warning 으로만 노출.
+        return True, "ffprobe_missing"
+
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe, "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=duration,codec_type",
+                "-of", "default=noprint_wrappers=1:nokey=0",
+                "-i", "pipe:0",
+            ],
+            input=audio,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"[TTS-AudioVerify] ffprobe 호출 실패: {type(e).__name__}: {e}")
+        return False, "synth_corrupt"
+
+    if proc.returncode != 0:
+        return False, "synth_corrupt"
+
+    out = proc.stdout.decode("utf-8", errors="ignore")
+    if "codec_type=audio" not in out:
+        return False, "synth_silent"
+
+    duration = 0.0
+    for line in out.splitlines():
+        if line.startswith("duration="):
+            try:
+                duration = float(line.split("=", 1)[1])
+            except ValueError:
+                duration = 0.0
+            break
+    if duration < _MIN_AUDIO_DURATION_S:
+        return False, "synth_silent"
+
+    return True, "ok"
 
 
 # ============================================================
@@ -318,21 +384,44 @@ class EdgeTTS:
         if verdict.get("warnings"):
             print(f"[TTS-Verify] 경고와 함께 합성: {verdict['warnings']}")
 
-        path = self._synthesize(sanitized)
-        try:
-            with open(path, "rb") as f:
-                audio = f.read()
-        finally:
+        warnings = list(verdict.get("warnings", []))
+        audio = b""
+        last_audio_reason = "synth_empty"
+
+        # 합성 후 ffprobe 로 출력 검증. 실패 시 _AUDIO_VERIFY_ATTEMPTS 회까지 재시도 —
+        # Edge-TTS 가 가끔 빈 버퍼/무음 mp3 를 돌려주는 회귀를 사용자에게 노출하기 전에 차단.
+        for attempt in range(1, _AUDIO_VERIFY_ATTEMPTS + 1):
+            path = self._synthesize(sanitized)
             try:
-                os.unlink(path)
-            except OSError:
-                pass
+                with open(path, "rb") as f:
+                    audio = f.read()
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+            audio_ok, audio_reason = _verify_audio_bytes(audio)
+            if audio_ok:
+                if audio_reason == "ffprobe_missing" and "ffprobe_missing" not in warnings:
+                    warnings.append("ffprobe_missing")
+                return {
+                    "audio": audio,
+                    "ok": True,
+                    "reason": "ok",
+                    "warnings": warnings,
+                    "length": len(sanitized),
+                    "regenerated": regenerated,
+                }
+
+            last_audio_reason = audio_reason
+            print(f"[TTS-AudioVerify] 시도 {attempt}/{_AUDIO_VERIFY_ATTEMPTS} 실패: {audio_reason}")
 
         return {
-            "audio": audio,
-            "ok": True,
-            "reason": "ok",
-            "warnings": verdict.get("warnings", []),
+            "audio": b"",
+            "ok": False,
+            "reason": f"synth_retry_exhausted:{last_audio_reason}",
+            "warnings": warnings,
             "length": len(sanitized),
             "regenerated": regenerated,
         }

@@ -37,8 +37,15 @@ if str(ROOT) not in sys.path:
 
 os.environ.setdefault("SARVIS_SKIP_CV2_PRELOAD", "1")
 
+from sarvis import audio_io  # noqa: E402
 from sarvis.audio_io import EdgeTTS, SpeechRecorder, WhisperSTT, WakeWordListener  # noqa: E402
 from sarvis.config import cfg  # noqa: E402
+
+
+def _patch_audio_verify_ok():
+    """기본 ffprobe 검증을 통과시키는 patcher (가짜 mp3 바이트로도 ok)."""
+    return patch("sarvis.audio_io._verify_audio_bytes",
+                 return_value=(True, "ok"))
 
 # numpy 는 SpeechRecorder.record() 가 lazy 임포트한다. 테스트가 patch.dict(sys.modules,...)
 # 로 sounddevice 만 끼워넣을 때, 그 patch 가 시작되기 전에 numpy 가 sys.modules 에 없으면
@@ -79,6 +86,7 @@ class SynthesizeBytesVerifiedTests(unittest.TestCase):
 
     def test_ok_path_returns_audio(self):
         with patch("sarvis.tts_verifier._blocklist_cache", []), \
+             _patch_audio_verify_ok(), \
              patch.object(EdgeTTS, "_synthesize", _fake_synthesize_factory(b"AUDIO")):
             result = self.tts.synthesize_bytes_verified("안녕하세요.")
         self.assertTrue(result["ok"])
@@ -93,6 +101,7 @@ class SynthesizeBytesVerifiedTests(unittest.TestCase):
             return "안전한 한국어 응답."
 
         with patch("sarvis.tts_verifier._blocklist_cache", ["bad"]), \
+             _patch_audio_verify_ok(), \
              patch.object(EdgeTTS, "_synthesize", _fake_synthesize_factory(b"REGEN")):
             result = self.tts.synthesize_bytes_verified("이건 bad 단어 포함",
                                                        regen_callback=regen)
@@ -134,6 +143,7 @@ class SynthesizeBytesVerifiedTests(unittest.TestCase):
 
     def test_synthesize_bytes_returns_audio_only(self):
         with patch("sarvis.tts_verifier._blocklist_cache", []), \
+             _patch_audio_verify_ok(), \
              patch.object(EdgeTTS, "_synthesize", _fake_synthesize_factory(b"X")):
             audio = self.tts.synthesize_bytes("안녕")
         self.assertEqual(audio, b"X")
@@ -145,6 +155,7 @@ class SynthesizeBytesVerifiedTests(unittest.TestCase):
     def test_long_text_truncated_warning_in_result(self):
         long = "이 문장은 충분히 깁니다. " * 200
         with patch("sarvis.tts_verifier._blocklist_cache", []), \
+             _patch_audio_verify_ok(), \
              patch.object(EdgeTTS, "_synthesize", _fake_synthesize_factory(b"L")):
             result = self.tts.synthesize_bytes_verified(long)
         self.assertTrue(result["ok"])
@@ -342,12 +353,183 @@ class SynthesizeWrapperTests(unittest.TestCase):
         """ok 경로에서 임시파일 unlink 가 OSError 라도 결과는 정상."""
         tts = EdgeTTS()
         with patch("sarvis.tts_verifier._blocklist_cache", []), \
+             _patch_audio_verify_ok(), \
              patch.object(EdgeTTS, "_synthesize",
                           _fake_synthesize_factory(b"AUD")), \
              patch("sarvis.audio_io.os.unlink", side_effect=OSError("locked")):
             result = tts.synthesize_bytes_verified("정상 텍스트입니다.")
         self.assertTrue(result["ok"])
         self.assertEqual(result["audio"], b"AUD")
+
+
+# ============================================================
+# 오디오 출력 검증 — Edge-TTS 결과가 무음/빈 파일/깨진 파일이면 차단
+# ============================================================
+class VerifyAudioBytesTests(unittest.TestCase):
+    """`_verify_audio_bytes` 단독 동작."""
+
+    def test_empty_bytes_rejected(self):
+        ok, reason = audio_io._verify_audio_bytes(b"")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "synth_empty")
+
+    def test_missing_ffprobe_passes_through(self):
+        # ffprobe 바이너리 없는 환경 → 차단하지 않고 통과 (graceful)
+        with patch("sarvis.audio_io.shutil.which", return_value=None):
+            ok, reason = audio_io._verify_audio_bytes(b"\x00\x01\x02")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ffprobe_missing")
+
+    def test_corrupt_audio_returncode_nonzero(self):
+        fake_proc = types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"err")
+        with patch("sarvis.audio_io.shutil.which", return_value="/usr/bin/ffprobe"), \
+             patch("sarvis.audio_io.subprocess.run", return_value=fake_proc):
+            ok, reason = audio_io._verify_audio_bytes(b"garbage")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "synth_corrupt")
+
+    def test_silent_audio_no_audio_stream(self):
+        # ffprobe 가 audio stream 자체를 못 찾음
+        fake_proc = types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        with patch("sarvis.audio_io.shutil.which", return_value="/usr/bin/ffprobe"), \
+             patch("sarvis.audio_io.subprocess.run", return_value=fake_proc):
+            ok, reason = audio_io._verify_audio_bytes(b"abc")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "synth_silent")
+
+    def test_silent_audio_zero_duration(self):
+        fake_proc = types.SimpleNamespace(
+            returncode=0,
+            stdout=b"codec_type=audio\nduration=0.000000\n",
+            stderr=b"",
+        )
+        with patch("sarvis.audio_io.shutil.which", return_value="/usr/bin/ffprobe"), \
+             patch("sarvis.audio_io.subprocess.run", return_value=fake_proc):
+            ok, reason = audio_io._verify_audio_bytes(b"abc")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "synth_silent")
+
+    def test_invalid_duration_string_treated_as_silent(self):
+        fake_proc = types.SimpleNamespace(
+            returncode=0,
+            stdout=b"codec_type=audio\nduration=N/A\n",
+            stderr=b"",
+        )
+        with patch("sarvis.audio_io.shutil.which", return_value="/usr/bin/ffprobe"), \
+             patch("sarvis.audio_io.subprocess.run", return_value=fake_proc):
+            ok, reason = audio_io._verify_audio_bytes(b"abc")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "synth_silent")
+
+    def test_valid_audio_passes(self):
+        fake_proc = types.SimpleNamespace(
+            returncode=0,
+            stdout=b"codec_type=audio\nduration=2.500000\n",
+            stderr=b"",
+        )
+        with patch("sarvis.audio_io.shutil.which", return_value="/usr/bin/ffprobe"), \
+             patch("sarvis.audio_io.subprocess.run", return_value=fake_proc):
+            ok, reason = audio_io._verify_audio_bytes(b"validmp3bytes")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+
+    def test_ffprobe_oserror_returns_corrupt(self):
+        with patch("sarvis.audio_io.shutil.which", return_value="/usr/bin/ffprobe"), \
+             patch("sarvis.audio_io.subprocess.run",
+                   side_effect=OSError("exec format error")):
+            ok, reason = audio_io._verify_audio_bytes(b"abc")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "synth_corrupt")
+
+    def test_ffprobe_timeout_returns_corrupt(self):
+        with patch("sarvis.audio_io.shutil.which", return_value="/usr/bin/ffprobe"), \
+             patch("sarvis.audio_io.subprocess.run",
+                   side_effect=__import__("subprocess").TimeoutExpired(cmd="ffprobe", timeout=10)):
+            ok, reason = audio_io._verify_audio_bytes(b"abc")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "synth_corrupt")
+
+
+class SynthesizeBytesAudioVerifyIntegrationTests(unittest.TestCase):
+    """`synthesize_bytes_verified` 가 오디오 출력 검증 + 재시도까지 묶어내는지."""
+
+    def setUp(self):
+        self.tts = EdgeTTS()
+
+    def _wrap_synth(self, payload):
+        """`_fake_synthesize_factory` 를 MagicMock 으로 감싸 call_count 추적 가능하게."""
+        impl = _fake_synthesize_factory(payload)
+        # MagicMock 은 descriptor 가 아니므로 self 바인딩이 일어나지 않는다 →
+        # self._synthesize(text) → mock(text) 한 인자만 들어옴.
+        return MagicMock(side_effect=lambda text: impl(None, text))
+
+    def test_empty_synth_buffer_retries_then_fails(self):
+        """Edge-TTS 가 빈 버퍼만 돌려주면 _AUDIO_VERIFY_ATTEMPTS 회 시도 후 차단."""
+        synth = self._wrap_synth(b"")
+        with patch("sarvis.tts_verifier._blocklist_cache", []), \
+             patch.object(EdgeTTS, "_synthesize", synth):
+            result = self.tts.synthesize_bytes_verified("정상 한국어 응답입니다.")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["audio"], b"")
+        self.assertTrue(result["reason"].startswith("synth_retry_exhausted:"))
+        self.assertIn("synth_empty", result["reason"])
+        self.assertEqual(synth.call_count, audio_io._AUDIO_VERIFY_ATTEMPTS)
+
+    def test_silent_audio_retries_then_fails(self):
+        """무음 mp3 만 계속 나오면 retry 소진 후 synth_silent 사유로 차단."""
+        synth = self._wrap_synth(b"FAKE_MP3")
+        with patch("sarvis.tts_verifier._blocklist_cache", []), \
+             patch.object(EdgeTTS, "_synthesize", synth), \
+             patch("sarvis.audio_io._verify_audio_bytes",
+                   return_value=(False, "synth_silent")):
+            result = self.tts.synthesize_bytes_verified("정상 한국어 응답입니다.")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["audio"], b"")
+        self.assertEqual(result["reason"], "synth_retry_exhausted:synth_silent")
+        self.assertEqual(synth.call_count, audio_io._AUDIO_VERIFY_ATTEMPTS)
+
+    def test_first_attempt_silent_second_succeeds(self):
+        """첫 시도는 무음, 두 번째는 정상 → ok 로 복구되고 audio 반환."""
+        verdicts = iter([(False, "synth_silent"), (True, "ok")])
+
+        def _verify(_audio):
+            return next(verdicts)
+
+        synth = self._wrap_synth(b"GOOD_MP3")
+        with patch("sarvis.tts_verifier._blocklist_cache", []), \
+             patch.object(EdgeTTS, "_synthesize", synth), \
+             patch("sarvis.audio_io._verify_audio_bytes", side_effect=_verify):
+            result = self.tts.synthesize_bytes_verified("정상 한국어 응답입니다.")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["audio"], b"GOOD_MP3")
+        self.assertEqual(result["reason"], "ok")
+        self.assertEqual(synth.call_count, 2)
+
+    def test_ffprobe_missing_passes_with_warning(self):
+        """ffprobe 가 없으면 검증 스킵하고 통과하되 warnings 에 기록한다."""
+        with patch("sarvis.tts_verifier._blocklist_cache", []), \
+             patch.object(EdgeTTS, "_synthesize",
+                          _fake_synthesize_factory(b"AUD")), \
+             patch("sarvis.audio_io.shutil.which", return_value=None):
+            result = self.tts.synthesize_bytes_verified("정상 한국어 응답입니다.")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["audio"], b"AUD")
+        self.assertIn("ffprobe_missing", result["warnings"])
+
+    def test_corrupt_audio_retry_exhausted_reason(self):
+        """ffprobe 가 corrupt 라고 보고 → retry 소진 후 reason 에 synth_corrupt 포함."""
+        with patch("sarvis.tts_verifier._blocklist_cache", []), \
+             patch.object(EdgeTTS, "_synthesize",
+                          _fake_synthesize_factory(b"BROKEN")), \
+             patch("sarvis.audio_io._verify_audio_bytes",
+                   return_value=(False, "synth_corrupt")):
+            result = self.tts.synthesize_bytes_verified("정상 한국어 응답입니다.")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["audio"], b"")
+        self.assertEqual(result["reason"], "synth_retry_exhausted:synth_corrupt")
+        # length 는 정제된 텍스트 기준으로 기록 (디버그 용)
+        self.assertGreater(result["length"], 0)
+        self.assertFalse(result["regenerated"])
 
 
 # ============================================================
