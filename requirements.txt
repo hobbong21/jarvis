@@ -7,6 +7,15 @@ pvporcupine>=3.0.0
 pvrecorder>=1.2.2
 faster-whisper>=1.0.0
 sounddevice>=0.4.6
+# 한국어 STT 품질 개선 — Silero VAD(말 경계 정확) + noisereduce(스펙트럼 게이트).
+# 둘 다 미설치여도 audio_io 가 graceful fallback 한다.
+silero-vad>=5.1
+noisereduce>=3.0
+torch>=2.0
+# 행동인식 (action.py): MediaPipe Pose=손들기/넘어짐, YOLO=객체 기반 활동 분류.
+# 둘 다 미설치여도 graceful fallback. 첫 실행 시 yolov8n.pt 자동 다운로드(~6MB).
+mediapipe>=0.10.0
+ultralytics>=8.0.0
 edge-tts>=6.1.0
 pygame>=2.5.0
 anthropic>=0.40.0

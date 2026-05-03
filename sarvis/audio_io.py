@@ -171,18 +171,102 @@ class WakeWordListener:
 
 
 # ============================================================
-# 2. 음성 녹음 (침묵 감지 기반)
+# 2. 음성 녹음 (Silero VAD + 노이즈 억제 + AGC)
 # ============================================================
+def _denoise_and_normalize(audio):
+    """녹음 직후 전처리:
+      1) RMS 정규화(AGC) — 작은 목소리 증폭, 큰 소리 클리핑 방지.
+      2) 스펙트럼 노이즈 게이트 — 팬·키보드·반향 등 정상 잡음 제거.
+    의존성(noisereduce) 없으면 AGC 만 적용.
+    """
+    import numpy as np
+
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    if rms > 1e-6:
+        target_rms = 0.1
+        gain = min(target_rms / rms, 8.0)  # 8배 이상은 잡음만 증폭하므로 상한
+        audio = (audio * gain).astype(np.float32)
+        peak = float(np.max(np.abs(audio)))
+        if peak > 0.99:
+            audio = (audio / peak * 0.99).astype(np.float32)
+
+    try:
+        import noisereduce as nr
+        audio = nr.reduce_noise(
+            y=audio, sr=16000, stationary=False, prop_decrease=0.75
+        ).astype(np.float32)
+    except Exception:
+        pass  # noisereduce 미설치 → AGC 만 적용한 채 통과
+    return audio
+
+
 class SpeechRecorder:
     SAMPLE_RATE = 16000
 
-    def record(self):
-        """말하는 동안 녹음. 일정 시간 침묵하면 종료."""
-        import numpy as np
+    def __init__(self):
+        # Silero VAD: 학습 기반 음성 활동 탐지. 에너지 임계치보다
+        # 말의 시작/끝 경계가 정확하다. 미설치 시 에너지 기반 fallback.
+        self._vad_model = None
+        self._VADIterator = None
         try:
-            import sounddevice as sd
+            from silero_vad import load_silero_vad, VADIterator
+            self._vad_model = load_silero_vad()
+            self._VADIterator = VADIterator
         except Exception as e:
-            raise RuntimeError(f"sounddevice 미설치: {e}")
+            print(f"[Recorder] Silero VAD 미사용 (에너지 임계 fallback): {e}")
+
+    def record(self):
+        """말하는 동안 녹음. 일정 시간 침묵하면 종료. 종료 후 노이즈 억제."""
+        if self._vad_model is not None:
+            audio = self._record_silero()
+        else:
+            audio = self._record_energy()
+        return _denoise_and_normalize(audio)
+
+    def _record_silero(self):
+        import numpy as np
+        import sounddevice as sd
+        import torch
+
+        vad_iter = self._VADIterator(
+            self._vad_model,
+            sampling_rate=self.SAMPLE_RATE,
+            min_silence_duration_ms=int(cfg.silence_duration * 1000),
+            speech_pad_ms=200,
+        )
+        chunk_size = 512  # Silero 16kHz 요구치
+        chunks_per_sec = self.SAMPLE_RATE / chunk_size
+        max_chunks = int(cfg.max_recording * chunks_per_sec)
+
+        chunks = []
+        speaking = False
+        try:
+            with sd.InputStream(
+                samplerate=self.SAMPLE_RATE, channels=1, dtype="float32"
+            ) as stream:
+                for _ in range(max_chunks):
+                    data, _ = stream.read(chunk_size)
+                    chunks.append(data.copy())
+                    tensor = torch.from_numpy(data.flatten())
+                    event = vad_iter(tensor, return_seconds=False)
+                    if event is None:
+                        continue
+                    if "start" in event:
+                        speaking = True
+                    if "end" in event and speaking:
+                        break
+        finally:
+            try:
+                vad_iter.reset_states()
+            except Exception:
+                pass
+
+        return np.concatenate(chunks).flatten().astype(np.float32)
+
+    def _record_energy(self):
+        """에너지 임계치 기반 fallback (Silero 미설치 시)."""
+        import numpy as np
+        import sounddevice as sd
 
         chunks = []
         silence_count = 0
@@ -251,14 +335,14 @@ class WhisperSTT:
             segments, _ = self.model.transcribe(
                 audio,
                 language=cfg.whisper_language,
-                beam_size=5,
+                beam_size=10,
                 vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 500},
+                vad_parameters={"min_silence_duration_ms": 300},
                 initial_prompt=initial or None,
                 temperature=0.0,
                 condition_on_previous_text=False,
-                compression_ratio_threshold=2.4,
-                no_speech_threshold=0.5,
+                compression_ratio_threshold=1.8,
+                no_speech_threshold=0.6,
             )
             return " ".join(s.text for s in segments).strip()
         except Exception as e:

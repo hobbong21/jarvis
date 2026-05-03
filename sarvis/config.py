@@ -96,15 +96,20 @@ class Config:
     wake_keyword_path: str = os.getenv("SARVIS_KEYWORD_PATH", "")
 
     # ============ STT ============
-    # Whisper 모델: tiny / base / small / medium / large-v3 (faster-whisper)
-    # 한국어 정확도는 medium 부터 크게 향상. 기본 medium, env 로 오버라이드 가능.
-    whisper_model: str = os.getenv("SARVIS_WHISPER_MODEL", "medium")
+    # Whisper 모델: tiny / base / small / medium / large-v3 / large-v3-turbo (faster-whisper)
+    # 한국어 정확도는 large-v3 가 가장 좋음 (CPU 전용이면 SARVIS_WHISPER_MODEL=medium 또는
+    # large-v3-turbo 로 오버라이드 권장).
+    whisper_model: str = os.getenv("SARVIS_WHISPER_MODEL", "large-v3")
     whisper_device: str = os.getenv("SARVIS_WHISPER_DEVICE", "auto")
     whisper_language: str = os.getenv("SARVIS_WHISPER_LANGUAGE", "ko")
-    # 한국어 인식 품질을 끌어올리는 initial_prompt (Whisper 가 한국어/구두점 패턴을 학습).
+    # initial_prompt: Whisper 가 한국어 자연어 + 음성 비서 명령 어휘를 우선 학습하도록
+    # 호출어/명령 동사/존대 마무리 표현을 함께 노출. stt_filter 가 사용자별 어휘를
+    # 추가로 동적 주입한다.
     whisper_initial_prompt: str = os.getenv(
         "SARVIS_WHISPER_PROMPT",
-        "다음은 한국어 자연어 대화입니다. 사비스, 안녕하세요, 알려줘, 부탁해, 감사합니다.",
+        "다음은 사비스 한국어 음성 비서와의 자연스러운 대화입니다. "
+        "사비스, 알려줘, 보여줘, 들려줘, 켜줘, 꺼줘, 검색해줘, 찾아줘, 시작해, 멈춰, "
+        "기억해, 잊어버려, 부탁해, 안녕하세요, 감사합니다.",
     )
     silence_threshold: float = 0.012
     silence_duration: float = 1.5
@@ -123,6 +128,27 @@ class Config:
     # ============ 얼굴 인식 ============
     # 사이클 #9 정비: 런타임 데이터는 모두 data/ 아래로 통일.
     faces_dir: str = os.getenv("SARVIS_FACES_DIR", "data/faces")
+
+    # ============ 행동인식 (action.py) ============
+    # mediapipe + ultralytics 미설치 시 자동 비활성. env 로 개별 토글.
+    action_enabled: bool = os.getenv("SARVIS_ACTION_ENABLED", "1") not in ("0", "false", "False")
+    gesture_wake_enabled: bool = os.getenv("SARVIS_GESTURE_WAKE", "1") not in ("0", "false", "False")
+    fall_detect_enabled: bool = os.getenv("SARVIS_FALL_DETECT", "1") not in ("0", "false", "False")
+    activity_recognize_enabled: bool = os.getenv("SARVIS_ACTIVITY", "1") not in ("0", "false", "False")
+    # 워커 처리 fps. 60fps 메인 루프와 독립.
+    action_target_fps: int = int(os.getenv("SARVIS_ACTION_FPS", "10"))
+    # 손 들기: N프레임 sustained → wake. 10fps × 0.5초 = 5프레임 (=의도적 동작).
+    gesture_wake_sustain_frames: int = 5
+    gesture_wake_cooldown_s: float = 4.0
+    # 넘어짐: 어깨 정규Y 가 윈도우 안에서 이만큼 떨어지면 급강하로 판단.
+    fall_velocity_threshold: float = 0.35
+    # 수평 자세 sustained 길이 (10fps → 0.8초 == 안정적 누움).
+    fall_horizontal_frames: int = 8
+    fall_cooldown_s: float = 30.0
+    # 활동 분류 주기 (초). 너무 잦으면 YOLO 부하 ↑, 너무 드물면 반응 ↓.
+    activity_interval_s: float = 4.0
+    # YOLO 모델 (자동 다운로드). yolov8n=빠름, yolov8s=조금 정확, yolov8m=정확한대신 무거움.
+    yolo_model: str = os.getenv("SARVIS_YOLO_MODEL", "yolov8n.pt")
 
     # ============ 장기 메모리 (기획서 v2.0) ============
     # SARVIS 는 단일 사용자 데스크톱 비서 모델. 인증이 추가되기 전까지는
