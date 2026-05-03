@@ -230,16 +230,23 @@ class WhisperSTT:
             cfg.whisper_model, device=device, compute_type=compute_type
         )
 
-    def transcribe(self, audio) -> str:
+    def transcribe(self, audio, extra_prompt: str = "") -> str:
         """numpy 배열 또는 파일 경로(str) 모두 지원 (faster-whisper 가 내부적으로 디코드).
 
         한국어 인식 품질을 끌어올리는 옵션:
-        - initial_prompt: 한국어 패턴/호출어 힌트 (오인식 감소)
+        - initial_prompt: 한국어 패턴/호출어 힌트 (오인식 감소). 사이클 #17 에서
+          호출자가 사용자별 어휘를 덧붙일 수 있도록 `extra_prompt` 로 동적 주입.
         - temperature=0.0: 결정적 디코딩 (환각 감소)
         - condition_on_previous_text=False: 이전 발화에 휘둘리는 환각 차단
         - compression_ratio_threshold/no_speech_threshold: 무음/잡음 컷오프
         - vad_parameters: 짧은 무음에서 자르지 않게 완화
         """
+        base_prompt = (cfg.whisper_initial_prompt or "").strip()
+        extra = (extra_prompt or "").strip()
+        if base_prompt and extra:
+            initial = base_prompt + " " + extra
+        else:
+            initial = extra or base_prompt
         try:
             segments, _ = self.model.transcribe(
                 audio,
@@ -247,7 +254,7 @@ class WhisperSTT:
                 beam_size=5,
                 vad_filter=True,
                 vad_parameters={"min_silence_duration_ms": 500},
-                initial_prompt=cfg.whisper_initial_prompt or None,
+                initial_prompt=initial or None,
                 temperature=0.0,
                 condition_on_previous_text=False,
                 compression_ratio_threshold=2.4,

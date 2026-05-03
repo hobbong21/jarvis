@@ -557,7 +557,7 @@ class _RecordingSTT:
         self.text = text
         self.calls: List[str] = []
 
-    def transcribe(self, path: str) -> str:
+    def transcribe(self, path: str, extra_prompt: str = "") -> str:
         self.calls.append(path)
         return self.text
 
@@ -1523,7 +1523,7 @@ class VoiceInputAdjacentTests(unittest.TestCase):
         captured: List[str] = []
 
         class _SlowSTT:
-            def transcribe(self, path):
+            def transcribe(self, path, extra_prompt: str = ""):
                 captured.append(path)
                 # 100ms — drain → close 가 처리될 시간 확보. 빈 결과로 빠르게 종료.
                 time.sleep(0.1)

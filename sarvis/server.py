@@ -31,6 +31,7 @@ from .brain import Brain, _friendly_error, _model_switch_friendly
 from .config import cfg
 from .emotion import Emotion
 from .memory import get_memory, extract_user_facts
+from .stt_filter import clean_stt_text, build_dynamic_initial_prompt
 from .tools import ToolExecutor
 from .vision import FaceRegistry, WebVision
 
@@ -1436,16 +1437,43 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
             await emit(type="emotion", emotion="neutral")
             turn_meta["stt_ready"] = False
             return
+        # 사이클 #17: 사용자 어휘로 STT 프롬프트를 동적으로 보강해 한국어
+        # 고유명사/관심 토픽 인식률을 올린다. (facts 의 value + 최근 학습 지식
+        # 의 topic 에서 추출 — 비용 거의 0)
+        try:
+            kw_facts = [
+                str(f.get("value", "")).strip()
+                for f in session.memory.get_facts(session.memory_user_id, limit=8)
+            ]
+            kw_topics = [
+                str(k.get("topic", "")).strip()
+                for k in session.memory.recent_knowledge(session.memory_user_id, limit=8)
+            ]
+            extra_prompt = build_dynamic_initial_prompt(
+                "", [w for w in (kw_facts + kw_topics) if w]
+            )
+        except Exception:
+            extra_prompt = ""
         t_stt = time.monotonic()
-        text = await asyncio.to_thread(STT.transcribe, path)
+        text = await asyncio.to_thread(STT.transcribe, path, extra_prompt)
         turn_meta["stt_ms"] = (time.monotonic() - t_stt) * 1000.0
         text = (text or "").strip()
-        turn_meta["stt_text_len"] = len(text)
-        if not text or len(text) < 2:
+        turn_meta["stt_text_len_raw"] = len(text)
+        # 사이클 #17: Whisper 한국어 환각 패턴 (유튜브 자막 학습 데이터에서
+        # 새어나오는 "시청해주셔서 감사합니다" 등) 을 silent drop. 환각이면
+        # 사용자에게 안내도 보내지 않는다 — 실제로 말한 게 아니므로.
+        cleaned = clean_stt_text(text)
+        turn_meta["stt_text_len"] = len(cleaned)
+        # 환각 또는 너무 짧은 잡음 (1글자 이하) 은 silent skip — 사용자에게
+        # 안내도 보내지 않는다 (Whisper 가 무음에서 만든 가짜 발화).
+        if not cleaned or len(cleaned) < 2:
+            if text and not cleaned:
+                turn_meta["stt_hallucination_dropped"] = text[:80]
             await emit(type="state", state="idle")
             await emit(type="emotion", emotion="neutral")
             turn_meta["empty_transcription"] = True
             return
+        text = cleaned
 
         await emit(type="message", role="user", text=text)
         # (기획서 v2.0) 음성 turn 도 장기 메모리에 기록 + 자동 사실 추출/recall 신호.
