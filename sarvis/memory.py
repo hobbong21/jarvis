@@ -109,6 +109,30 @@ CREATE TABLE IF NOT EXISTS commands (
     completed_at  REAL
 );
 
+-- 사이클 #16: 사비스가 학습한 멀티모달 지식 저장공간.
+-- facts (key/value 단순 사실) 와 다른 점:
+--   * topic + content (자유 서술), tags(JSON 배열) 로 검색 가능한 지식 카드
+--   * source 출처 추적 (user|conversation|tool|web|inferred)
+--   * 이미지/음성/영상 첨부 가능 — commands 와 같은 파일-경로 패턴 (BLOB 회피)
+--   * confidence (0.0~1.0) — 자동 학습 결과의 신뢰도
+-- context_block() 가 이 테이블을 LLM 프롬프트에 자동 주입하므로 사비스가
+-- 매 답변마다 활용한다.
+CREATE TABLE IF NOT EXISTS knowledge (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       TEXT    NOT NULL,
+    conv_id       INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    topic         TEXT    NOT NULL DEFAULT '',
+    content       TEXT    NOT NULL DEFAULT '',
+    source        TEXT    NOT NULL DEFAULT 'user',
+    confidence    REAL    NOT NULL DEFAULT 1.0,
+    image_path    TEXT,
+    audio_path    TEXT,
+    video_path    TEXT,
+    tags_json     TEXT,
+    created_at    REAL    NOT NULL,
+    updated_at    REAL    NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content);
 CREATE INDEX IF NOT EXISTS idx_facts_user ON facts(user_id, updated_at DESC);
@@ -116,6 +140,8 @@ CREATE INDEX IF NOT EXISTS idx_obs_user_ts ON observations(user_id, timestamp DE
 CREATE INDEX IF NOT EXISTS idx_conv_user_started ON conversations(user_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_timers_user_sched ON timers_events(user_id, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_commands_user_created ON commands(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_user_updated ON knowledge(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_topic ON knowledge(user_id, topic);
 """
 
 
@@ -166,6 +192,17 @@ def _ensure_schema(path: str) -> None:
             # 기존 DB (사이클 #14 만 적용된 상태) 는 여기서 채워진다.
             _migrate_add_column_if_missing(conn, "commands", "audio_path", "TEXT")
             _migrate_add_column_if_missing(conn, "commands", "video_path", "TEXT")
+            # 사이클 #16: knowledge 테이블이 없는 레거시 DB 도 자동 생성.
+            # _SCHEMA_SQL 의 CREATE TABLE IF NOT EXISTS 가 이미 처리하지만,
+            # 인덱스도 함께 ensure 한다 (no-op for fresh DBs).
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_user_updated "
+                "ON knowledge(user_id, updated_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_topic "
+                "ON knowledge(user_id, topic)"
+            )
         finally:
             conn.close()
         _initialized_paths.add(path)
@@ -734,6 +771,188 @@ class Memory:
                     pass
         return True
 
+    # ── 멀티모달 학습 지식 (knowledge) ──────────────────────────────
+    # 사비스가 시간이 지나며 쌓는 "알게 된 것" 들을 영구 저장하는 자유 서술
+    # 카드. facts 가 key=value 형태의 단순 사실이라면 knowledge 는 topic +
+    # 풍부한 content + 첨부 미디어(이미지/음성/영상) + tags + confidence 로
+    # 구성된다. context_block() 가 자동으로 LLM 프롬프트에 끌어다 주입.
+    _KNOWLEDGE_SOURCES = ("user", "conversation", "tool", "web", "inferred")
+
+    def add_knowledge(
+        self,
+        user_id: str,
+        content: str,
+        topic: str = "",
+        source: str = "user",
+        confidence: float = 1.0,
+        image_path: Optional[str] = None,
+        audio_path: Optional[str] = None,
+        video_path: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        conv_id: Optional[int] = None,
+    ) -> int:
+        if source not in self._KNOWLEDGE_SOURCES:
+            raise ValueError(f"invalid source: {source}")
+        try:
+            conf = float(confidence)
+        except (TypeError, ValueError):
+            raise ValueError(f"invalid confidence: {confidence!r}")
+        if not (0.0 <= conf <= 1.0):
+            raise ValueError(f"confidence out of range: {conf}")
+        if not isinstance(content, str):
+            content = str(content)
+        if not isinstance(topic, str):
+            topic = str(topic)
+        tags_blob = json.dumps(tags, ensure_ascii=False) if tags else None
+        now = time.time()
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO knowledge(user_id, conv_id, topic, content, source,
+                                      confidence, image_path, audio_path,
+                                      video_path, tags_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, conv_id, topic, content, source, conf,
+                 image_path, audio_path, video_path, tags_blob, now, now),
+            )
+            return int(cur.lastrowid)
+
+    def update_knowledge(
+        self,
+        kid: int,
+        content: Optional[str] = None,
+        topic: Optional[str] = None,
+        confidence: Optional[float] = None,
+        image_path: Optional[str] = None,
+        audio_path: Optional[str] = None,
+        video_path: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> bool:
+        sets: List[str] = []
+        args: List[Any] = []
+        if content is not None:
+            sets.append("content=?"); args.append(str(content))
+        if topic is not None:
+            sets.append("topic=?"); args.append(str(topic))
+        if confidence is not None:
+            try:
+                conf = float(confidence)
+            except (TypeError, ValueError):
+                raise ValueError(f"invalid confidence: {confidence!r}")
+            if not (0.0 <= conf <= 1.0):
+                raise ValueError(f"confidence out of range: {conf}")
+            sets.append("confidence=?"); args.append(conf)
+        if image_path is not None:
+            sets.append("image_path=?"); args.append(image_path)
+        if audio_path is not None:
+            sets.append("audio_path=?"); args.append(audio_path)
+        if video_path is not None:
+            sets.append("video_path=?"); args.append(video_path)
+        if tags is not None:
+            sets.append("tags_json=?"); args.append(
+                json.dumps(tags, ensure_ascii=False) if tags else None
+            )
+        if not sets:
+            return False
+        sets.append("updated_at=?"); args.append(time.time())
+        args.append(int(kid))
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                f"UPDATE knowledge SET {', '.join(sets)} WHERE id=?", args,
+            )
+            return cur.rowcount > 0
+
+    @staticmethod
+    def _knowledge_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+        d = dict(row)
+        if d.get("tags_json"):
+            try:
+                d["tags"] = json.loads(d["tags_json"])
+            except json.JSONDecodeError:
+                d["tags"] = []
+        else:
+            d["tags"] = []
+        d.pop("tags_json", None)
+        return d
+
+    def get_knowledge(self, kid: int) -> Optional[Dict[str, Any]]:
+        with _conn_ctx(self.path) as conn:
+            row = conn.execute(
+                "SELECT * FROM knowledge WHERE id=?", (int(kid),)
+            ).fetchone()
+        return self._knowledge_row_to_dict(row) if row else None
+
+    def recent_knowledge(
+        self,
+        user_id: str,
+        limit: int = 20,
+        source: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with _conn_ctx(self.path) as conn:
+            if source:
+                rows = conn.execute(
+                    "SELECT * FROM knowledge WHERE user_id=? AND source=? "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    (user_id, source, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM knowledge WHERE user_id=? "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    (user_id, limit),
+                ).fetchall()
+        return [self._knowledge_row_to_dict(r) for r in rows]
+
+    def search_knowledge(
+        self,
+        user_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """topic / content / tags_json 에 대한 단순 LIKE 검색.
+
+        한국어/영어 혼용 발화도 부분 문자열로 매칭된다. 임베딩이나 FTS 를
+        쓰지 않아 비용이 0 이고 결정적. 미래에 FTS5 로 업그레이드 가능.
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+        like = f"%{q}%"
+        limit = max(1, min(int(limit), 200))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM knowledge
+                WHERE user_id=?
+                  AND (topic LIKE ? OR content LIKE ? OR IFNULL(tags_json,'') LIKE ?)
+                ORDER BY confidence DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (user_id, like, like, like, limit),
+            ).fetchall()
+        return [self._knowledge_row_to_dict(r) for r in rows]
+
+    def delete_knowledge(self, kid: int) -> bool:
+        """행 삭제 + 첨부 미디어 파일 best-effort 정리."""
+        with _conn_ctx(self.path) as conn:
+            row = conn.execute(
+                "SELECT image_path, audio_path, video_path FROM knowledge WHERE id=?",
+                (int(kid),),
+            ).fetchone()
+            if not row:
+                return False
+            paths = [row["image_path"], row["audio_path"], row["video_path"]]
+            conn.execute("DELETE FROM knowledge WHERE id=?", (int(kid),))
+        for p in paths:
+            if p and os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        return True
+
     # ── 타이머 / 이벤트 ────────────────────────────────────────────
     def add_timer_event(
         self,
@@ -795,11 +1014,15 @@ class Memory:
         query: Optional[str] = None,
         max_facts: int = 8,
         max_recalls: int = 4,
+        max_knowledge: int = 4,
     ) -> str:
         """LLM system prompt 에 [기억:...] 블록으로 주입할 한국어 컨텍스트 문자열.
 
         - max_facts 개의 최근 facts (key: value)
         - 새 발화 query 와 키워드 매칭되는 과거 메시지 max_recalls 개
+        - 사이클 #16: max_knowledge 개의 학습 지식 카드 (query 가 있으면
+          search_knowledge, 없으면 recent_knowledge). 첨부 미디어가 있으면
+          [이미지]/[음성]/[영상] 마커로 표시 — LLM 이 미디어 존재를 인지하도록.
         - 비어 있으면 빈 문자열 반환 (= 주입 안 함)
         """
         parts: List[str] = []
@@ -818,6 +1041,30 @@ class Memory:
                         snippet = snippet[:120] + "…"
                     label = self._format_role_label(m)
                     parts.append(f"- ({label}) {snippet}")
+        if max_knowledge > 0:
+            try:
+                if query:
+                    kn = self.search_knowledge(user_id, query, limit=max_knowledge)
+                else:
+                    kn = []
+                if not kn:
+                    kn = self.recent_knowledge(user_id, limit=max_knowledge)
+            except sqlite3.Error:
+                kn = []
+            if kn:
+                parts.append("\n학습한 지식:")
+                for k in kn:
+                    topic = (k.get("topic") or "").strip()
+                    content = (k.get("content") or "").strip().replace("\n", " ")
+                    if len(content) > 160:
+                        content = content[:160] + "…"
+                    media: List[str] = []
+                    if k.get("image_path"): media.append("이미지")
+                    if k.get("audio_path"): media.append("음성")
+                    if k.get("video_path"): media.append("영상")
+                    media_tag = f" [{'/'.join(media)} 첨부]" if media else ""
+                    head = f"{topic}: " if topic else ""
+                    parts.append(f"- {head}{content}{media_tag}")
         if not parts:
             return ""
         return "[기억]\n" + "\n".join(parts)

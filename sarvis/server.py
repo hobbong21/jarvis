@@ -144,6 +144,14 @@ COMMANDS_DIR = os.environ.get(
 )
 os.makedirs(COMMANDS_DIR, exist_ok=True)
 
+# 사이클 #16: 사비스의 학습 지식 첨부 미디어 디렉토리. 텍스트/메타는
+# memory.knowledge 테이블, 이진 파일은 여기에 <knowledge.id>.{jpg|webm} 로 저장.
+KNOWLEDGE_DIR = os.environ.get(
+    "SARVIS_KNOWLEDGE_DIR",
+    os.path.join(os.path.dirname(cfg.faces_dir) or "data", "knowledge"),
+)
+os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
+
 print("[3/3] 설정 완료.")
 
 print("=" * 60)
@@ -894,6 +902,57 @@ async def websocket_endpoint(ws: WebSocket):
                         continue
                     async with busy:
                         await handle_audio(payload, emit, emit_bytes, session, build_context, _learn_and_signal)
+                elif kind in (0x06, 0x07, 0x08):
+                    # 사이클 #16: 학습 지식 첨부 미디어 저장.
+                    # 페이로드 포맷은 0x03..0x05 와 동일:
+                    #   <caption_len:2 BE><caption_utf8><blob>
+                    # caption 은 content (자유 서술) — topic/source/tags 는
+                    # 이후 knowledge_update 메시지로 보강할 수 있다.
+                    if len(payload) < 2:
+                        continue
+                    clen = int.from_bytes(payload[:2], "big")
+                    if len(payload) < 2 + clen:
+                        continue
+                    try:
+                        caption = payload[2:2 + clen].decode("utf-8", errors="replace")
+                    except Exception:
+                        caption = ""
+                    blob = payload[2 + clen:]
+                    if not blob:
+                        continue
+                    if kind == 0x06:
+                        ext, slot = ".jpg", "image"
+                    elif kind == 0x07:
+                        ext, slot = ".webm", "audio"
+                    else:  # 0x08
+                        ext, slot = ".webm", "video"
+                    try:
+                        kid = await asyncio.to_thread(
+                            functools.partial(
+                                session.memory.add_knowledge,
+                                user_id=session.memory_user_id,
+                                content=caption,
+                                source="user",
+                            )
+                        )
+                        media_path = os.path.join(KNOWLEDGE_DIR, f"{kid}{ext}")
+                        await asyncio.to_thread(_write_bytes, media_path, blob)
+                        await asyncio.to_thread(
+                            functools.partial(
+                                session.memory.update_knowledge,
+                                kid, **{f"{slot}_path": media_path},
+                            )
+                        )
+                        await emit(
+                            type="knowledge_saved", id=kid, content=caption,
+                            has_image=(slot == "image"),
+                            has_audio=(slot == "audio"),
+                            has_video=(slot == "video"),
+                        )
+                    except Exception as e:
+                        print(f"[WS 0x{kind:02x} knowledge media save] {e}")
+                        await emit(type="error", message="학습 자료를 저장하지 못했습니다.")
+                    continue
                 elif kind in (0x03, 0x04, 0x05):
                     # 멀티모달 명령 미디어 저장.
                     # 페이로드 형식: <caption_len:2 BE><caption_utf8><media bytes>
@@ -1204,6 +1263,119 @@ async def websocket_endpoint(ws: WebSocket):
                 else:
                     ok = await asyncio.to_thread(session.memory.delete_command, cid)
                     await emit(type="command_deleted", id=cid, ok=ok)
+
+            # ── 사이클 #16: 멀티모달 학습 지식 (knowledge) ────────────
+            elif mtype == "knowledge_add":
+                # body: {content, topic?, source?, confidence?, tags?: List[str]}
+                content = (data.get("content") or "").strip()
+                if not content:
+                    await emit(type="error", message="학습 내용이 비어 있습니다.")
+                else:
+                    try:
+                        kid = await asyncio.to_thread(
+                            functools.partial(
+                                session.memory.add_knowledge,
+                                user_id=session.memory_user_id,
+                                content=content,
+                                topic=str(data.get("topic") or ""),
+                                source=str(data.get("source") or "user"),
+                                confidence=float(data.get("confidence", 1.0)),
+                                tags=data.get("tags") if isinstance(data.get("tags"), list) else None,
+                            )
+                        )
+                        await emit(type="knowledge_saved", id=kid, content=content,
+                                   has_image=False, has_audio=False, has_video=False)
+                    except ValueError:
+                        await emit(type="error", message="학습 자료의 값이 올바르지 않습니다.")
+                    except Exception as e:
+                        print(f"[WS knowledge_add] {e}")
+                        await emit(type="error", message="학습 자료를 저장하지 못했습니다.")
+
+            elif mtype == "knowledge_recent":
+                limit = max(1, min(int(data.get("limit") or 20), 200))
+                source = data.get("source")
+                rows = await asyncio.to_thread(
+                    session.memory.recent_knowledge,
+                    session.memory_user_id, limit,
+                    source if isinstance(source, str) else None,
+                )
+                items = [{
+                    "id": r["id"],
+                    "topic": r["topic"],
+                    "content": r["content"],
+                    "source": r["source"],
+                    "confidence": r["confidence"],
+                    "tags": r.get("tags", []),
+                    "has_image": bool(r.get("image_path")),
+                    "has_audio": bool(r.get("audio_path")),
+                    "has_video": bool(r.get("video_path")),
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                } for r in rows]
+                await emit(type="knowledge_recent", items=items)
+
+            elif mtype == "knowledge_search":
+                q = (data.get("query") or "").strip()
+                limit = max(1, min(int(data.get("limit") or 10), 100))
+                rows = await asyncio.to_thread(
+                    session.memory.search_knowledge,
+                    session.memory_user_id, q, limit,
+                ) if q else []
+                items = [{
+                    "id": r["id"], "topic": r["topic"], "content": r["content"],
+                    "source": r["source"], "confidence": r["confidence"],
+                    "tags": r.get("tags", []),
+                    "has_image": bool(r.get("image_path")),
+                    "has_audio": bool(r.get("audio_path")),
+                    "has_video": bool(r.get("video_path")),
+                    "updated_at": r["updated_at"],
+                } for r in rows]
+                await emit(type="knowledge_search", query=q, items=items)
+
+            elif mtype == "knowledge_get":
+                kid = int(data.get("id") or 0)
+                row = await asyncio.to_thread(session.memory.get_knowledge, kid)
+                if not row or row["user_id"] != session.memory_user_id:
+                    await emit(type="error", message="학습 자료를 찾을 수 없습니다.")
+                else:
+                    img_b64 = audio_b64 = video_b64 = None
+                    MEDIA_INLINE_MAX = 8 * 1024 * 1024
+                    for flag, slot, holder in (
+                        ("include_image", "image_path", "img"),
+                        ("include_audio", "audio_path", "audio"),
+                        ("include_video", "video_path", "video"),
+                    ):
+                        if data.get(flag) and row.get(slot) and os.path.isfile(row[slot]):
+                            try:
+                                if os.path.getsize(row[slot]) <= MEDIA_INLINE_MAX:
+                                    blob = await asyncio.to_thread(_read_bytes, row[slot])
+                                    enc = base64.b64encode(blob).decode("ascii")
+                                    if holder == "img": img_b64 = enc
+                                    elif holder == "audio": audio_b64 = enc
+                                    else: video_b64 = enc
+                            except OSError as e:
+                                print(f"[WS knowledge_get {slot} read] {e}")
+                                await emit(type="error", message="학습 자료를 불러올 수 없습니다.")
+                    await emit(
+                        type="knowledge_get",
+                        id=row["id"], topic=row["topic"], content=row["content"],
+                        source=row["source"], confidence=row["confidence"],
+                        tags=row.get("tags", []),
+                        has_image=bool(row.get("image_path")),
+                        has_audio=bool(row.get("audio_path")),
+                        has_video=bool(row.get("video_path")),
+                        created_at=row["created_at"], updated_at=row["updated_at"],
+                        image_b64=img_b64, audio_b64=audio_b64, video_b64=video_b64,
+                    )
+
+            elif mtype == "knowledge_delete":
+                kid = int(data.get("id") or 0)
+                row = await asyncio.to_thread(session.memory.get_knowledge, kid)
+                if not row or row["user_id"] != session.memory_user_id:
+                    await emit(type="error", message="학습 자료를 찾을 수 없습니다.")
+                else:
+                    ok = await asyncio.to_thread(session.memory.delete_knowledge, kid)
+                    await emit(type="knowledge_deleted", id=kid, ok=ok)
 
             elif mtype == "ping":
                 await emit(type="pong")
@@ -1703,4 +1875,4 @@ async def harness_ws_endpoint(ws: WebSocket, token: Optional[str] = None):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=5000, reload=False)
+    uvicorn.run("sarvis.server:app", host="0.0.0.0", port=5000, reload=False)

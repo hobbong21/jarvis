@@ -590,5 +590,161 @@ class CommandsAudioVideoTests(unittest.TestCase):
         self.assertEqual(rows[0]["command_text"], "레거시 행")
 
 
+class KnowledgeTests(unittest.TestCase):
+    """사이클 #16 — 멀티모달 학습 지식 저장공간."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.mem = Memory(os.path.join(self.tmpdir.name, "mem.db"))
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    def test_add_minimal_returns_int_id(self) -> None:
+        kid = self.mem.add_knowledge("u1", "파이썬 dict 는 순서를 유지한다")
+        self.assertIsInstance(kid, int)
+        self.assertGreater(kid, 0)
+
+    def test_add_with_topic_tags_and_media_persists(self) -> None:
+        ip = os.path.join(self.tmpdir.name, "k.jpg")
+        with open(ip, "wb") as fh:
+            fh.write(b"\xff\xd8")
+        kid = self.mem.add_knowledge(
+            "u1", "사용자는 매주 화요일에 헬스장에 간다",
+            topic="루틴", source="conversation", confidence=0.8,
+            tags=["habit", "fitness"], image_path=ip,
+        )
+        row = self.mem.get_knowledge(kid)
+        self.assertEqual(row["topic"], "루틴")
+        self.assertEqual(row["source"], "conversation")
+        self.assertAlmostEqual(row["confidence"], 0.8)
+        self.assertEqual(row["tags"], ["habit", "fitness"])
+        self.assertEqual(row["image_path"], ip)
+
+    def test_add_invalid_source_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self.mem.add_knowledge("u1", "x", source="hallucinated")
+
+    def test_add_invalid_confidence_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self.mem.add_knowledge("u1", "x", confidence=1.5)
+        with self.assertRaises(ValueError):
+            self.mem.add_knowledge("u1", "x", confidence=-0.1)
+
+    def test_update_changes_fields_and_bumps_updated_at(self) -> None:
+        kid = self.mem.add_knowledge("u1", "초안")
+        before = self.mem.get_knowledge(kid)["updated_at"]
+        time.sleep(0.01)
+        ok = self.mem.update_knowledge(
+            kid, content="확정본", topic="요약", confidence=0.5,
+            tags=["v2"],
+        )
+        self.assertTrue(ok)
+        row = self.mem.get_knowledge(kid)
+        self.assertEqual(row["content"], "확정본")
+        self.assertEqual(row["topic"], "요약")
+        self.assertAlmostEqual(row["confidence"], 0.5)
+        self.assertEqual(row["tags"], ["v2"])
+        self.assertGreater(row["updated_at"], before)
+
+    def test_update_no_fields_returns_false(self) -> None:
+        kid = self.mem.add_knowledge("u1", "x")
+        self.assertFalse(self.mem.update_knowledge(kid))
+
+    def test_recent_orders_by_updated_at_desc(self) -> None:
+        a = self.mem.add_knowledge("u1", "첫번째")
+        time.sleep(0.01)
+        b = self.mem.add_knowledge("u1", "두번째")
+        time.sleep(0.01)
+        self.mem.update_knowledge(a, content="첫번째 갱신됨")
+        rows = self.mem.recent_knowledge("u1")
+        self.assertEqual([r["id"] for r in rows[:2]], [a, b])
+
+    def test_recent_filters_by_source(self) -> None:
+        self.mem.add_knowledge("u1", "u-원본", source="user")
+        self.mem.add_knowledge("u1", "대화에서", source="conversation")
+        rows = self.mem.recent_knowledge("u1", source="conversation")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "conversation")
+
+    def test_search_matches_topic_content_and_tags(self) -> None:
+        a = self.mem.add_knowledge("u1", "어떤 본문", topic="파이썬 팁")
+        b = self.mem.add_knowledge("u1", "여기 dict 라는 단어가 있음")
+        c = self.mem.add_knowledge("u1", "본문", tags=["dictionary"])
+        ids = {r["id"] for r in self.mem.search_knowledge("u1", "dict")}
+        self.assertEqual(ids, {b, c})
+        ids2 = {r["id"] for r in self.mem.search_knowledge("u1", "파이썬")}
+        self.assertEqual(ids2, {a})
+
+    def test_search_empty_query_returns_empty(self) -> None:
+        self.mem.add_knowledge("u1", "anything")
+        self.assertEqual(self.mem.search_knowledge("u1", "  "), [])
+
+    def test_search_orders_by_confidence_desc(self) -> None:
+        self.mem.add_knowledge("u1", "낮은 dict", confidence=0.2)
+        self.mem.add_knowledge("u1", "높은 dict", confidence=0.9)
+        rows = self.mem.search_knowledge("u1", "dict")
+        self.assertEqual(rows[0]["content"], "높은 dict")
+        self.assertEqual(rows[1]["content"], "낮은 dict")
+
+    def test_search_isolated_per_user(self) -> None:
+        self.mem.add_knowledge("u1", "u1 전용 dict")
+        self.mem.add_knowledge("u2", "u2 전용 dict")
+        rows = self.mem.search_knowledge("u1", "dict")
+        self.assertEqual(len(rows), 1)
+        self.assertIn("u1", rows[0]["content"])
+
+    def test_delete_removes_row_and_all_media_files(self) -> None:
+        ip = os.path.join(self.tmpdir.name, "d.jpg")
+        ap = os.path.join(self.tmpdir.name, "d.webm")
+        vp = os.path.join(self.tmpdir.name, "d.mp4")
+        for p in (ip, ap, vp):
+            with open(p, "wb") as fh:
+                fh.write(b"x")
+        kid = self.mem.add_knowledge(
+            "u1", "삭제 대상", image_path=ip, audio_path=ap, video_path=vp,
+        )
+        self.assertTrue(self.mem.delete_knowledge(kid))
+        for p in (ip, ap, vp):
+            self.assertFalse(os.path.isfile(p))
+        self.assertIsNone(self.mem.get_knowledge(kid))
+
+    def test_delete_unknown_returns_false(self) -> None:
+        self.assertFalse(self.mem.delete_knowledge(999_999))
+
+    def test_context_block_injects_knowledge_with_media_marker(self) -> None:
+        # 미디어가 첨부된 카드는 [이미지 첨부] 마커를 달고 프롬프트에 들어간다.
+        ip = os.path.join(self.tmpdir.name, "ctx.jpg")
+        with open(ip, "wb") as fh:
+            fh.write(b"x")
+        self.mem.add_knowledge(
+            "u1", "참조 사진", topic="가족", image_path=ip,
+        )
+        block = self.mem.context_block("u1", query="가족")
+        self.assertIn("학습한 지식:", block)
+        self.assertIn("가족", block)
+        self.assertIn("[이미지 첨부]", block)
+
+    def test_context_block_search_takes_priority_over_recent(self) -> None:
+        # query 매칭이 있으면 search_knowledge 결과만 (recent fallback X)
+        self.mem.add_knowledge("u1", "관련없는 메모")
+        self.mem.add_knowledge("u1", "사비스의 하드웨어 사양", topic="시스템")
+        block = self.mem.context_block("u1", query="하드웨어")
+        self.assertIn("하드웨어", block)
+        self.assertNotIn("관련없는 메모", block)
+
+    def test_context_block_falls_back_to_recent_when_no_match(self) -> None:
+        self.mem.add_knowledge("u1", "최근 항목 1")
+        self.mem.add_knowledge("u1", "최근 항목 2")
+        block = self.mem.context_block("u1", query="존재하지않는단어")
+        self.assertIn("학습한 지식:", block)
+        self.assertIn("최근 항목", block)
+
+    def test_context_block_max_knowledge_zero_skips_section(self) -> None:
+        self.mem.add_knowledge("u1", "있는 지식")
+        block = self.mem.context_block("u1", query="지식", max_knowledge=0)
+        self.assertNotIn("학습한 지식:", block)
+
+
 if __name__ == "__main__":
     unittest.main()
