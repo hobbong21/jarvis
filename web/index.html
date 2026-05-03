@@ -272,6 +272,76 @@
 
 <audio id="tts-audio" preload="auto"></audio>
 
+<!-- ======================== 사이클 #18: 주인 인증 오버레이 ======================== -->
+<!-- 주인 등록(미등록) 또는 로그인(등록됨) UI. 인증 통과 전엔 메인 UI 위에 표시. -->
+<div id="auth-overlay" class="auth-overlay" hidden aria-hidden="true">
+  <div class="auth-card" role="dialog" aria-labelledby="auth-title">
+    <h2 id="auth-title" class="auth-title">S.A.R.V.I.S 주인 인증</h2>
+    <p id="auth-subtitle" class="auth-subtitle">주인을 확인하고 있습니다...</p>
+
+    <!-- 카메라 미리보기 (인증 단계 동안 표시) -->
+    <div class="auth-cam-wrap">
+      <video id="auth-cam-preview" autoplay playsinline muted></video>
+      <div id="auth-cam-overlay" class="auth-cam-overlay"></div>
+    </div>
+
+    <!-- 단계 표시 -->
+    <div class="auth-steps">
+      <div id="auth-step-face" class="auth-step pending">
+        <span class="auth-step-icon">①</span>
+        <span class="auth-step-label">얼굴 인증</span>
+        <span class="auth-step-status" id="auth-face-status">대기 중</span>
+      </div>
+      <div id="auth-step-voice" class="auth-step pending">
+        <span class="auth-step-icon">②</span>
+        <span class="auth-step-label">음성 인증</span>
+        <span class="auth-step-status" id="auth-voice-status">대기 중</span>
+      </div>
+    </div>
+
+    <!-- 등록 폼 (미등록 상태) -->
+    <form id="auth-enroll-form" class="auth-enroll-form" hidden>
+      <p class="auth-help">아직 주인이 등록되지 않았습니다. 본인의 얼굴과 음성 패스프레이즈를 등록해 주세요.</p>
+      <label class="auth-field">
+        <span>주인 이름</span>
+        <input id="auth-enroll-name" type="text" required maxlength="40"
+               placeholder="예: 민수" autocomplete="off">
+      </label>
+      <label class="auth-field">
+        <span>음성 패스프레이즈 (4자 이상)</span>
+        <input id="auth-enroll-passphrase" type="text" required minlength="4" maxlength="80"
+               placeholder="예: 사비스 안녕 나야" autocomplete="off">
+        <small>로그인할 때 이 문구를 그대로 말해야 합니다. 외우기 쉬운 짧은 문장을 권장합니다.</small>
+      </label>
+      <div class="auth-actions">
+        <button type="submit" class="auth-btn primary">등록하기 (얼굴 캡처 + 저장)</button>
+      </div>
+      <p id="auth-enroll-msg" class="auth-msg"></p>
+    </form>
+
+    <!-- 로그인 안내 (등록됨, 미인증) -->
+    <div id="auth-login-panel" class="auth-login-panel" hidden>
+      <p class="auth-help">
+        등록된 주인: <strong id="auth-login-name"></strong>
+      </p>
+      <ol class="auth-login-steps">
+        <li>카메라를 정면으로 보세요. 얼굴이 인식되면 자동으로 다음 단계로 넘어갑니다.</li>
+        <li>음성 인증 버튼을 누른 후 등록한 패스프레이즈를 말씀해 주세요.</li>
+      </ol>
+      <div class="auth-actions">
+        <button id="auth-voice-btn" type="button" class="auth-btn primary" disabled>
+          🎙 음성 패스프레이즈 말하기
+        </button>
+        <button id="auth-reset-btn" type="button" class="auth-btn ghost"
+                title="주인 등록을 처음부터 다시 합니다 (현재 등록 정보 삭제)">
+          주인 재등록
+        </button>
+      </div>
+      <p id="auth-login-msg" class="auth-msg"></p>
+    </div>
+  </div>
+</div>
+
 <script src="/static/orb.js"></script>
 <script src="/static/app.js"></script>
 </body>

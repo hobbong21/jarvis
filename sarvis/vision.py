@@ -80,6 +80,40 @@ def _get_face_recognition():
 # cv2 상태 로그는 백그라운드 로더에서 실패 시에만 출력 (_ensure_cv2 내부)
 
 
+def compute_face_encoding_from_jpeg(jpeg_bytes: bytes) -> Optional[List[float]]:
+    """JPEG 바이트에서 가장 큰 얼굴의 128차원 인코딩 추출.
+
+    사이클 #18 — 주인 인증(OwnerAuth) 등록/로그인용. face_recognition
+    또는 cv2 가 없으면 None — 호출자(server)는 폴백 모드로 전환.
+    실패 시 None (예외는 흡수). 비교적 무거우므로 `asyncio.to_thread` 권장.
+    """
+    fr = _get_face_recognition()
+    if fr is None or not _ensure_cv2():
+        return None
+    try:
+        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return None
+        # 0.5 배 다운샘플 — face_recognition 의 hog 모델이 ~3x 빠름.
+        small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        locs = fr.face_locations(rgb, model="hog")
+        if not locs:
+            return None
+        encs = fr.face_encodings(rgb, locs)
+        if not encs:
+            return None
+        # 가장 큰 얼굴 (등록자 본인일 확률 ↑) 선택.
+        def _area(loc):
+            t, r, b, l = loc
+            return max(0, r - l) * max(0, b - t)
+        idx = max(range(len(locs)), key=lambda i: _area(locs[i]))
+        return [float(x) for x in encs[idx]]
+    except Exception:
+        return None
+
+
 # ============================================================
 # 얼굴 메모리 — 등록된 사람들의 인코딩 저장/조회
 # ============================================================

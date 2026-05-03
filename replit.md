@@ -2,6 +2,35 @@
 
 A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning → Model Selection → Task Execution → Response Generation). Features face recognition, voice interaction, and tool-augmented intelligence.
 
+## Cycle #18 — Owner Authentication (Face + Voice Passphrase)
+
+서비스 시작 시 주인 인증을 강제하는 로그인 시스템.
+
+**구성:**
+- `sarvis/owner_auth.py` (신규) — `OwnerAuth`. `data/owner.json` 에 얼굴 인코딩(128차원, 옵션) + 음성 패스프레이즈(NFC + 구두점 제거 정규화) 저장. `verify_voice` = difflib SequenceMatcher ≥ 0.78. `verify_face_encoding` = face_recognition 호환 거리 ≤ 0.55.
+- `sarvis/vision.py` — `compute_face_encoding_from_jpeg(jpeg)` 헬퍼 (face_recognition + cv2 lazy load, 0.5x 다운샘플, 가장 큰 얼굴 선택, 실패 시 None).
+- `sarvis/server.py` — WS 핸들러 인증 게이트:
+  - 미등록 → 게이트 OFF (회귀 0). 클라이언트는 등록 UI 표시.
+  - 등록 → 매 연결마다 `auth_state{face_ok, voice_ok}` 모두 통과 전엔 화이트리스트 (`enroll_owner`/`auth_reset`/`auth_status_request`/`models_list`/`list_faces`) 외 모든 메시지 차단 (`auth_required` 안내).
+  - `welcome_task` 는 `_start_welcome_if_authed()` 로 인증 완료 후 시작.
+  - 0x01 프레임 (미인증) → `_try_face_login` (1초 throttle, 인코딩 없으면 박스 감지 폴백 + degraded 표시).
+  - 0x02 음성 (미인증) → `_do_voice_login` (STT → `verify_voice` → `auth_progress` emit, len<2 silent skip 대신 안내).
+  - JSON `enroll_owner`: 카메라 프레임에서 얼굴 캡처 → 인코딩 계산 → `OwnerAuth.enroll` + `FaceRegistry.register` (도구 호환). 등록자 자동 로그인.
+  - JSON `auth_reset`: 등록 해제 + 세션 초기화.
+- `web/index.html` + `web/style.css` + `web/app.js` — 풀스크린 인증 오버레이:
+  - 미등록 → 이름 + 패스프레이즈 입력 폼 + 카메라 미리보기 → "등록하기".
+  - 등록됨 → 얼굴 자동 매치 + "🎙 음성 패스프레이즈 말하기" 버튼 (8초 자동 정지) → 두 단계 ✓ 시 페이드 아웃.
+  - "주인 재등록" 버튼.
+  - WS 이벤트: `auth_status` / `auth_progress` / `auth_complete` / `auth_required` / `auth_reset_ok` / `enroll_owner_result`.
+
+**보안 메모:**
+- 음성 인증은 1차로 STT 패스프레이즈 매칭 — 같은 문구를 누가 말해도 통과 가능. 사이클 #19 에서 화자 임베딩(resemblyzer)으로 업그레이드 예정.
+- `face_recognition` 미설치: 인코딩 저장 안 됨 → 폴백 (얼굴 박스 감지) + UI "(간이)" 표시.
+- `data/owner.json` 평문 저장. 패스프레이즈는 fuzzy 매칭 위해 정규화 텍스트 보관 (해시 X).
+
+**테스트:** `tests/test_owner_auth.py` — 12 케이스 (정규화, 유사도, 등록 영속성, 검증, 리셋, 손상 파일 처리). PYTHONPATH=. 직접 실행 (unittest discover hang 회피).
+
+
 ## Architecture
 
 - **Backend**: FastAPI + WebSockets (`server.py`) on port 5000

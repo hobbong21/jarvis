@@ -33,7 +33,8 @@ from .emotion import Emotion
 from .memory import get_memory, extract_user_facts
 from .stt_filter import clean_stt_text, build_dynamic_initial_prompt
 from .tools import ToolExecutor
-from .vision import FaceRegistry, WebVision
+from .vision import FaceRegistry, WebVision, compute_face_encoding_from_jpeg
+from .owner_auth import OwnerAuth
 
 # Harness Phase 4 — Fan-out 분석 + Evolution 텔레메트리
 from .analysis import parallel_analyze, analysis_to_context
@@ -131,6 +132,10 @@ def _text_input_log_user(data: dict) -> bool:
 
 print("[3/3] 얼굴 등록부 ...")
 FACE_REGISTRY = FaceRegistry(cfg.faces_dir)
+# 사이클 #18 — 주인 인증 (얼굴 + 음성 패스프레이즈).
+# 미등록 상태에선 게이트 비활성화 → 기존 테스트/사용자 흐름 회귀 0.
+# 등록되면 매 WS 연결마다 두 단계 모두 통과해야 메인 기능 사용 가능.
+OWNER_AUTH = OwnerAuth("data/owner.json")
 _known = FACE_REGISTRY.list_people()
 if _known:
     print(f"      등록된 얼굴: {', '.join(_known)}")
@@ -394,6 +399,37 @@ async def websocket_endpoint(ws: WebSocket):
         tools_enabled=session.tools is not None,
         faces=FACE_REGISTRY.list_people(),
     )
+
+    # ── 사이클 #18: 주인 인증 상태 ──────────────────────────────
+    # 미등록 → 게이트 비활성화 (face_ok/voice_ok 기본 True). 첫 부팅 사용자가
+    # 막히지 않고, 클라이언트는 "주인 등록" UI 만 띄움.
+    # 등록 → 두 단계 모두 통과 전엔 모든 명령 차단.
+    _enrolled = OWNER_AUTH.is_enrolled()
+    auth_state: Dict[str, Any] = {
+        "face_ok": not _enrolled,
+        "voice_ok": not _enrolled,
+        "last_face_attempt": 0.0,
+        "last_voice_attempt": 0.0,
+        "welcome_started": False,
+    }
+
+    def _is_authed() -> bool:
+        return bool(auth_state["face_ok"] and auth_state["voice_ok"])
+
+    async def _emit_auth_status():
+        info = OWNER_AUTH.info()
+        await emit(
+            type="auth_status",
+            enrolled=info["enrolled"],
+            face_name=info["face_name"],
+            voice_passphrase_len=info["voice_passphrase_len"],
+            has_face_encoding=info["has_face_encoding"],
+            face_ok=auth_state["face_ok"],
+            voice_ok=auth_state["voice_ok"],
+            authed=_is_authed(),
+        )
+
+    await _emit_auth_status()
 
     # 환영 인사 (백그라운드) — 고정 문구 + 직접 TTS.
     # ----------------------------------------------------------
@@ -861,21 +897,140 @@ async def websocket_endpoint(ws: WebSocket):
         except Exception:
             traceback.print_exc()
 
-    welcome_task = asyncio.create_task(welcome())
+    # 사이클 #18 — 인증 통과 전엔 환영 인사를 시작하지 않는다.
+    welcome_task: Optional[asyncio.Task] = None
+
+    def _start_welcome_if_authed():
+        nonlocal welcome_task
+        if auth_state["welcome_started"] or not _is_authed():
+            return
+        auth_state["welcome_started"] = True
+        welcome_task = asyncio.create_task(welcome())
+
+    _start_welcome_if_authed()
 
     async def _preempt_welcome():
         """사용자 입력이 도착하면 진행 중인 환영 인사를 즉시 취소.
 
         - 환영 인사가 busy lock 을 점유 중이라 사용자 입력이 폐기되는 회귀 차단.
         - 환영 인사가 본 응답보다 늦게 도착해 대화 순서가 뒤집히는 회귀 차단.
+        - 사이클 #18: welcome 이 아직 시작 안 됐을 수도 있다 (미인증 상태) — None 가드.
         """
-        if welcome_task.done():
+        if welcome_task is None or welcome_task.done():
             return
         welcome_task.cancel()
         try:
             await welcome_task
         except (asyncio.CancelledError, Exception):
             pass
+
+    # ── 사이클 #18: 인증 게이트 헬퍼 ────────────────────────────────
+    # 등록된 상태에서 인증 미완료일 때 허용되는 JSON 메시지 화이트리스트.
+    # (등록/리셋/상태 조회 + 모델 카탈로그 같은 무해한 메타 호출만)
+    PRE_AUTH_ALLOWED_TYPES = {
+        "enroll_owner", "auth_reset", "auth_status_request",
+        "models_list", "list_faces",
+    }
+
+    async def _do_voice_login(audio_bytes: bytes) -> None:
+        """0x02 음성 로그인 시도 — STT → 패스프레이즈 매칭.
+
+        성공 시 voice_ok=True 마킹 + auth_progress emit. 인증 완료되면 welcome 시작.
+        실패 시 친절 안내. 무음/짧은 발화는 silent skip (재시도 유도).
+        """
+        if not OWNER_AUTH.is_enrolled():
+            return
+        if STT is None:
+            await emit(
+                type="error",
+                message="음성 인식이 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.",
+            )
+            return
+        # 임시 파일 → STT.transcribe.
+        suffix = ".webm"
+        fd, path = tempfile.mkstemp(prefix="sarvis_login_", suffix=suffix)
+        try:
+            os.close(fd)
+            with open(path, "wb") as f:
+                f.write(audio_bytes)
+            try:
+                text = await asyncio.to_thread(STT.transcribe, path, "")
+            except Exception as e:
+                print(f"[auth voice login] STT 실패: {e}")
+                await emit(type="error", message="음성 인식에 실패했습니다. 다시 말씀해주세요.")
+                return
+            text = clean_stt_text(text or "")
+            if not text or len(text) < 2:
+                # 짧은 잡음/환각 → 사용자에게 다시 안내 (silent skip 아님 — 인증 단계는
+                # 사용자에게 진행 상태를 명확히 보여줘야 함).
+                await emit(
+                    type="auth_progress",
+                    face_ok=auth_state["face_ok"],
+                    voice_ok=auth_state["voice_ok"],
+                    voice_attempt_text="",
+                    voice_attempt_ok=False,
+                    message="음성이 너무 짧거나 명확하지 않습니다. 다시 말씀해주세요.",
+                )
+                return
+            ok = OWNER_AUTH.verify_voice(text)
+            sim = OWNER_AUTH.voice_similarity_to(text)
+            if ok:
+                auth_state["voice_ok"] = True
+            await emit(
+                type="auth_progress",
+                face_ok=auth_state["face_ok"],
+                voice_ok=auth_state["voice_ok"],
+                voice_attempt_text=text,
+                voice_attempt_ok=ok,
+                voice_similarity=round(sim, 3),
+                message=("음성 인증 통과" if ok else "음성 패스프레이즈가 일치하지 않습니다."),
+            )
+            if _is_authed():
+                await emit(type="auth_complete", face_name=OWNER_AUTH.face_name)
+                _start_welcome_if_authed()
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+    async def _try_face_login(jpeg_bytes: bytes) -> None:
+        """0x01 프레임으로 얼굴 매치 시도. 인코딩 없으면 박스 감지로 폴백."""
+        if not OWNER_AUTH.is_enrolled() or auth_state["face_ok"]:
+            return
+        now = time.time()
+        if now - auth_state["last_face_attempt"] < 1.0:
+            return
+        auth_state["last_face_attempt"] = now
+
+        matched = False
+        degraded = False
+        if OWNER_AUTH.has_face_encoding:
+            enc = await asyncio.to_thread(
+                compute_face_encoding_from_jpeg, jpeg_bytes,
+            )
+            if enc and OWNER_AUTH.verify_face_encoding(enc):
+                matched = True
+        else:
+            # 폴백: 등록 시 인코딩이 저장되지 않은 환경 (face_recognition 미설치).
+            # 얼굴 박스가 감지되면 통과 — 보안은 약하지만 시스템이 동작 함.
+            if session.vision.face_boxes:
+                matched = True
+                degraded = True
+
+        if matched:
+            auth_state["face_ok"] = True
+            await emit(
+                type="auth_progress",
+                face_ok=True,
+                voice_ok=auth_state["voice_ok"],
+                face_match_ok=True,
+                degraded=degraded,
+                message=("얼굴 인증 통과 (간이 모드)" if degraded else "얼굴 인증 통과"),
+            )
+            if _is_authed():
+                await emit(type="auth_complete", face_name=OWNER_AUTH.face_name)
+                _start_welcome_if_authed()
 
     try:
         while True:
@@ -897,7 +1052,16 @@ async def websocket_endpoint(ws: WebSocket):
                         fw, fh = session.vision.get_frame_size()
                         boxes = [list(b) for b in session.vision.face_boxes]
                         await emit(type="faces", boxes=boxes, fw=fw, fh=fh)
+                    # 사이클 #18 — 미인증 상태면 매 프레임을 얼굴 매치에 사용.
+                    if OWNER_AUTH.is_enrolled() and not auth_state["face_ok"]:
+                        await _try_face_login(payload)
                 elif kind == 0x02:
+                    # 사이클 #18 — 인증 미완료면 음성 데이터를 로그인 시도로 처리.
+                    if OWNER_AUTH.is_enrolled() and not _is_authed():
+                        if not auth_state["voice_ok"]:
+                            async with busy:
+                                await _do_voice_login(payload)
+                        continue
                     await _preempt_welcome()
                     if busy.locked():
                         continue
@@ -1019,6 +1183,86 @@ async def websocket_endpoint(ws: WebSocket):
                 continue
 
             mtype = data.get("type")
+
+            # ── 사이클 #18: 인증 게이트 ────────────────────────────────
+            # 등록된 상태에서 인증 미완료면 화이트리스트 외 모든 메시지 차단.
+            if (
+                OWNER_AUTH.is_enrolled()
+                and not _is_authed()
+                and mtype not in PRE_AUTH_ALLOWED_TYPES
+            ):
+                await emit(
+                    type="auth_required",
+                    face_ok=auth_state["face_ok"],
+                    voice_ok=auth_state["voice_ok"],
+                    message="먼저 주인 인증을 완료해주세요 (얼굴 + 음성).",
+                )
+                continue
+
+            if mtype == "auth_status_request":
+                await _emit_auth_status()
+                continue
+
+            if mtype == "auth_reset":
+                # 등록 해제 + 세션 인증 상태 초기화. 재등록을 위한 명시적 리셋.
+                OWNER_AUTH.reset()
+                auth_state["face_ok"] = True
+                auth_state["voice_ok"] = True
+                auth_state["welcome_started"] = False
+                await _emit_auth_status()
+                await emit(type="auth_reset_ok",
+                           message="주인 등록을 초기화했습니다. 다시 등록해주세요.")
+                continue
+
+            if mtype == "enroll_owner":
+                # body: {face_name, voice_passphrase}. 카메라 프레임은 이미
+                # 0x01 로 push_jpeg 됨 → crop_largest_face_jpeg 로 추출.
+                face_name = (data.get("face_name") or "").strip()
+                passphrase = (data.get("voice_passphrase") or "").strip()
+                if not face_name or not passphrase:
+                    await emit(
+                        type="enroll_owner_result", ok=False,
+                        message="이름과 음성 패스프레이즈를 모두 입력해주세요.",
+                    )
+                    continue
+                crop = session.vision.crop_largest_face_jpeg(require_face=True)
+                if not crop:
+                    await emit(
+                        type="enroll_owner_result", ok=False,
+                        message="얼굴이 명확히 보이지 않습니다. 카메라를 정면으로 보고 다시 시도해주세요.",
+                    )
+                    continue
+                # 인코딩 계산 (face_recognition 가능 시).
+                enc = await asyncio.to_thread(
+                    compute_face_encoding_from_jpeg, crop,
+                )
+                try:
+                    OWNER_AUTH.enroll(face_name, passphrase, face_encoding=enc)
+                    # FaceRegistry 에도 등록 — 기존 도구가 얼굴 사진을 참조할 수 있도록.
+                    try:
+                        FACE_REGISTRY.register(face_name, crop)
+                    except Exception:
+                        traceback.print_exc()
+                    # 등록자는 자동 로그인 — 막 본인 얼굴/문구를 셋업했으므로.
+                    auth_state["face_ok"] = True
+                    auth_state["voice_ok"] = True
+                    await emit(
+                        type="enroll_owner_result", ok=True,
+                        face_name=face_name,
+                        has_face_encoding=enc is not None,
+                        message=f"주인으로 등록되었습니다, {face_name} 님. 환영합니다.",
+                        faces=FACE_REGISTRY.list_people(),
+                    )
+                    await _emit_auth_status()
+                    await emit(type="auth_complete", face_name=face_name)
+                    _start_welcome_if_authed()
+                except ValueError as ve:
+                    await emit(type="enroll_owner_result", ok=False, message=str(ve))
+                except Exception as e:
+                    traceback.print_exc()
+                    await emit(type="enroll_owner_result", ok=False,
+                               message=f"등록 실패: {e}")
+                continue
 
             if mtype == "text_input":
                 await _preempt_welcome()

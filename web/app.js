@@ -363,6 +363,30 @@
       case 'error':
         flash(`⚠ ${m.message}`, 'error');
         break;
+      // ── 사이클 #18: 주인 인증 ────────────────────────────
+      case 'auth_status':
+        applyAuthStatus(m);
+        break;
+      case 'auth_progress':
+        applyAuthProgress(m);
+        break;
+      case 'auth_complete':
+        applyAuthComplete(m);
+        break;
+      case 'auth_required':
+        // 서버가 미인증 상태에서 명령을 거부 — 오버레이 다시 표시.
+        if (authState && !authState.authed) showAuthOverlay();
+        if (m.message) flash(`🔒 ${m.message}`, 'error');
+        break;
+      case 'auth_reset_ok':
+        // 서버가 등록을 지웠음 → 등록 폼으로 전환.
+        applyAuthStatus({ enrolled: false, face_ok: true, voice_ok: true,
+                          authed: false, face_name: '' });
+        flash('🔓 주인 등록이 초기화되었습니다.', 'ok');
+        break;
+      case 'enroll_owner_result':
+        applyEnrollResult(m);
+        break;
     }
   }
 
@@ -1566,6 +1590,220 @@
   }
 
   // ---------- 시계 ----------
+  // ============================================================
+  // 사이클 #18 — 주인 인증 오버레이 (등록/로그인)
+  // ============================================================
+  const authOverlay = $('auth-overlay');
+  const authSubtitle = $('auth-subtitle');
+  const authEnrollForm = $('auth-enroll-form');
+  const authEnrollName = $('auth-enroll-name');
+  const authEnrollPass = $('auth-enroll-passphrase');
+  const authEnrollMsg = $('auth-enroll-msg');
+  const authLoginPanel = $('auth-login-panel');
+  const authLoginName = $('auth-login-name');
+  const authLoginMsg = $('auth-login-msg');
+  const authVoiceBtn = $('auth-voice-btn');
+  const authResetBtn = $('auth-reset-btn');
+  const authStepFace = $('auth-step-face');
+  const authStepVoice = $('auth-step-voice');
+  const authFaceStatus = $('auth-face-status');
+  const authVoiceStatus = $('auth-voice-status');
+  const authCamPreview = $('auth-cam-preview');
+
+  let authState = { enrolled: false, face_ok: true, voice_ok: true, authed: true };
+  let authVoiceRecording = false;
+  let authMediaRecorder = null;
+  let authChunks = [];
+
+  function showAuthOverlay() {
+    if (!authOverlay) return;
+    authOverlay.hidden = false;
+    authOverlay.setAttribute('aria-hidden', 'false');
+  }
+  function hideAuthOverlay() {
+    if (!authOverlay) return;
+    authOverlay.hidden = true;
+    authOverlay.setAttribute('aria-hidden', 'true');
+  }
+  function setAuthStep(el, statusEl, state, label) {
+    if (!el) return;
+    el.classList.remove('ok', 'fail', 'pending');
+    el.classList.add(state);
+    if (statusEl && label != null) statusEl.textContent = label;
+  }
+
+  function ensureAuthCamera() {
+    // 인증 흐름엔 카메라가 필수 — 자동 시작 + 오버레이 미리보기 연결.
+    if (!camStream) {
+      try { startCamera().catch(() => {}); } catch (_e) {}
+    }
+    setTimeout(() => {
+      if (camStream && authCamPreview && authCamPreview.srcObject !== camStream) {
+        authCamPreview.srcObject = camStream;
+      }
+    }, 250);
+  }
+
+  function applyAuthStatus(m) {
+    authState.enrolled = !!m.enrolled;
+    authState.face_ok = !!m.face_ok;
+    authState.voice_ok = !!m.voice_ok;
+    authState.authed = !!m.authed;
+    if (m.authed) { hideAuthOverlay(); return; }
+    showAuthOverlay();
+    ensureAuthCamera();
+    if (m.enrolled) {
+      if (authEnrollForm) authEnrollForm.hidden = true;
+      if (authLoginPanel) authLoginPanel.hidden = false;
+      if (authLoginName) authLoginName.textContent = m.face_name || '주인';
+      if (authSubtitle) authSubtitle.textContent = '얼굴과 음성으로 본인을 확인합니다.';
+    } else {
+      if (authEnrollForm) authEnrollForm.hidden = false;
+      if (authLoginPanel) authLoginPanel.hidden = true;
+      if (authSubtitle) authSubtitle.textContent = '아직 주인이 등록되지 않았습니다. 본인을 등록해 주세요.';
+    }
+    setAuthStep(authStepFace, authFaceStatus, m.face_ok ? 'ok' : 'pending',
+                m.face_ok ? '✓ 통과' : '대기 중');
+    setAuthStep(authStepVoice, authVoiceStatus, m.voice_ok ? 'ok' : 'pending',
+                m.voice_ok ? '✓ 통과' : '대기 중');
+    if (authVoiceBtn) authVoiceBtn.disabled = !m.face_ok || m.voice_ok;
+  }
+
+  function applyAuthProgress(m) {
+    if ('face_ok' in m) authState.face_ok = !!m.face_ok;
+    if ('voice_ok' in m) authState.voice_ok = !!m.voice_ok;
+    setAuthStep(authStepFace, authFaceStatus, authState.face_ok ? 'ok' : 'pending',
+                authState.face_ok ? (m.degraded ? '✓ (간이)' : '✓ 통과') : '대기 중');
+    if ('voice_attempt_ok' in m) {
+      if (m.voice_attempt_ok) {
+        setAuthStep(authStepVoice, authVoiceStatus, 'ok', '✓ 통과');
+      } else {
+        const heard = m.voice_attempt_text ? `들린 말: "${m.voice_attempt_text}"` : '불일치';
+        setAuthStep(authStepVoice, authVoiceStatus, 'fail', heard);
+      }
+    } else {
+      setAuthStep(authStepVoice, authVoiceStatus, authState.voice_ok ? 'ok' : 'pending',
+                  authState.voice_ok ? '✓ 통과' : '대기 중');
+    }
+    if (authLoginMsg) {
+      authLoginMsg.textContent = m.message || '';
+      authLoginMsg.classList.remove('error', 'ok');
+      if (m.voice_attempt_ok === false) authLoginMsg.classList.add('error');
+      else if (m.voice_attempt_ok === true || m.face_match_ok) authLoginMsg.classList.add('ok');
+    }
+    if (authVoiceBtn) authVoiceBtn.disabled = !authState.face_ok || authState.voice_ok;
+  }
+
+  function applyAuthComplete(m) {
+    authState.face_ok = true;
+    authState.voice_ok = true;
+    authState.authed = true;
+    setAuthStep(authStepFace, authFaceStatus, 'ok', '✓ 통과');
+    setAuthStep(authStepVoice, authVoiceStatus, 'ok', '✓ 통과');
+    if (authLoginMsg) {
+      authLoginMsg.textContent = `환영합니다, ${m.face_name || '주인'} 님.`;
+      authLoginMsg.className = 'auth-msg ok';
+    }
+    setTimeout(() => {
+      hideAuthOverlay();
+      if (authCamPreview) authCamPreview.srcObject = null;
+    }, 700);
+  }
+
+  function applyEnrollResult(m) {
+    if (!authEnrollMsg) return;
+    authEnrollMsg.textContent = m.message || '';
+    authEnrollMsg.className = 'auth-msg ' + (m.ok ? 'ok' : 'error');
+  }
+
+  if (authEnrollForm) {
+    authEnrollForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const name = (authEnrollName?.value || '').trim();
+      const pass = (authEnrollPass?.value || '').trim();
+      if (!name || !pass) {
+        authEnrollMsg.textContent = '이름과 패스프레이즈를 입력해주세요.';
+        authEnrollMsg.className = 'auth-msg error';
+        return;
+      }
+      if (!camStream) {
+        authEnrollMsg.textContent = '카메라가 시작되지 않았습니다. 권한을 허용해주세요.';
+        authEnrollMsg.className = 'auth-msg error';
+        ensureAuthCamera();
+        return;
+      }
+      authEnrollMsg.textContent = '얼굴 캡처 + 등록 중...';
+      authEnrollMsg.className = 'auth-msg';
+      send({ type: 'enroll_owner', face_name: name, voice_passphrase: pass });
+    });
+  }
+
+  if (authResetBtn) {
+    authResetBtn.addEventListener('click', () => {
+      if (!confirm('주인 등록을 초기화하고 처음부터 다시 등록하시겠습니까?')) return;
+      send({ type: 'auth_reset' });
+    });
+  }
+
+  if (authVoiceBtn) {
+    authVoiceBtn.addEventListener('click', async () => {
+      if (authVoiceRecording) {
+        if (authMediaRecorder && authMediaRecorder.state !== 'inactive') {
+          authMediaRecorder.stop();
+        }
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true },
+        });
+        const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus' : 'audio/webm';
+        authMediaRecorder = new MediaRecorder(stream, { mimeType: mime });
+        authChunks = [];
+        authMediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) authChunks.push(e.data);
+        };
+        authMediaRecorder.onstop = async () => {
+          stream.getTracks().forEach((t) => t.stop());
+          authVoiceRecording = false;
+          authVoiceBtn.classList.remove('recording');
+          authVoiceBtn.textContent = '🎙 음성 패스프레이즈 말하기';
+          const blob = new Blob(authChunks, { type: mime });
+          if (blob.size < 800) {
+            if (authLoginMsg) {
+              authLoginMsg.textContent = '음성이 너무 짧습니다. 다시 시도해주세요.';
+              authLoginMsg.className = 'auth-msg error';
+            }
+            return;
+          }
+          const buf = await blob.arrayBuffer();
+          sendBinary(0x02, buf);
+          if (authLoginMsg) {
+            authLoginMsg.textContent = '음성 인식 중...';
+            authLoginMsg.className = 'auth-msg';
+          }
+        };
+        authMediaRecorder.start();
+        authVoiceRecording = true;
+        authVoiceBtn.classList.add('recording');
+        authVoiceBtn.textContent = '⏹ 녹음 중지 (말씀 끝나면)';
+        // 8초 안전 자동 정지.
+        setTimeout(() => {
+          if (authMediaRecorder && authMediaRecorder.state !== 'inactive') {
+            authMediaRecorder.stop();
+          }
+        }, 8000);
+      } catch (err) {
+        console.error('[auth voice]', err);
+        if (authLoginMsg) {
+          authLoginMsg.textContent = '마이크 접근 실패: ' + (err.message || err);
+          authLoginMsg.className = 'auth-msg error';
+        }
+      }
+    });
+  }
+
   function setupClock() {
     const tick = () => {
       const d = new Date();
