@@ -2708,6 +2708,23 @@ async def health():
     }
 
 
+# 사이클 #26 — publish cold start 동안 LB health check 안정화.
+# /healthz 는 어떤 backend/DB/STT 상태와도 무관하게 uvicorn 이 뜨자마자 즉시 200.
+# 일부 LB 가 favicon 404 를 unhealthy 신호로 오인하는 케이스 대비해 빈 favicon 도 제공.
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
+
+_FAVICON_BYTES = b""  # 빈 응답 (브라우저는 무시, LB 는 200 으로 간주)
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    from fastapi import Response
+    return Response(content=_FAVICON_BYTES, media_type="image/x-icon")
+
+
 # ============================================================
 # Harness Evolution — 텔레메트리 요약 + Evolve 엔드포인트
 # ============================================================
