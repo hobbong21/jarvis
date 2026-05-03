@@ -160,6 +160,9 @@ from .ha import (
     Observer as _HAObserver,
     Reporter as _HAReporter,
     Diagnostician as _HADiagnostician,  # 사이클 #24
+    Strategist as _HAStrategist,        # 사이클 #25
+    Improver as _HAImprover,
+    Validator as _HAValidator,
     is_kill_switch_on as _ha_kill_switch_on,
     activate_kill_switch as _ha_kill_switch_activate,
     deactivate_kill_switch as _ha_kill_switch_deactivate,
@@ -1957,6 +1960,8 @@ async def websocket_endpoint(ws: WebSocket):
                 "ha_run_observer", "ha_issues_list", "ha_kill_switch",
                 "ha_optout", "ha_growth_diary",          # 사이클 #23
                 "ha_run_diagnostician", "ha_diagnoses_for_issue",  # 사이클 #24
+                "ha_run_strategist", "ha_run_improver", "ha_run_validator",
+                "ha_proposals_list", "ha_proposal_decision",  # 사이클 #25
             } and OWNER_AUTH.is_enrolled() and not _is_authed():
                 await emit(type="error", message="주인 인증이 필요합니다.")
                 continue
@@ -2014,7 +2019,10 @@ async def websocket_endpoint(ws: WebSocket):
             # 모든 ha_* 핸들러는 Kill Switch 활성 시 즉시 거부 + stdout 로그.
             elif mtype in {"ha_run_observer", "ha_issues_list",
                            "ha_kill_switch", "ha_optout", "ha_growth_diary",
-                           "ha_run_diagnostician", "ha_diagnoses_for_issue"}:
+                           "ha_run_diagnostician", "ha_diagnoses_for_issue",
+                           "ha_run_strategist", "ha_run_improver",
+                           "ha_run_validator", "ha_proposals_list",
+                           "ha_proposal_decision"}:
                 if mtype != "ha_kill_switch" and _ha_kill_switch_on():
                     print(f"[HA] kill_switch active — {mtype} 거부")
                     await emit(
@@ -2180,6 +2188,136 @@ async def websocket_endpoint(ws: WebSocket):
                     await emit(type="ha_diagnoses_for_issue", ok=True,
                                issue_id=issue_id, count=len(diags),
                                diagnoses=diags)
+
+                elif mtype == "ha_run_strategist":
+                    try:
+                        limit = int(data.get("limit") or 5)
+                    except (TypeError, ValueError):
+                        limit = 5
+                    try:
+                        strat = _HAStrategist(memory=session.memory)
+                        results = await asyncio.wait_for(
+                            asyncio.to_thread(strat.run_recent, limit),
+                            timeout=10.0,
+                        )
+                        await emit(type="ha_strategist_result", ok=True,
+                                   count=len(results),
+                                   strategies=[s.to_payload() for s in results])
+                    except _HAKillSwitchActivated as ex:
+                        await emit(type="ha_blocked", request=mtype,
+                                   message=str(ex))
+                    except asyncio.TimeoutError:
+                        await emit(type="ha_strategist_result", ok=False,
+                                   message="Strategist 시간 초과")
+                    except Exception as ex:
+                        print(f"[HA] strategist 실패: {ex!r}")
+                        await emit(type="ha_strategist_result", ok=False,
+                                   message=f"Strategist 실패: {ex}")
+
+                elif mtype == "ha_run_improver":
+                    try:
+                        limit = int(data.get("limit") or 50)
+                    except (TypeError, ValueError):
+                        limit = 50
+                    try:
+                        imp = _HAImprover(memory=session.memory)
+                        results = await asyncio.wait_for(
+                            asyncio.to_thread(imp.run_recent, limit),
+                            timeout=10.0,
+                        )
+                        await emit(type="ha_improver_result", ok=True,
+                                   count=len(results),
+                                   proposals=[r.to_payload() for r in results])
+                    except _HAKillSwitchActivated as ex:
+                        await emit(type="ha_blocked", request=mtype,
+                                   message=str(ex))
+                    except asyncio.TimeoutError:
+                        await emit(type="ha_improver_result", ok=False,
+                                   message="Improver 시간 초과")
+                    except Exception as ex:
+                        print(f"[HA] improver 실패: {ex!r}")
+                        await emit(type="ha_improver_result", ok=False,
+                                   message=f"Improver 실패: {ex}")
+
+                elif mtype == "ha_run_validator":
+                    try:
+                        limit = int(data.get("limit") or 50)
+                    except (TypeError, ValueError):
+                        limit = 50
+                    try:
+                        val = _HAValidator(memory=session.memory)
+                        results = await asyncio.wait_for(
+                            asyncio.to_thread(val.run_pending, limit),
+                            timeout=10.0,
+                        )
+                        await emit(type="ha_validator_result", ok=True,
+                                   count=len(results),
+                                   validations=[r.to_payload() for r in results])
+                    except _HAKillSwitchActivated as ex:
+                        await emit(type="ha_blocked", request=mtype,
+                                   message=str(ex))
+                    except asyncio.TimeoutError:
+                        await emit(type="ha_validator_result", ok=False,
+                                   message="Validator 시간 초과")
+                    except Exception as ex:
+                        print(f"[HA] validator 실패: {ex!r}")
+                        await emit(type="ha_validator_result", ok=False,
+                                   message=f"Validator 실패: {ex}")
+
+                elif mtype == "ha_proposals_list":
+                    status = data.get("status")
+                    try:
+                        limit = int(data.get("limit") or 50)
+                    except (TypeError, ValueError):
+                        limit = 50
+                    try:
+                        rows = await asyncio.to_thread(
+                            session.memory.ha_proposals_list, status, limit,
+                        )
+                        # 각 proposal 에 가장 최근 validation 첨부.
+                        for r in rows:
+                            try:
+                                vs = await asyncio.to_thread(
+                                    session.memory.ha_validations_for_proposal,
+                                    r["proposal_id"], 1,
+                                )
+                                r["latest_validation"] = vs[0] if vs else None
+                            except Exception:
+                                r["latest_validation"] = None
+                        await emit(type="ha_proposals_list", ok=True,
+                                   count=len(rows), proposals=rows)
+                    except ValueError as ex:
+                        await emit(type="ha_proposals_list", ok=False,
+                                   message=str(ex))
+                    except Exception as ex:
+                        print(f"[HA] proposals_list 실패: {ex!r}")
+                        await emit(type="ha_proposals_list", ok=False,
+                                   message=f"목록 조회 실패: {ex}")
+
+                elif mtype == "ha_proposal_decision":
+                    pid = (data.get("proposal_id") or "").strip()
+                    decision = (data.get("decision") or "").strip()
+                    by = (data.get("by") or "owner").strip()[:64]
+                    if not pid or decision not in ("approved", "rejected"):
+                        await emit(type="ha_proposal_decision", ok=False,
+                                   message="proposal_id + decision(approved/rejected) 필요")
+                        continue
+                    try:
+                        ok = await asyncio.to_thread(
+                            session.memory.ha_proposal_decision,
+                            pid, decision, by,
+                        )
+                        await emit(type="ha_proposal_decision", ok=ok,
+                                   proposal_id=pid, decision=decision,
+                                   by=by, applied=False,
+                                   note="L1 — 승인되어도 자동 적용은 발생하지 않음 (Stage S4 도입 전)")
+                    except ValueError as ex:
+                        await emit(type="ha_proposal_decision", ok=False,
+                                   message=str(ex))
+                    except Exception as ex:
+                        print(f"[HA] proposal_decision 실패: {ex!r}")
+                        await emit(type="ha_proposal_decision", ok=False,
+                                   message=f"결정 처리 실패: {ex}")
 
                 elif mtype == "ha_growth_diary":
                     try:

@@ -19,8 +19,8 @@ Evaluators, Humble by Default.
 | 사이클 | Stage | 자율 등급 | 포함 에이전트 | 진입 기준(다음 단계) |
 |---|---|---|---|---|
 | #23 | S1 Read-Only | L0 | Observer + Reporter(미니) | Observer 정확도 ≥ 85% |
-| **#24 (현재)** | S2 Diagnose | L1 | + Diagnostician + Reporter(전체) | 보고 승인률 ≥ 70% |
-| #25 | S3 Improve | L1 (모두 사람 승인) | + Strategist + Improver + Validator | 회귀율 ≤ 5% |
+| #24 | S2 Diagnose | L1 | + Diagnostician + Reporter(전체) | 보고 승인률 ≥ 70% |
+| **#25 (현재)** | S3 Improve | L1 (모두 사람 승인) | + Strategist + Improver + Validator | 회귀율 ≤ 5% |
 | #26 | S4 Auto-Suggest | L2 (가역 변경 자동) | (동일) | 30일 자동 롤백 ≤ 2건 |
 | #27 | S5 Constrained Auto | L3 | + 자율성 등급 정책 | 6개월 + 외부 감사 |
 
@@ -33,6 +33,40 @@ Evaluators, Humble by Default.
 HA 자기 코드 수정, 사용자 데이터 외부 송출, 결제·삭제 직접 실행, Sarvis 안전
 프롬프트 섹션 수정, 자기 모니터링/감사/롤백 비활성화, Meta-Evaluator 입출력
 영향, Kill Switch 우회 — 모두 코드/권한 분리로 차단.
+
+## Cycle #25 — HA Stage S3 (Strategist + Improver + Validator, L1 — 사람 승인)
+
+사이클 #24 의 진단을 입력으로 **변경 후보 → 패치 명세 → 위험 검증 → 승인
+큐** 까지 자동화. **모든 출력은 ha_proposals(pending)** — 사람 승인 없이
+어떤 적용도 일어나지 않는다(L1 유지). 승인되어도 "적용" 은 Stage S4
+도입 전까지 발생하지 않으며, WS 응답에 `applied=False` 로 명시한다.
+
+신규 모듈 3종:
+- `sarvis/ha/strategist.py` — 8 카테고리 룰 매트릭스(prompt_tweak,
+  tool_swap, heuristic_threshold, knowledge_add, ui_hint, model_route,
+  monitoring_only, **do_nothing 강제 포함**). 카테고리/근본원인별 후보
+  3~5개 + Do Nothing.
+- `sarvis/ha/improver.py` — Strategy → PatchSpec(target/before/after/
+  reversible/rationale). 텍스트 명세만, 실제 파일 수정 없음.
+- `sarvis/ha/validator.py` — target prefix별 기본 위험 + reversibility
+  페널티 + 코드 경로 가산 + diag_conf 가산. risk_level low/med/high.
+  `auto_approval_blocked=True` 고정 (L1 규칙).
+
+Memory 신규 3 테이블 (`ha_strategies`, `ha_proposals`, `ha_validations`)
++ append-only 트리거 (strategies/validations) — proposals 는 status
+갱신 필요로 트리거 제외(주석). 메서드 11종 신규.
+
+server WS 5종 신규 (인증 + Kill Switch 게이트 동일):
+`ha_run_strategist` `ha_run_improver` `ha_run_validator`
+`ha_proposals_list{status?}` `ha_proposal_decision{proposal_id,
+decision, by}`. UI: Strategist/Improver/Validator/제안 큐 버튼 +
+승인·거부 인라인 버튼 (위험 등급/점수 배지 + after_text 미리보기).
+
+Reporter `growth_diary` 가 strategies/proposals 를 함께 노출. stage =
+"S3 — Improve Suggest", active_agents = 6 (+ Strategist + Improver +
+Validator).
+
+테스트 +22 (S3 단위 17 + WS round-trip 5). 회귀 **696/696 통과**.
 
 ## Cycle #24 — HA Stage S2 (Diagnostician, L1 — 진단까지)
 

@@ -141,15 +141,24 @@ class Reporter(HAAgent):
             diagnoses = self.memory.ha_diagnoses_recent(limit=limit)
         except Exception:
             diagnoses = []
+        try:
+            strategies = self.memory.ha_strategies_recent(limit=limit)
+        except Exception:
+            strategies = []
+        try:
+            proposals = self.memory.ha_proposals_list(limit=limit)
+        except Exception:
+            proposals = []
         return {
-            "stage": "S2 — Diagnose (Observer + Diagnostician + Reporter)",
-            "autonomy_level": "L1 (Diagnose-only, 변경 적용 없음)",
+            "stage": "S3 — Improve Suggest (Observer + Diagnostician + "
+                     "Strategist + Improver + Validator + Reporter)",
+            "autonomy_level": "L1 (모든 변경 사람 승인, 자동 적용 없음)",
             "issues": issues,
             "messages": msgs,
             "diagnoses": diagnoses,
-            "active_agents": ["Observer", "Diagnostician", "Reporter"],
-            "pending_agents": [
-                "Strategist (S3)", "Improver (S3)",
-                "Validator (S3)", "MetaEvaluator (S4)",
-            ],
+            "strategies": strategies,
+            "proposals": proposals,
+            "active_agents": ["Observer", "Diagnostician", "Strategist",
+                              "Improver", "Validator", "Reporter"],
+            "pending_agents": ["Orchestrator (S4)", "MetaEvaluator (S4)"],
         }

@@ -215,6 +215,63 @@ BEGIN SELECT RAISE(ABORT, 'ha_diagnoses is append-only'); END;
 -- (참고) ha_kill_switch_log 는 open/close 페어 (deactivated_at UPDATE) 가
 -- 설계상 필요해 append-only 트리거 대상에서 제외. 대신 일단 기록된 행은
 -- 코드 경로에서만 갱신되며, DELETE 는 평소 일어나지 않는다.
+
+-- 사이클 #25 (HA Stage S3) — Strategist + Improver + Validator.
+-- L1: 모든 출력은 제안 큐 (ha_proposals.status). 사람 승인 없이는 적용 X.
+CREATE TABLE IF NOT EXISTS ha_strategies (
+    strategy_id     TEXT    PRIMARY KEY,
+    diagnosis_id    TEXT    NOT NULL REFERENCES ha_diagnoses(diagnosis_id) ON DELETE CASCADE,
+    category        TEXT    NOT NULL,   -- prompt_tweak/tool_swap/...
+    summary         TEXT    NOT NULL,
+    rationale       TEXT,
+    expected_impact TEXT,
+    cost_estimate   TEXT,
+    created_at      REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ha_strategies_diag ON ha_strategies(diagnosis_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ha_proposals (
+    proposal_id     TEXT    PRIMARY KEY,
+    strategy_id     TEXT    NOT NULL REFERENCES ha_strategies(strategy_id) ON DELETE CASCADE,
+    target          TEXT    NOT NULL,   -- 변경 대상 (예: 'prompt:base', 'heuristic:_DRIFT_DELTA')
+    before_text     TEXT,
+    after_text      TEXT,
+    reversible      INTEGER NOT NULL DEFAULT 1,  -- 1/0
+    risk_level      TEXT    NOT NULL DEFAULT 'med',
+    risk_score      REAL    NOT NULL DEFAULT 0.5,
+    validation_json TEXT    NOT NULL DEFAULT '{}',
+    status          TEXT    NOT NULL DEFAULT 'pending',  -- pending/approved/rejected
+    decided_by      TEXT,
+    decided_at      REAL,
+    created_at      REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ha_proposals_status ON ha_proposals(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ha_proposals_strategy ON ha_proposals(strategy_id);
+
+CREATE TABLE IF NOT EXISTS ha_validations (
+    validation_id   TEXT    PRIMARY KEY,
+    proposal_id     TEXT    NOT NULL REFERENCES ha_proposals(proposal_id) ON DELETE CASCADE,
+    risk_score      REAL    NOT NULL DEFAULT 0.5,
+    risk_level      TEXT    NOT NULL DEFAULT 'med',
+    checks_json     TEXT    NOT NULL DEFAULT '[]',
+    auto_approval_blocked INTEGER NOT NULL DEFAULT 1,  -- L1 = 항상 1
+    created_at      REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ha_validations_prop ON ha_validations(proposal_id, created_at DESC);
+
+-- append-only 트리거 — strategies/validations. proposals 는 status UPDATE 필요로 제외.
+CREATE TRIGGER IF NOT EXISTS trg_ha_strategies_no_update
+BEFORE UPDATE ON ha_strategies
+BEGIN SELECT RAISE(ABORT, 'ha_strategies is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_ha_strategies_no_delete
+BEFORE DELETE ON ha_strategies
+BEGIN SELECT RAISE(ABORT, 'ha_strategies is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_ha_validations_no_update
+BEFORE UPDATE ON ha_validations
+BEGIN SELECT RAISE(ABORT, 'ha_validations is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_ha_validations_no_delete
+BEFORE DELETE ON ha_validations
+BEGIN SELECT RAISE(ABORT, 'ha_validations is append-only'); END;
 CREATE INDEX IF NOT EXISTS idx_ha_diagnoses_issue ON ha_diagnoses(issue_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ha_issues_status ON ha_issues(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ha_issues_created ON ha_issues(created_at DESC);
@@ -353,6 +410,57 @@ def _ensure_schema(path: str) -> None:
                 "CREATE TRIGGER IF NOT EXISTS trg_ha_diagnoses_no_delete "
                 "BEFORE DELETE ON ha_diagnoses BEGIN "
                 "SELECT RAISE(ABORT, 'ha_diagnoses is append-only'); END",
+                # 사이클 #25 — Stage S3 테이블 + 트리거
+                """CREATE TABLE IF NOT EXISTS ha_strategies (
+                    strategy_id TEXT PRIMARY KEY,
+                    diagnosis_id TEXT NOT NULL REFERENCES ha_diagnoses(diagnosis_id) ON DELETE CASCADE,
+                    category TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    rationale TEXT,
+                    expected_impact TEXT,
+                    cost_estimate TEXT,
+                    created_at REAL NOT NULL
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_ha_strategies_diag ON ha_strategies(diagnosis_id, created_at DESC)",
+                """CREATE TABLE IF NOT EXISTS ha_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    strategy_id TEXT NOT NULL REFERENCES ha_strategies(strategy_id) ON DELETE CASCADE,
+                    target TEXT NOT NULL,
+                    before_text TEXT,
+                    after_text TEXT,
+                    reversible INTEGER NOT NULL DEFAULT 1,
+                    risk_level TEXT NOT NULL DEFAULT 'med',
+                    risk_score REAL NOT NULL DEFAULT 0.5,
+                    validation_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    decided_by TEXT,
+                    decided_at REAL,
+                    created_at REAL NOT NULL
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_ha_proposals_status ON ha_proposals(status, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_ha_proposals_strategy ON ha_proposals(strategy_id)",
+                """CREATE TABLE IF NOT EXISTS ha_validations (
+                    validation_id TEXT PRIMARY KEY,
+                    proposal_id TEXT NOT NULL REFERENCES ha_proposals(proposal_id) ON DELETE CASCADE,
+                    risk_score REAL NOT NULL DEFAULT 0.5,
+                    risk_level TEXT NOT NULL DEFAULT 'med',
+                    checks_json TEXT NOT NULL DEFAULT '[]',
+                    auto_approval_blocked INTEGER NOT NULL DEFAULT 1,
+                    created_at REAL NOT NULL
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_ha_validations_prop ON ha_validations(proposal_id, created_at DESC)",
+                "CREATE TRIGGER IF NOT EXISTS trg_ha_strategies_no_update "
+                "BEFORE UPDATE ON ha_strategies BEGIN "
+                "SELECT RAISE(ABORT, 'ha_strategies is append-only'); END",
+                "CREATE TRIGGER IF NOT EXISTS trg_ha_strategies_no_delete "
+                "BEFORE DELETE ON ha_strategies BEGIN "
+                "SELECT RAISE(ABORT, 'ha_strategies is append-only'); END",
+                "CREATE TRIGGER IF NOT EXISTS trg_ha_validations_no_update "
+                "BEFORE UPDATE ON ha_validations BEGIN "
+                "SELECT RAISE(ABORT, 'ha_validations is append-only'); END",
+                "CREATE TRIGGER IF NOT EXISTS trg_ha_validations_no_delete "
+                "BEFORE DELETE ON ha_validations BEGIN "
+                "SELECT RAISE(ABORT, 'ha_validations is append-only'); END",
             ):
                 conn.execute(ddl)
             # 사이클 #16: knowledge 테이블이 없는 레거시 DB 도 자동 생성.
@@ -1293,6 +1401,166 @@ class Memory:
         except (json.JSONDecodeError, KeyError):
             d["five_whys"] = []
         return d
+
+    # ── 사이클 #25 (HA Stage S3) ──────────────────────────────────
+    def ha_strategy_insert(
+        self, strategy_id: str, diagnosis_id: str, category: str,
+        summary: str, rationale: Optional[str],
+        expected_impact: Optional[str], cost_estimate: Optional[str],
+    ) -> None:
+        if not strategy_id or not category or not summary:
+            raise ValueError("strategy_id/category/summary 필수")
+        with _conn_ctx(self.path) as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO ha_strategies(strategy_id, diagnosis_id, "
+                    "category, summary, rationale, expected_impact, "
+                    "cost_estimate, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (strategy_id, diagnosis_id, category, summary,
+                     rationale, expected_impact, cost_estimate, time.time()),
+                )
+            except sqlite3.IntegrityError as ex:
+                raise ValueError(f"strategy_id 중복: {strategy_id}") from ex
+
+    def ha_strategies_for_diagnosis(
+        self, diagnosis_id: str, limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ha_strategies WHERE diagnosis_id=? "
+                "ORDER BY created_at ASC LIMIT ?",
+                (diagnosis_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def ha_strategies_recent(self, limit: int = 50) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ha_strategies ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def ha_proposal_insert(
+        self, proposal_id: str, strategy_id: str, target: str,
+        before_text: Optional[str], after_text: Optional[str],
+        reversible: bool, risk_level: str = "med", risk_score: float = 0.5,
+        validation: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not proposal_id or not target:
+            raise ValueError("proposal_id/target 필수")
+        if risk_level not in ("low", "med", "high"):
+            raise ValueError(f"invalid risk_level: {risk_level}")
+        rs = float(risk_score)
+        if not (0.0 <= rs <= 1.0):
+            raise ValueError(f"risk_score out of range: {rs}")
+        with _conn_ctx(self.path) as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO ha_proposals(proposal_id, strategy_id, "
+                    "target, before_text, after_text, reversible, risk_level, "
+                    "risk_score, validation_json, status, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (proposal_id, strategy_id, target, before_text,
+                     after_text, 1 if reversible else 0, risk_level, rs,
+                     json.dumps(validation or {}, ensure_ascii=False),
+                     "pending", time.time()),
+                )
+            except sqlite3.IntegrityError as ex:
+                raise ValueError(f"proposal_id 중복: {proposal_id}") from ex
+
+    def ha_proposals_list(
+        self, status: Optional[str] = None, limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        if status is not None and status not in (
+            "pending", "approved", "rejected",
+        ):
+            raise ValueError(f"invalid status: {status}")
+        with _conn_ctx(self.path) as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM ha_proposals WHERE status=? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM ha_proposals "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["validation"] = json.loads(d.pop("validation_json", "{}"))
+            except json.JSONDecodeError:
+                d["validation"] = {}
+            d["reversible"] = bool(d.get("reversible"))
+            out.append(d)
+        return out
+
+    def ha_proposal_decision(
+        self, proposal_id: str, decision: str, by: str = "owner",
+    ) -> bool:
+        if decision not in ("approved", "rejected"):
+            raise ValueError(f"invalid decision: {decision}")
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                "UPDATE ha_proposals SET status=?, decided_by=?, decided_at=? "
+                "WHERE proposal_id=? AND status='pending'",
+                (decision, by, time.time(), proposal_id),
+            )
+            return cur.rowcount > 0
+
+    def ha_validation_insert(
+        self, validation_id: str, proposal_id: str, risk_score: float,
+        risk_level: str, checks: List[Dict[str, Any]],
+        auto_approval_blocked: bool = True,
+    ) -> None:
+        if risk_level not in ("low", "med", "high"):
+            raise ValueError(f"invalid risk_level: {risk_level}")
+        rs = float(risk_score)
+        if not (0.0 <= rs <= 1.0):
+            raise ValueError(f"risk_score out of range: {rs}")
+        with _conn_ctx(self.path) as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO ha_validations(validation_id, proposal_id, "
+                    "risk_score, risk_level, checks_json, "
+                    "auto_approval_blocked, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (validation_id, proposal_id, rs, risk_level,
+                     json.dumps(checks, ensure_ascii=False),
+                     1 if auto_approval_blocked else 0, time.time()),
+                )
+            except sqlite3.IntegrityError as ex:
+                raise ValueError(
+                    f"validation_id 중복: {validation_id}"
+                ) from ex
+
+    def ha_validations_for_proposal(
+        self, proposal_id: str, limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 50))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ha_validations WHERE proposal_id=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (proposal_id, limit),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["checks"] = json.loads(d.pop("checks_json", "[]"))
+            except json.JSONDecodeError:
+                d["checks"] = []
+            d["auto_approval_blocked"] = bool(d.get("auto_approval_blocked"))
+            out.append(d)
+        return out
 
     def ha_observer_input(
         self, window_sec: float = 24 * 3600.0, exclude_optout: bool = True,

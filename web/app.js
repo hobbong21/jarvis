@@ -2341,6 +2341,33 @@
         case "ha_diagnoses_for_issue":
           if (msg.ok) haRenderDiagnoses(msg.diagnoses || []);
           break;
+        case "ha_strategist_result":
+          haStatus.textContent = msg.ok ?
+            `Strategist 완료 — 전략 ${msg.count}건` :
+            `Strategist: ${msg.message || "실패"}`;
+          break;
+        case "ha_improver_result":
+          haStatus.textContent = msg.ok ?
+            `Improver 완료 — 제안 ${msg.count}건` :
+            `Improver: ${msg.message || "실패"}`;
+          if (msg.ok) sendMsg({ type: "ha_proposals_list", status: "pending", limit: 20 });
+          break;
+        case "ha_validator_result":
+          haStatus.textContent = msg.ok ?
+            `Validator 완료 — 검증 ${msg.count}건` :
+            `Validator: ${msg.message || "실패"}`;
+          if (msg.ok) sendMsg({ type: "ha_proposals_list", status: "pending", limit: 20 });
+          break;
+        case "ha_proposals_list":
+          if (msg.ok) haRenderProposals(msg.proposals || []);
+          else haStatus.textContent = "제안 큐: " + (msg.message || "실패");
+          break;
+        case "ha_proposal_decision":
+          haStatus.textContent = msg.ok ?
+            `제안 ${msg.proposal_id} → ${msg.decision} (적용 X)` :
+            `결정 실패: ${msg.message || ""}`;
+          if (msg.ok) sendMsg({ type: "ha_proposals_list", status: "pending", limit: 20 });
+          break;
       }
     });
     // 초기 todo 목록 + My Sarvis 로드.
@@ -2416,6 +2443,55 @@
     haStatus.textContent = "Diagnostician 실행 중…";
     sendMsg({ type: "ha_run_diagnostician", limit: 20 });
   });
+  const haStratBtn = $("ha-strat-btn");
+  if (haStratBtn) haStratBtn.addEventListener("click", () => {
+    haStatus.textContent = "Strategist 실행 중…";
+    sendMsg({ type: "ha_run_strategist", limit: 5 });
+  });
+  const haImproverBtn = $("ha-improver-btn");
+  if (haImproverBtn) haImproverBtn.addEventListener("click", () => {
+    haStatus.textContent = "Improver 실행 중…";
+    sendMsg({ type: "ha_run_improver", limit: 50 });
+  });
+  const haValidatorBtn = $("ha-validator-btn");
+  if (haValidatorBtn) haValidatorBtn.addEventListener("click", () => {
+    haStatus.textContent = "Validator 실행 중…";
+    sendMsg({ type: "ha_run_validator", limit: 50 });
+  });
+  const haProposalsBtn = $("ha-proposals-btn");
+  if (haProposalsBtn) haProposalsBtn.addEventListener("click", () =>
+    sendMsg({ type: "ha_proposals_list", status: "pending", limit: 20 }));
+  function haRenderProposals(props) {
+    if (!haIssuesEl) return;
+    if (!props.length) {
+      haIssuesEl.insertAdjacentHTML("beforeend",
+        `<div class="ms-row">📋 대기 중 제안 없음.</div>`);
+      return;
+    }
+    const html = props.slice(0, 20).map(p => {
+      const v = p.latest_validation || {};
+      const lvl = (v.risk_level || p.risk_level || "med").toUpperCase();
+      const score = (Number(v.risk_score || p.risk_score || 0)*100).toFixed(0)+"%";
+      const cat = escapeMs(p.target || "");
+      const after = escapeMs((p.after_text || "").slice(0, 200));
+      const status = escapeMs(p.status || "pending");
+      const blocked = (v.auto_approval_blocked === false) ? "" :
+                       " <small>(자동승인 차단 — L1)</small>";
+      const buttons = (p.status === "pending") ?
+        `<button class="prod-btn mini" data-pid="${escapeMs(p.proposal_id)}" data-dec="approved">승인</button>` +
+        `<button class="prod-btn ghost mini" data-pid="${escapeMs(p.proposal_id)}" data-dec="rejected">거부</button>` : "";
+      return `<div class="ms-row">📋 <b>[${lvl} · ${score}]</b> <code>${cat}</code> · ${status}${blocked}` +
+             `<br><small>${after}</small><br>${buttons}</div>`;
+    }).join("");
+    haIssuesEl.insertAdjacentHTML("beforeend", html);
+    haIssuesEl.querySelectorAll("button[data-pid]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        sendMsg({ type: "ha_proposal_decision",
+                  proposal_id: btn.dataset.pid,
+                  decision: btn.dataset.dec, by: "owner" });
+      });
+    });
+  }
   if (haRefreshBtn) haRefreshBtn.addEventListener("click", () =>
     sendMsg({ type: "ha_growth_diary", limit: 10 }));
   if (haOptoutToggle) haOptoutToggle.addEventListener("change", () =>

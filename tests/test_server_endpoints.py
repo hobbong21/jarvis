@@ -1890,9 +1890,10 @@ class HAWebSocketTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(d)
                 self.assertTrue(d.get("ok"))
-                self.assertIn("S2", d["stage"])
+                self.assertIn("S3", d["stage"])
                 self.assertEqual(d["active_agents"],
-                                 ["Observer", "Diagnostician", "Reporter"])
+                                 ["Observer", "Diagnostician", "Strategist",
+                                  "Improver", "Validator", "Reporter"])
 
     def test_ws_ha_run_observer_returns_issues(self):
         with TestClient(server.app) as client:
@@ -1982,6 +1983,58 @@ class HAWebSocketTests(unittest.TestCase):
                 self.assertTrue(r.get("ok"))
                 self.assertGreaterEqual(r["count"], 0)
                 self.assertIsInstance(r["diagnoses"], list)
+
+    def test_ws_ha_s3_pipeline_roundtrip(self):
+        # Observer→Diagnostician→Strategist→Improver→Validator→proposals_list 체인.
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                for mtype, payload in [
+                    ("ha_run_observer", {"window_days": 1}),
+                    ("ha_run_diagnostician", {"limit": 10}),
+                    ("ha_run_strategist", {"limit": 10}),
+                    ("ha_run_improver", {"limit": 50}),
+                    ("ha_run_validator", {"limit": 50}),
+                ]:
+                    msg = {"type": mtype}; msg.update(payload)
+                    ws.send_text(json.dumps(msg))
+                    expected = {
+                        "ha_run_observer": "ha_observer_result",
+                        "ha_run_diagnostician": "ha_diagnostician_result",
+                        "ha_run_strategist": "ha_strategist_result",
+                        "ha_run_improver": "ha_improver_result",
+                        "ha_run_validator": "ha_validator_result",
+                    }[mtype]
+                    r, _ = _drain_until(
+                        ws, lambda o, e=expected: o.get("type") == e,
+                        max_msgs=40,
+                    )
+                    self.assertIsNotNone(r)
+                    self.assertTrue(r.get("ok"), f"{mtype}: {r}")
+                ws.send_text(json.dumps({
+                    "type": "ha_proposals_list", "status": "pending",
+                }))
+                r, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_proposals_list",
+                    max_msgs=20,
+                )
+                self.assertIsNotNone(r)
+                self.assertTrue(r["ok"])
+
+    def test_ws_ha_proposal_decision_invalid_payload(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({
+                    "type": "ha_proposal_decision",
+                    "proposal_id": "", "decision": "garbage",
+                }))
+                r, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_proposal_decision",
+                    max_msgs=20,
+                )
+                self.assertIsNotNone(r)
+                self.assertFalse(r["ok"])
 
     def test_ws_ha_diagnoses_for_issue_missing_id(self):
         with TestClient(server.app) as client:

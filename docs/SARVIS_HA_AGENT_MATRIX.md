@@ -15,9 +15,9 @@
 |---|---|---|---|
 | **Observer** | 트레이스 수집·요약·이상 패턴 표시 | Issue Card | ⭐ Stage S1 (즉시) |
 | **Diagnostician** | 약점 근본 원인 추론 (5 Whys + Bayesian) | Diagnosis Report | ⭐ Stage S2 (사이클 #24) |
-| **Strategist** | 변경 후보 다수 생성 (8 카테고리, Do Nothing 강제) | Strategy List | Stage S3 |
-| **Improver** | 전략을 실제 패치로 구체화 (PR 형식) | Patch + Before/After | Stage S3 |
-| **Validator** | 회귀 셋·섀도·Canary 검증, 다중 평가자 | Validation Report | Stage S3 (회귀만) |
+| **Strategist** | 변경 후보 다수 생성 (8 카테고리, Do Nothing 강제) | Strategy List | ⭐ Stage S3 (사이클 #25) |
+| **Improver** | 전략을 실제 패치로 구체화 (PR 형식) | Patch + Before/After | ⭐ Stage S3 (사이클 #25) |
+| **Validator** | 회귀 셋·섀도·Canary 검증, 다중 평가자 | Validation Report | ⭐ Stage S3 (사이클 #25, 위험 등급만) |
 | **Reporter** | One-Pager 보고서 + 사용자 성장 일기 | Report + Decision Widget | ⭐ Stage S1 (미니) |
 | **Orchestrator** | 누구를 언제 부를지만 담당 (의사결정 X) | 워크플로 실행 | Stage S2 (in-process) |
 | **Meta-Evaluator** | HA 결정을 외부 LLM 으로 무작위 평가 | 주간 리포트 | Stage S4+ |

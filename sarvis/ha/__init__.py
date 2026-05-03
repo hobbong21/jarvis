@@ -15,10 +15,16 @@ from .safety import (
 from .observer import Observer
 from .reporter import Reporter
 from .diagnostician import Diagnostician, DiagnosisResult
+from .strategist import Strategist, Strategy, CATEGORIES as STRATEGY_CATEGORIES
+from .improver import Improver, PatchSpec
+from .validator import Validator, ValidationReport
 
 __all__ = [
     "HAMessage", "HAAgent", "sign_payload", "AGENT_NAMES",
     "is_kill_switch_on", "activate_kill_switch", "deactivate_kill_switch",
     "KillSwitchActivated", "Observer", "Reporter",
     "Diagnostician", "DiagnosisResult",
+    "Strategist", "Strategy", "STRATEGY_CATEGORIES",
+    "Improver", "PatchSpec",
+    "Validator", "ValidationReport",
 ]
