@@ -154,6 +154,16 @@ from .meeting import MeetingRegistry, build_summary_prompt, parse_summary_json
 from .todos import TodoStore, extract_todos_from_text
 MEETINGS = MeetingRegistry()
 TODOS = TodoStore()
+# 사이클 #23 (HA Stage S1) — Harness Agent 자율 진화 계층.
+# Observer + Reporter 미니. L0 자율 등급 (Observe-only).
+from .ha import (
+    Observer as _HAObserver,
+    Reporter as _HAReporter,
+    is_kill_switch_on as _ha_kill_switch_on,
+    activate_kill_switch as _ha_kill_switch_activate,
+    deactivate_kill_switch as _ha_kill_switch_deactivate,
+    KillSwitchActivated as _HAKillSwitchActivated,
+)
 _known = FACE_REGISTRY.list_people()
 if _known:
     print(f"      등록된 얼굴: {', '.join(_known)}")
@@ -1943,6 +1953,8 @@ async def websocket_endpoint(ws: WebSocket):
                 "meeting_list", "meeting_get",
                 "todo_list", "todo_add", "todo_done", "todo_remove", "todo_extract",
                 "feedback_submit", "my_sarvis_summary",  # 사이클 #22
+                "ha_run_observer", "ha_issues_list", "ha_kill_switch",
+                "ha_optout", "ha_growth_diary",          # 사이클 #23
             } and OWNER_AUTH.is_enrolled() and not _is_authed():
                 await emit(type="error", message="주인 인증이 필요합니다.")
                 continue
@@ -1995,6 +2007,127 @@ async def websocket_endpoint(ws: WebSocket):
                 except Exception as ex:
                     print(f"[my_sarvis_summary] 실패: {ex!r}")
                     await emit(type="error", message="My Sarvis 집계 실패")
+
+            # ── 사이클 #23 (HA Stage S1) — Harness Agent ───────────────
+            # 모든 ha_* 핸들러는 Kill Switch 활성 시 즉시 거부 + stdout 로그.
+            elif mtype in {"ha_run_observer", "ha_issues_list",
+                           "ha_kill_switch", "ha_optout", "ha_growth_diary"}:
+                if mtype != "ha_kill_switch" and _ha_kill_switch_on():
+                    print(f"[HA] kill_switch active — {mtype} 거부")
+                    await emit(
+                        type="ha_blocked", request=mtype,
+                        message="HA Kill Switch 활성 — 모든 자율 동작 정지",
+                    )
+                    continue
+                if mtype == "ha_run_observer":
+                    try:
+                        days = float(data.get("window_days") or 1.0)
+                    except (TypeError, ValueError):
+                        days = 1.0
+                    window_sec = max(60.0, days * 86400.0)
+                    use_llm = bool(data.get("use_llm", False))
+                    try:
+                        obs = _HAObserver(
+                            memory=session.memory,
+                            brain=session.brain if use_llm else None,
+                        )
+                        cards = await asyncio.wait_for(
+                            asyncio.to_thread(obs.scan, window_sec, use_llm),
+                            timeout=15.0,
+                        )
+                        # Reporter 미니 — One-Pager 즉시 생성
+                        rep = _HAReporter(memory=session.memory)
+                        for c in cards:
+                            try:
+                                rep.write_one_pager(c.to_payload())
+                            except Exception as ex:
+                                print(f"[HA] reporter 실패: {ex!r}")
+                        await emit(
+                            type="ha_observer_result",
+                            ok=True,
+                            window_days=days,
+                            issue_count=len(cards),
+                            issues=[c.to_payload() for c in cards],
+                        )
+                    except _HAKillSwitchActivated as ex:
+                        await emit(type="ha_blocked", request=mtype,
+                                   message=str(ex))
+                    except asyncio.TimeoutError:
+                        await emit(type="ha_observer_result", ok=False,
+                                   message="Observer 시간 초과 (15s)")
+                    except Exception as ex:
+                        print(f"[HA] observer 실패: {ex!r}")
+                        await emit(type="ha_observer_result", ok=False,
+                                   message=f"Observer 실패: {ex}")
+
+                elif mtype == "ha_issues_list":
+                    try:
+                        limit = int(data.get("limit") or 20)
+                    except (TypeError, ValueError):
+                        limit = 20
+                    issues = await asyncio.to_thread(
+                        session.memory.ha_issues_recent, limit,
+                    )
+                    await emit(type="ha_issues_list", ok=True,
+                               count=len(issues), issues=issues)
+
+                elif mtype == "ha_kill_switch":
+                    on = bool(data.get("on"))
+                    reason = (data.get("reason") or "manual").strip()[:200]
+                    try:
+                        if on:
+                            await asyncio.to_thread(
+                                _ha_kill_switch_activate, "owner", reason,
+                            )
+                            await asyncio.to_thread(
+                                session.memory.ha_kill_switch_log_open,
+                                "owner", reason,
+                            )
+                        else:
+                            await asyncio.to_thread(
+                                _ha_kill_switch_deactivate, "owner",
+                            )
+                            await asyncio.to_thread(
+                                session.memory.ha_kill_switch_log_close,
+                                "owner",
+                            )
+                        await emit(type="ha_kill_switch", ok=True,
+                                   active=_ha_kill_switch_on())
+                    except Exception as ex:
+                        print(f"[HA] kill_switch 실패: {ex!r}")
+                        await emit(type="ha_kill_switch", ok=False,
+                                   message="Kill Switch 토글 실패")
+
+                elif mtype == "ha_optout":
+                    on = bool(data.get("on"))
+                    try:
+                        result = await asyncio.to_thread(
+                            session.memory.ha_optout_set,
+                            session.memory_user_id, on,
+                        )
+                        await emit(type="ha_optout", ok=True,
+                                   opted_out=bool(result))
+                    except Exception as ex:
+                        print(f"[HA] optout 실패: {ex!r}")
+                        await emit(type="ha_optout", ok=False,
+                                   message="옵트아웃 토글 실패")
+
+                elif mtype == "ha_growth_diary":
+                    try:
+                        limit = int(data.get("limit") or 10)
+                    except (TypeError, ValueError):
+                        limit = 10
+                    try:
+                        rep = _HAReporter(memory=session.memory)
+                        diary = await asyncio.to_thread(rep.growth_diary, limit)
+                        await emit(type="ha_growth_diary", ok=True, **diary)
+                    except _HAKillSwitchActivated as ex:
+                        await emit(type="ha_blocked", request=mtype,
+                                   message=str(ex))
+                    except Exception as ex:
+                        print(f"[HA] growth_diary 실패: {ex!r}")
+                        await emit(type="ha_growth_diary", ok=False,
+                                   message="성장 일기 생성 실패")
 
             elif mtype == "meeting_start":
                 title = (data.get("title") or "").strip()

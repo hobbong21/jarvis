@@ -1863,5 +1863,112 @@ class FeedbackAndMySarvisWSTests(unittest.TestCase):
                 self.assertEqual(s["window_days"], 1.0)
 
 
+# ============================================================
+# 사이클 #23 — HA Stage S1 (Observer + Reporter) WS round-trip
+# ============================================================
+class HAWebSocketTests(unittest.TestCase):
+    def setUp(self):
+        # Kill Switch reset (env + 파일 양 경로)
+        from sarvis.ha.safety import KILL_SWITCH_FILE
+        os.environ.pop("SARVIS_HA_KILL_SWITCH", None)
+        if KILL_SWITCH_FILE.is_file():
+            KILL_SWITCH_FILE.unlink()
+        self._kill_file = KILL_SWITCH_FILE
+
+    def tearDown(self):
+        os.environ.pop("SARVIS_HA_KILL_SWITCH", None)
+        if self._kill_file.is_file():
+            self._kill_file.unlink()
+
+    def test_ws_ha_growth_diary_roundtrip(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({"type": "ha_growth_diary", "limit": 5}))
+                d, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_growth_diary", max_msgs=30,
+                )
+                self.assertIsNotNone(d)
+                self.assertTrue(d.get("ok"))
+                self.assertIn("S1", d["stage"])
+                self.assertEqual(d["active_agents"], ["Observer", "Reporter"])
+
+    def test_ws_ha_run_observer_returns_issues(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                # silence 카드가 항상 나오도록 1일 윈도우 + 빈 트래픽
+                ws.send_text(json.dumps({
+                    "type": "ha_run_observer", "window_days": 1,
+                }))
+                r, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_observer_result",
+                    max_msgs=40,
+                )
+                self.assertIsNotNone(r)
+                self.assertTrue(r.get("ok"))
+                self.assertGreaterEqual(r["issue_count"], 0)
+                self.assertIsInstance(r["issues"], list)
+
+    def test_ws_ha_optout_toggle(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({"type": "ha_optout", "on": True}))
+                r, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_optout", max_msgs=20,
+                )
+                self.assertIsNotNone(r)
+                self.assertTrue(r["ok"])
+                self.assertTrue(r["opted_out"])
+                ws.send_text(json.dumps({"type": "ha_optout", "on": False}))
+                r2, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_optout", max_msgs=20,
+                )
+                self.assertIsNotNone(r2)
+                self.assertFalse(r2["opted_out"])
+
+    def test_ws_ha_kill_switch_blocks_other_calls(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                # Kill Switch ON
+                ws.send_text(json.dumps({"type": "ha_kill_switch", "on": True}))
+                r, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_kill_switch", max_msgs=20,
+                )
+                self.assertIsNotNone(r)
+                self.assertTrue(r["ok"])
+                self.assertTrue(r["active"])
+                # Observer 호출 → ha_blocked
+                ws.send_text(json.dumps({
+                    "type": "ha_run_observer", "window_days": 1,
+                }))
+                blk, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_blocked", max_msgs=20,
+                )
+                self.assertIsNotNone(blk)
+                self.assertEqual(blk["request"], "ha_run_observer")
+                # 해제
+                ws.send_text(json.dumps({"type": "ha_kill_switch", "on": False}))
+                r2, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_kill_switch", max_msgs=20,
+                )
+                self.assertIsNotNone(r2)
+                self.assertFalse(r2["active"])
+
+    def test_ws_ha_issues_list(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({"type": "ha_issues_list", "limit": 5}))
+                r, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "ha_issues_list", max_msgs=20,
+                )
+                self.assertIsNotNone(r)
+                self.assertTrue(r["ok"])
+                self.assertIsInstance(r["issues"], list)
+
+
 if __name__ == "__main__":
     unittest.main()

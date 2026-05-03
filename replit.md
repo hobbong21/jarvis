@@ -2,25 +2,70 @@
 
 A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning → Model Selection → Task Execution → Response Generation). Features face recognition, voice interaction, and tool-augmented intelligence.
 
-## 기획서 업데이트 — v1.0 (2026-05-03)
+## 기획서 업데이트 — v1.5 (2026-05-03) — Harness Agent 보조 문서 우선
 
-새 기획서 `attached_assets/Sarvis_기획서_및_개발요구사항_1777803382509.docx`
-(74KB, 4325줄)에 **Chapter 17 — Sarvis Harness System (Control & Evolution
-Harness)** 가 신규 추가되었다. F-01~F-13 기능 매트릭스는 변동 없음.
+**상위 문서** (Ch.17 도구) `attached_assets/Sarvis_기획서_및_개발요구사항_1777803382509.docx`
+는 그대로 유효. 추가로 **보조 문서** `attached_assets/Sarvis_Harness_Agent_기획서_1777804423173.docx`
+(v1.0, 16장 + 부록 A~D, 약 230 인일) 가 첨부되어 **우선 적용**된다.
 
-**Harness 핵심**: AI 비서 자체를 ① Observe(관찰) ② Evaluate(평가) ③ Tune(통제)
-④ Evolve(진화) 시키는 메타 관리 프레임워크. 25개 백로그 항목(HARN-01~25,
-P0 17개 + P1 6개 + P2 2개, 총 ~174 인일).
+**HA(하네스 에이전트) 핵심**: 사람이 쓰는 Harness System(도구) 위에, 그 도구를
+사람 대신 운용하는 6대 LLM 에이전트(Observer/Diagnostician/Strategist/
+Improver/Validator/Reporter) + Orchestrator + Meta-Evaluator 자율 진화 계층을
+얹는다. 5원칙: Observability First, Bounded Autonomy, Reversibility, Multiple
+Evaluators, Humble by Default.
 
-**SARVIS 단일 주인 시스템 맞춤 우선순위** (`docs/SARVIS_HARNESS_MATRIX.md` 상세):
-- **사이클 #22** (Observe v1): HARN-01 축소(commands 테이블 trace 컬럼 확장),
-  HARN-12(👍/👎 피드백 UI), HARN-05 미니("내 Sarvis" 패널).
-- **사이클 #23** (Tune v1): HARN-06(성향 8축 슬라이더), HARN-07(페르소나
-  프리셋 6종) — F-13 자동 충족.
-- **사이클 #24** (Evaluate+Evolve v1): HARN-11(LLM-as-Judge), HARN-10 보강,
-  HARN-14 미니(suggestions.json).
-- **보류** (단일 주인엔 과잉): HARN-02 ClickHouse, HARN-04 Grafana, HARN-17 A/B,
-  HARN-18 Canary, HARN-23 옵트인 학습, HARN-24 SOC2, HARN-25 커뮤니티 규칙.
+**SARVIS 단일 주인 맞춤 5단계 도입 로드맵** (`docs/SARVIS_HA_AGENT_MATRIX.md` 상세):
+
+| 사이클 | Stage | 자율 등급 | 포함 에이전트 | 진입 기준(다음 단계) |
+|---|---|---|---|---|
+| **#23 (현재)** | S1 Read-Only | L0 | Observer + Reporter(미니) | Observer 정확도 ≥ 85% |
+| #24 | S2 Suggest | L1 | + Diagnostician + Reporter(전체) | 보고 승인률 ≥ 70% |
+| #25 | S3 Improve | L1 (모두 사람 승인) | + Strategist + Improver + Validator | 회귀율 ≤ 5% |
+| #26 | S4 Auto-Suggest | L2 (가역 변경 자동) | (동일) | 30일 자동 롤백 ≤ 2건 |
+| #27 | S5 Constrained Auto | L3 | + 자율성 등급 정책 | 6개월 + 외부 감사 |
+
+**기존 Ch.17 사이클 #23 (HARN-06 성향 슬라이더 + HARN-07 페르소나) 는 사이클
+#28+ 으로 후순위 이동.** 이유: HA Stage 진입이 페르소나 튠보다 안전·구조적
+선결 조건. 페르소나 튠은 Strategist/Validator 가 검증할 대상이므로 S3 도달
+후 통합하는 것이 자연스럽다.
+
+**절대 금지 7원칙** (`docs/SARVIS_HA_AGENT_MATRIX.md` §4 — 인프라 차단):
+HA 자기 코드 수정, 사용자 데이터 외부 송출, 결제·삭제 직접 실행, Sarvis 안전
+프롬프트 섹션 수정, 자기 모니터링/감사/롤백 비활성화, Meta-Evaluator 입출력
+영향, Kill Switch 우회 — 모두 코드/권한 분리로 차단.
+
+## Cycle #23 — HA Stage S1 Read-Only (Observer + Reporter 미니)
+
+(상세는 `docs/SARVIS_DEVELOPMENT_REPORT.md` 사이클 #23.)
+
+**아키텍처**: `sarvis/ha/` 신설 — `base.py`(HAMessage append-only + HAAgent
+read/write scope), `safety.py`(Kill Switch + 7원칙 가드), `observer.py`
+(트레이스 스캔 + 휴리스틱 anomaly + 선택적 LLM 패턴 인식), `reporter.py`
+(One-Pager 마크다운 + 사용자 성장 일기).
+
+**메모리 (`sarvis/memory.py`)**: 신규 4 테이블.
+- `ha_messages(msg_id PK, schema_version, from_agent, to_agent, payload JSON,
+  signature HMAC, created_at)` — append-only(코드 레벨 가드, UPDATE/DELETE 거부).
+- `ha_issues(issue_id PK, category, severity, evidence_traces JSON, signal,
+  narrative, confidence, status, created_at)`.
+- `ha_kill_switch_log(id, activated_by, activated_at, deactivated_at, reason)`.
+- `ha_optout(user_id PK, opted_out_at)` — 옵트아웃 사용자는 Observer 입력에서
+  자동 제외(JOIN-제외 + LEFT JOIN NULL).
+
+**서버 (`sarvis/server.py`)**: 신규 WS 5종(인증 게이트):
+- `ha_run_observer{window_days?}` — 즉시 1회 스캔.
+- `ha_issues_list{limit?}` — 최근 이슈 카드.
+- `ha_kill_switch{on}` — 운영자 Kill Switch.
+- `ha_optout{on}` — 사용자 옵트아웃 토글.
+- `ha_growth_diary` — 변경 이력(현 단계는 issues + 만족도 추세).
+Kill Switch 활성 시 모든 ha_* WS 거부 + stdout 로그.
+
+**UI**: prod-dock "내 Sarvis 성장 일기 (HA)" 카드 — 실행 버튼, 이슈 카드 N개,
+옵트아웃 토글, Kill Switch 토글.
+
+**전 사이클 (#22) 알려진 한계**: compare 모드 응답에서는 `turn_logged` 가
+발화되지 않아 👍/👎 불가. 사이클 #25(Validator) 가 compare 결과를 정식
+이슈 카드로 흡수하면 자연 해소 예상.
 
 ## Cycle #22 — Observe v1 (HARN-12 피드백 + HARN-05 미니 "내 Sarvis")
 

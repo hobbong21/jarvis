@@ -2312,11 +2312,89 @@
         case "feedback_result":
           handleFeedbackResult(msg);
           break;
+        case "ha_observer_result":
+          haRenderObserver(msg); break;
+        case "ha_issues_list":
+          haRenderIssues(msg.issues || []); break;
+        case "ha_growth_diary":
+          haRenderDiary(msg); break;
+        case "ha_kill_switch":
+          if (msg.ok) haKillToggle.checked = !!msg.active;
+          haStatus.textContent = msg.ok ?
+            ("Kill Switch: " + (msg.active ? "활성" : "해제")) :
+            ("Kill Switch 오류: " + (msg.message || ""));
+          break;
+        case "ha_optout":
+          if (msg.ok) haOptoutToggle.checked = !!msg.opted_out;
+          haStatus.textContent = msg.ok ?
+            ("옵트아웃: " + (msg.opted_out ? "ON" : "OFF")) :
+            ("옵트아웃 오류: " + (msg.message || ""));
+          break;
+        case "ha_blocked":
+          haStatus.textContent = "차단됨: " + (msg.message || "Kill Switch 활성");
+          break;
       }
     });
     // 초기 todo 목록 + My Sarvis 로드.
     setTimeout(() => sendMsg({ type: "todo_list" }), 1000);
     setTimeout(refreshMySarvis, 1500);
   }
+  // ── 사이클 #23 — HA 성장 일기 카드 ────────────────────────
+  const haObsBtn = $("ha-observer-btn");
+  const haRefreshBtn = $("ha-refresh-btn");
+  const haWindowSel = $("ha-window");
+  const haOptoutToggle = $("ha-optout-toggle");
+  const haKillToggle = $("ha-kill-toggle");
+  const haStatus = $("ha-status");
+  const haIssuesEl = $("ha-issues");
+
+  function haSeverityIcon(sev) {
+    return ({critical:"🚨", high:"⚠️", medium:"🔶", low:"🔷", info:"ℹ️"})[sev] || "•";
+  }
+  function haRenderObserver(msg) {
+    if (!msg.ok) { haStatus.textContent = "Observer: " + (msg.message || "실패"); return; }
+    haStatus.textContent = `Observer 완료 — 윈도우 ${msg.window_days}d, 이슈 ${msg.issue_count}건`;
+    haRenderIssues(msg.issues || []);
+  }
+  function haRenderIssues(issues) {
+    if (!haIssuesEl) return;
+    if (!issues.length) {
+      haIssuesEl.innerHTML = "<div class='ms-row'><i>이슈 없음</i></div>";
+      return;
+    }
+    haIssuesEl.innerHTML = issues.slice(0, 20).map(i => {
+      const sev = i.severity || "info";
+      const cat = i.category || "?";
+      const narr = escapeMs(i.narrative || i.narrative_summary || "");
+      const sig = escapeMs(i.signal || i.statistical_signal || "");
+      const conf = (i.confidence != null) ? (Number(i.confidence)*100).toFixed(0)+"%" : "—";
+      return `<div class="ms-row">${haSeverityIcon(sev)} <b>[${escapeMs(cat)}]</b> ${narr}` +
+             `<br><small>${sig} · 신뢰도 ${conf}</small></div>`;
+    }).join("");
+  }
+  function haRenderDiary(d) {
+    if (!d.ok && d.message) { haStatus.textContent = d.message; return; }
+    haStatus.textContent = `${d.stage || "S1"} · ${d.autonomy_level || "L0"} · ` +
+      `활성 ${(d.active_agents||[]).join(", ")}`;
+    haRenderIssues(d.issues || []);
+  }
+  if (haObsBtn) haObsBtn.addEventListener("click", () => {
+    const days = Number(haWindowSel?.value || 7);
+    haStatus.textContent = "Observer 실행 중…";
+    sendMsg({ type: "ha_run_observer", window_days: days });
+  });
+  if (haRefreshBtn) haRefreshBtn.addEventListener("click", () =>
+    sendMsg({ type: "ha_growth_diary", limit: 10 }));
+  if (haOptoutToggle) haOptoutToggle.addEventListener("change", () =>
+    sendMsg({ type: "ha_optout", on: haOptoutToggle.checked }));
+  if (haKillToggle) haKillToggle.addEventListener("change", () => {
+    const on = haKillToggle.checked;
+    if (on && !confirm("HA Kill Switch 를 활성화하면 모든 자율 동작이 중지됩니다. 계속?")) {
+      haKillToggle.checked = false; return;
+    }
+    sendMsg({ type: "ha_kill_switch", on });
+  });
+  setTimeout(() => sendMsg({ type: "ha_growth_diary", limit: 10 }), 2000);
+
   attachWSListener();
 })();

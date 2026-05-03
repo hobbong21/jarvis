@@ -147,6 +147,45 @@ CREATE TABLE IF NOT EXISTS command_feedback (
     UNIQUE(command_id)
 );
 
+-- 사이클 #23 (HA Stage S1 Read-Only) — Harness Agent 자율 진화 계층.
+-- 보조 기획서 §11. 모든 ha_* 테이블은 코드 레벨에서 read-only/append-only 가드.
+CREATE TABLE IF NOT EXISTS ha_messages (
+    msg_id         TEXT    PRIMARY KEY,
+    schema_version TEXT    NOT NULL DEFAULT '1.0',
+    from_agent     TEXT    NOT NULL,
+    to_agent       TEXT    NOT NULL,
+    payload_json   TEXT    NOT NULL,
+    signature      TEXT    NOT NULL,
+    created_at     REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ha_issues (
+    issue_id        TEXT    PRIMARY KEY,
+    category        TEXT    NOT NULL,
+    severity        TEXT    NOT NULL,
+    evidence_json   TEXT    NOT NULL DEFAULT '[]',
+    signal          TEXT,
+    narrative       TEXT,
+    confidence      REAL    NOT NULL DEFAULT 0.5,
+    status          TEXT    NOT NULL DEFAULT 'open',
+    created_at      REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ha_kill_switch_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    activated_by    TEXT    NOT NULL,
+    activated_at    REAL    NOT NULL,
+    deactivated_at  REAL,
+    reason          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ha_optout (
+    user_id        TEXT    PRIMARY KEY,
+    opted_out_at   REAL    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ha_issues_created ON ha_issues(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ha_messages_created ON ha_messages(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content);
 CREATE INDEX IF NOT EXISTS idx_facts_user ON facts(user_id, updated_at DESC);
@@ -219,6 +258,43 @@ def _ensure_schema(path: str) -> None:
                     UNIQUE(command_id)
                 )
             """)
+            # 사이클 #23 (HA Stage S1): 레거시 DB 에 ha_* 테이블 보장.
+            for ddl in (
+                """CREATE TABLE IF NOT EXISTS ha_messages (
+                    msg_id TEXT PRIMARY KEY,
+                    schema_version TEXT NOT NULL DEFAULT '1.0',
+                    from_agent TEXT NOT NULL,
+                    to_agent TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    signature TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )""",
+                """CREATE TABLE IF NOT EXISTS ha_issues (
+                    issue_id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL DEFAULT '[]',
+                    signal TEXT,
+                    narrative TEXT,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    created_at REAL NOT NULL
+                )""",
+                """CREATE TABLE IF NOT EXISTS ha_kill_switch_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    activated_by TEXT NOT NULL,
+                    activated_at REAL NOT NULL,
+                    deactivated_at REAL,
+                    reason TEXT
+                )""",
+                """CREATE TABLE IF NOT EXISTS ha_optout (
+                    user_id TEXT PRIMARY KEY,
+                    opted_out_at REAL NOT NULL
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_ha_issues_created ON ha_issues(created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_ha_messages_created ON ha_messages(created_at DESC)",
+            ):
+                conn.execute(ddl)
             # 사이클 #16: knowledge 테이블이 없는 레거시 DB 도 자동 생성.
             # _SCHEMA_SQL 의 CREATE TABLE IF NOT EXISTS 가 이미 처리하지만,
             # 인덱스도 함께 ensure 한다 (no-op for fresh DBs).
@@ -924,6 +1000,200 @@ class Memory:
             "top_kinds": [{"kind": r["kind"], "n": r["n"]} for r in kind_rows],
             "recent_negative": [dict(r) for r in recent_neg],
             "storage_mb": storage_mb,
+        }
+
+    # ── 사이클 #23 (HA Stage S1) — Harness Agent 데이터 게이트 ───────
+    # 모든 메서드는 HA 모듈의 read/write scope 가드와 별개로 코드 레벨
+    # 검증을 다시 수행 (다층 방어). ha_messages 는 INSERT 만 허용.
+    def ha_message_append(
+        self,
+        msg_id: str,
+        from_agent: str,
+        to_agent: str,
+        payload: Dict[str, Any],
+        signature: str,
+        schema_version: str = "1.0",
+    ) -> None:
+        """HA 에이전트 간 메시지를 append-only 로 기록."""
+        if not msg_id or not isinstance(msg_id, str):
+            raise ValueError("msg_id 필요")
+        if from_agent == to_agent:
+            raise ValueError("from_agent == to_agent 금지")
+        with _conn_ctx(self.path) as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO ha_messages(msg_id, schema_version, from_agent, "
+                    "to_agent, payload_json, signature, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (msg_id, schema_version, from_agent, to_agent,
+                     json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                     signature, time.time()),
+                )
+            except sqlite3.IntegrityError as ex:
+                raise ValueError(f"msg_id 중복: {msg_id}") from ex
+
+    def ha_messages_recent(self, limit: int = 50) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ha_messages ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["payload"] = json.loads(d.pop("payload_json", "null"))
+            except json.JSONDecodeError:
+                d["payload"] = None
+            out.append(d)
+        return out
+
+    def ha_issue_insert(
+        self,
+        issue_id: str,
+        category: str,
+        severity: str,
+        evidence: List[Any],
+        signal: Optional[str],
+        narrative: str,
+        confidence: float,
+    ) -> None:
+        if severity not in ("critical", "high", "medium", "low", "info"):
+            raise ValueError(f"invalid severity: {severity}")
+        try:
+            conf = float(confidence)
+        except (TypeError, ValueError):
+            raise ValueError("invalid confidence")
+        if not (0.0 <= conf <= 1.0):
+            raise ValueError(f"confidence out of range: {conf}")
+        with _conn_ctx(self.path) as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO ha_issues(issue_id, category, severity, "
+                    "evidence_json, signal, narrative, confidence, status, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+                    (issue_id, category, severity,
+                     json.dumps(evidence, ensure_ascii=False),
+                     signal, narrative, conf, time.time()),
+                )
+            except sqlite3.IntegrityError as ex:
+                raise ValueError(f"issue_id 중복: {issue_id}") from ex
+
+    def ha_issues_recent(self, limit: int = 20) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ha_issues ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["evidence"] = json.loads(d.pop("evidence_json", "[]"))
+            except json.JSONDecodeError:
+                d["evidence"] = []
+            out.append(d)
+        return out
+
+    def ha_optout_set(self, user_id: str, on: bool) -> bool:
+        if not user_id:
+            raise ValueError("user_id 필요")
+        with _conn_ctx(self.path) as conn:
+            if on:
+                conn.execute(
+                    "INSERT OR REPLACE INTO ha_optout(user_id, opted_out_at) "
+                    "VALUES (?, ?)",
+                    (user_id, time.time()),
+                )
+                return True
+            else:
+                conn.execute("DELETE FROM ha_optout WHERE user_id=?", (user_id,))
+                return False
+
+    def ha_is_opted_out(self, user_id: str) -> bool:
+        with _conn_ctx(self.path) as conn:
+            r = conn.execute(
+                "SELECT 1 FROM ha_optout WHERE user_id=?", (user_id,),
+            ).fetchone()
+        return r is not None
+
+    def ha_kill_switch_log_open(self, activated_by: str, reason: str) -> int:
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                "INSERT INTO ha_kill_switch_log(activated_by, activated_at, reason) "
+                "VALUES (?, ?, ?)",
+                (activated_by, time.time(), reason),
+            )
+            return int(cur.lastrowid)
+
+    def ha_kill_switch_log_close(self, deactivated_by: str = "owner") -> bool:
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                "UPDATE ha_kill_switch_log SET deactivated_at=? "
+                "WHERE deactivated_at IS NULL",
+                (time.time(),),
+            )
+            return cur.rowcount > 0
+
+    def ha_observer_input(
+        self, window_sec: float = 24 * 3600.0, exclude_optout: bool = True,
+    ) -> Dict[str, Any]:
+        """Observer 입력 — PII 마스킹은 호출자 책임. 옵트아웃 사용자 제외."""
+        cutoff = time.time() - max(60.0, float(window_sec))
+        with _conn_ctx(self.path) as conn:
+            join_clause = (
+                "LEFT JOIN ha_optout o ON o.user_id=c.user_id"
+                if exclude_optout else ""
+            )
+            where_optout = "AND o.user_id IS NULL" if exclude_optout else ""
+            rows = conn.execute(
+                f"""
+                SELECT c.id, c.user_id, c.kind, c.command_text, c.response_text,
+                       c.status, c.meta_json, c.created_at, c.completed_at,
+                       f.rating, f.comment
+                FROM commands c
+                {join_clause}
+                LEFT JOIN command_feedback f ON f.command_id = c.id
+                WHERE c.created_at >= ? {where_optout}
+                ORDER BY c.created_at DESC LIMIT 5000
+                """,
+                (cutoff,),
+            ).fetchall()
+            # 베이스라인 (28일 vs 7일 만족도) — 옵트아웃 제외 일관 적용
+            cutoff_28 = time.time() - 28 * 86400.0
+            cutoff_7 = time.time() - 7 * 86400.0
+            base = conn.execute(
+                f"""
+                SELECT
+                  AVG(CASE WHEN c.created_at >= ? THEN f.rating END) AS sat_7d,
+                  AVG(CASE WHEN c.created_at >= ? THEN f.rating END) AS sat_28d,
+                  COUNT(CASE WHEN c.created_at >= ? THEN 1 END) AS n_7d,
+                  COUNT(CASE WHEN c.created_at >= ? THEN 1 END) AS n_28d
+                FROM commands c
+                {join_clause}
+                LEFT JOIN command_feedback f ON f.command_id = c.id
+                WHERE c.created_at >= ? {where_optout}
+                """,
+                (cutoff_7, cutoff_28, cutoff_7, cutoff_28, cutoff_28),
+            ).fetchone()
+        traces = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["meta"] = json.loads(d.pop("meta_json", "null") or "null")
+            except json.JSONDecodeError:
+                d["meta"] = None
+            traces.append(d)
+        return {
+            "window_sec": window_sec,
+            "traces": traces,
+            "baseline": {
+                "sat_7d": base["sat_7d"], "sat_28d": base["sat_28d"],
+                "n_7d": int(base["n_7d"] or 0),
+                "n_28d": int(base["n_28d"] or 0),
+            },
         }
 
     # ── 멀티모달 학습 지식 (knowledge) ──────────────────────────────
