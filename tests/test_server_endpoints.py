@@ -540,6 +540,176 @@ class MainWebSocketTests(unittest.TestCase):
 
 
 # ============================================================
+# 음성 카탈로그 / 음성 변경 / 미리듣기 — TTS 다양성 (voice variety)
+# ============================================================
+class VoiceCatalogTests(unittest.TestCase):
+    """config 의 VOICE_CATALOG + apply/get/current_voice_preset 헬퍼 검증."""
+
+    def setUp(self):
+        from sarvis.config import cfg
+        self._saved = (cfg.tts_voice, cfg.tts_rate, cfg.tts_pitch)
+
+    def tearDown(self):
+        from sarvis.config import cfg
+        cfg.tts_voice, cfg.tts_rate, cfg.tts_pitch = self._saved
+
+    def test_catalog_contains_minimum_voices(self):
+        from sarvis.config import VOICE_CATALOG
+        self.assertGreaterEqual(len(VOICE_CATALOG), 5,
+                                "음성 다양성을 위해 최소 5개 프리셋 필요")
+        # 필수 키 검증
+        for p in VOICE_CATALOG:
+            for key in ("id", "label", "voice", "rate", "pitch", "gender", "description"):
+                self.assertIn(key, p, f"프리셋 {p.get('id')} 에 {key} 누락")
+            # voice 는 ko-KR-*Neural 형식
+            self.assertTrue(
+                p["voice"].startswith("ko-KR-") and p["voice"].endswith("Neural"),
+                f"비-한국어 음성: {p['voice']}",
+            )
+            # 성별은 male/female
+            self.assertIn(p["gender"], ("male", "female"))
+
+    def test_catalog_ids_are_unique(self):
+        from sarvis.config import VOICE_CATALOG
+        ids = [p["id"] for p in VOICE_CATALOG]
+        self.assertEqual(len(ids), len(set(ids)),
+                         f"중복된 프리셋 id: {ids}")
+
+    def test_catalog_includes_both_genders(self):
+        from sarvis.config import VOICE_CATALOG
+        genders = {p["gender"] for p in VOICE_CATALOG}
+        self.assertIn("male", genders)
+        self.assertIn("female", genders)
+
+    def test_get_voice_preset_returns_copy(self):
+        from sarvis.config import get_voice_preset
+        p = get_voice_preset("default")
+        self.assertIsNotNone(p)
+        # mutation 이 카탈로그에 새지 않아야 함
+        p["voice"] = "MUTATED"
+        again = get_voice_preset("default")
+        self.assertNotEqual(again["voice"], "MUTATED")
+
+    def test_get_voice_preset_unknown_returns_none(self):
+        from sarvis.config import get_voice_preset
+        self.assertIsNone(get_voice_preset("nonexistent_preset_xyz"))
+
+    def test_apply_voice_preset_updates_cfg(self):
+        from sarvis.config import apply_voice_preset, cfg
+        p = apply_voice_preset("calm_female")
+        self.assertEqual(cfg.tts_voice, p["voice"])
+        self.assertEqual(cfg.tts_rate, p["rate"])
+        self.assertEqual(cfg.tts_pitch, p["pitch"])
+
+    def test_apply_voice_preset_invalid_raises(self):
+        from sarvis.config import apply_voice_preset
+        with self.assertRaises(ValueError):
+            apply_voice_preset("does_not_exist")
+
+    def test_current_voice_preset_after_apply(self):
+        from sarvis.config import apply_voice_preset, current_voice_preset
+        apply_voice_preset("bright_female")
+        self.assertEqual(current_voice_preset(), "bright_female")
+
+    def test_current_voice_preset_returns_custom_for_unknown_combo(self):
+        from sarvis.config import cfg, current_voice_preset
+        cfg.tts_voice = "ko-KR-NotInCatalog"
+        cfg.tts_rate = "+99%"
+        cfg.tts_pitch = "+99Hz"
+        self.assertEqual(current_voice_preset(), "custom")
+
+    def test_all_catalog_voices_in_supported_set(self):
+        """카탈로그의 모든 voice 가 Edge-TTS 가 실제 제공하는 SUPPORTED_KO_VOICES
+        에 포함되어야 한다 — 사용자가 선택한 후 합성 실패하지 않도록 회귀 보호."""
+        from sarvis.config import VOICE_CATALOG, SUPPORTED_KO_VOICES
+        for p in VOICE_CATALOG:
+            self.assertIn(
+                p["voice"], SUPPORTED_KO_VOICES,
+                f"카탈로그 프리셋 '{p['id']}' 의 voice '{p['voice']}' 가 "
+                f"SUPPORTED_KO_VOICES 에 없음 — Edge-TTS 합성 시 실패 위험.",
+            )
+
+    def test_apply_unsupported_voice_preset_raises(self):
+        """카탈로그에 등록되어 있어도 SUPPORTED_KO_VOICES 에 없으면 적용 거부."""
+        from sarvis.config import VOICE_CATALOG, apply_voice_preset
+        # 임시로 카탈로그에 invalid voice 프리셋 삽입
+        VOICE_CATALOG.append({
+            "id": "_test_invalid",
+            "label": "잘못된 음성",
+            "voice": "ko-KR-NeverExistsNeural",
+            "rate": "+0%",
+            "pitch": "+0Hz",
+            "gender": "male",
+            "description": "테스트",
+        })
+        try:
+            with self.assertRaises(ValueError):
+                apply_voice_preset("_test_invalid")
+        finally:
+            VOICE_CATALOG.pop()  # 정리
+
+
+class VoicesListWebSocketTests(unittest.TestCase):
+    """WS — voices_list 요청 시 카탈로그 + 현재 프리셋 응답 + switch_voice 동작."""
+
+    def setUp(self):
+        from sarvis.config import cfg
+        self._saved = (cfg.tts_voice, cfg.tts_rate, cfg.tts_pitch)
+
+    def tearDown(self):
+        from sarvis.config import cfg
+        cfg.tts_voice, cfg.tts_rate, cfg.tts_pitch = self._saved
+
+    def test_voices_list_returns_catalog(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_text(json.dumps({"type": "voices_list"}))
+                msg, _ = _drain_until(ws, lambda o: o.get("type") == "voices_list")
+                self.assertIsNotNone(msg)
+                self.assertIn("catalog", msg)
+                self.assertIn("current", msg)
+                self.assertIsInstance(msg["catalog"], list)
+                self.assertGreaterEqual(len(msg["catalog"]), 5)
+                ids = [p["id"] for p in msg["catalog"]]
+                self.assertIn("default", ids)
+
+    def test_switch_voice_updates_cfg_and_emits_voice_changed(self):
+        from sarvis.config import cfg
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_text(json.dumps(
+                    {"type": "switch_voice", "preset": "calm_female"}
+                ))
+                msg, _ = _drain_until(ws, lambda o: o.get("type") == "voice_changed")
+                self.assertIsNotNone(msg)
+                self.assertEqual(msg["preset"], "calm_female")
+                self.assertEqual(msg["voice"], "ko-KR-SunHiNeural")
+                # cfg 가 실제로 변경됐는지
+                self.assertEqual(cfg.tts_voice, "ko-KR-SunHiNeural")
+
+    def test_switch_voice_unknown_emits_error(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_text(json.dumps(
+                    {"type": "switch_voice", "preset": "totally_invalid_preset"}
+                ))
+                err, _ = _drain_until(ws, lambda o: o.get("type") == "error")
+                self.assertIsNotNone(err)
+                self.assertIn("음성", err.get("message", ""))
+
+    def test_switch_voice_empty_preset_emits_error(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()  # ready
+                ws.send_text(json.dumps({"type": "switch_voice", "preset": ""}))
+                err, _ = _drain_until(ws, lambda o: o.get("type") == "error")
+                self.assertIsNotNone(err)
+
+
+# ============================================================
 # WebSocket /ws — 음성 입력 (handle_audio) 오케스트레이션
 # ============================================================
 # Task #14: 사이클 #8 의 STT-not-ready 에러 분기에 더해, STT 가 정상일 때의

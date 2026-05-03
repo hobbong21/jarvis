@@ -48,6 +48,10 @@ class EmotionOrb {
     this._amp = 0;
     this._ampTarget = 0;
 
+    // 대화 상태 — listening/thinking/speaking/idle 시각 차별화에 사용.
+    // 감정 팔레트와 직교 (감정은 색을 결정, 상태는 호흡/리듬을 결정).
+    this.state = 'idle';
+
     this._observe();
     this._loop();
   }
@@ -62,6 +66,13 @@ class EmotionOrb {
 
   setStyle(name) {
     if (ORB_STYLES.includes(name)) this.style = name;
+  }
+
+  /** 대화 상태 — listening / thinking / speaking / idle.
+   *  감정과 별개로 "어떻게 살아있는지" 를 표현 (호흡 속도/진폭/오버레이). */
+  setState(state) {
+    const allowed = new Set(['idle', 'listening', 'thinking', 'speaking']);
+    if (allowed.has(state)) this.state = state;
   }
 
   // ---------- 자원 초기화 ----------
@@ -146,10 +157,38 @@ class EmotionOrb {
     this._amp += (this._ampTarget - this._amp) * 0.15;
     this._ampTarget *= 0.88;
 
+    // ---- 대화 상태별 리듬 ----
+    // idle: 천천히 호흡 (사람이 숨쉬듯) — pulseRate 줄여서 차분.
+    // listening: 빠른 펄스 + 살짝 큰 진폭 (귀 기울임).
+    // thinking: 느린 호흡 + intensity 증가 (집중).
+    // speaking: 빠른 펄스 + 큰 호흡 (활발).
+    // 색 팔레트는 그대로 두고 호흡 모양만 바꿔 "AI 가 살아있다" 는 느낌 강화.
+    let stateRateMult = 1.0;
+    let stateBreathAmp = 0.06;  // 기본 호흡 진폭
+    let stateAmpBoost = 0.0;    // 호흡 외 자체 진폭 (마이크 입력 없을 때도 약간 움직이게)
+    switch (this.state) {
+      case 'listening':
+        stateRateMult = 1.6; stateBreathAmp = 0.08; stateAmpBoost = 0.10;
+        break;
+      case 'thinking':
+        stateRateMult = 0.7; stateBreathAmp = 0.10; stateAmpBoost = 0.06;
+        break;
+      case 'speaking':
+        stateRateMult = 2.0; stateBreathAmp = 0.12; stateAmpBoost = 0.18;
+        break;
+      case 'idle':
+      default:
+        // 더 느린 호흡 — 차분히 살아있는 느낌
+        stateRateMult = 0.55; stateBreathAmp = 0.07; stateAmpBoost = 0.04;
+        break;
+    }
+
     // ---- 공통 상태 ----
     const baseR = Math.min(W, H) * 0.18;
-    const pulse = 1 + 0.06 * Math.sin(t * p.pulseRate * Math.PI * 2);
-    const ampBump = 1 + 0.35 * this._amp;
+    const effectiveRate = p.pulseRate * stateRateMult;
+    const pulse = 1 + stateBreathAmp * Math.sin(t * effectiveRate * Math.PI * 2);
+    const synthAmp = stateAmpBoost * (0.5 + 0.5 * Math.sin(t * effectiveRate * Math.PI * 2 + 1.0));
+    const ampBump = 1 + 0.35 * (this._amp + synthAmp);
     const radius = baseR * pulse * ampBump;
 
     ctx.clearRect(0, 0, W, H);

@@ -247,6 +247,146 @@ class ToolUseLoopTests(_BrainNoInitMixin, unittest.TestCase):
         # 정확히 max_iters(=8) 회 호출되어야
         self.assertEqual(b.client.messages.create.call_count, 8)
 
+    def test_intent_only_response_triggers_auto_nudge(self):
+        """'검색해볼게요'만 답하고 도구 미사용 → brain 이 자동 재촉해 실제 결과까지 한 턴에 도출."""
+        tools = MagicMock()
+        tools.definitions.return_value = []
+        tools.execute.return_value = "검색 결과: 오늘 코스피 +1.2%"
+        b = self.make_brain(tool_executor=tools)
+        b.client = MagicMock()
+
+        # 1) 첫 응답 — 도구 안 부르고 안내문만
+        intent_only = self._make_response(
+            stop_reason="end_turn",
+            blocks=[self._text_block("[emotion:thinking] 검색해볼게요.")],
+        )
+        # 2) 재촉 후 — 이번엔 도구 호출
+        tool_call = self._make_response(
+            stop_reason="tool_use",
+            blocks=[self._tool_use_block("web_search", {"query": "오늘 증시"}, block_id="t1")],
+        )
+        # 3) 도구 결과 받고 최종 답변
+        final = self._make_response(
+            stop_reason="end_turn",
+            blocks=[self._text_block("[emotion:speaking] 오늘 코스피는 1.2% 상승했어요.")],
+        )
+        b.client.messages.create.side_effect = [intent_only, tool_call, final]
+        b.history = [{"role": "user", "content": "오늘 증시 어때?"}]
+
+        emotion, body = b._think_with_tools()
+
+        # 자동 재촉으로 한 사이클 안에서 실제 답변까지 도출
+        self.assertEqual(emotion, Emotion.SPEAKING)
+        self.assertIn("코스피", body)
+        # API 가 3번 호출됐어야 (안내문 → 재촉 → 최종)
+        self.assertEqual(b.client.messages.create.call_count, 3)
+        # 도구도 실제로 호출됐어야
+        tools.execute.assert_called_once_with("web_search", {"query": "오늘 증시"})
+
+    def test_nudge_cleans_intermediate_history_on_success(self):
+        """자동 재촉 후 history 에는 의도-only 응답과 합성 user 메시지가 남으면 안 됨.
+        다음 turn 의 LLM 컨텍스트가 깨끗해지도록 splice 가 수행되는지 검증."""
+        tools = MagicMock()
+        tools.definitions.return_value = []
+        tools.execute.return_value = "검색 결과: ..."
+        b = self.make_brain(tool_executor=tools)
+        b.client = MagicMock()
+
+        intent_only = self._make_response(
+            stop_reason="end_turn",
+            blocks=[self._text_block("[emotion:thinking] 검색해볼게요.")],
+        )
+        tool_call = self._make_response(
+            stop_reason="tool_use",
+            blocks=[self._tool_use_block("web_search", {"query": "x"}, block_id="t1")],
+        )
+        final = self._make_response(
+            stop_reason="end_turn",
+            blocks=[self._text_block("[emotion:speaking] 결과 알려드려요.")],
+        )
+        b.client.messages.create.side_effect = [intent_only, tool_call, final]
+        b.history = [{"role": "user", "content": "검색해줘"}]
+        b._think_with_tools()
+
+        # history 가 다음 turn 에 LLM 에게 노출되어도 자연스러운 흐름이어야 함.
+        # 임시 메시지(의도-only assistant + synthetic user) 가 모두 제거되었는지 확인.
+        text_payloads = []
+        for h in b.history:
+            c = h.get("content")
+            if isinstance(c, str):
+                text_payloads.append(c)
+            elif isinstance(c, list):
+                for blk in c:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        text_payloads.append(blk.get("text", ""))
+
+        joined = " ".join(text_payloads)
+        self.assertNotIn("검색해볼게요", joined,
+                         f"의도-only 응답이 history 에 남음. payloads={text_payloads}")
+        self.assertNotIn("방금 말한 작업을 지금", joined,
+                         f"합성 user nudge 가 history 에 남음. payloads={text_payloads}")
+        # 정상 응답은 보존되어야 함
+        self.assertIn("결과 알려드려요", joined)
+
+    def test_intent_announce_only_nudges_once(self):
+        """안내문만 두 번 연속해도 무한 재촉하지 않음 — 1회만 적용 후 그 응답을 그대로 반환."""
+        tools = MagicMock()
+        tools.definitions.return_value = []
+        b = self.make_brain(tool_executor=tools)
+        b.client = MagicMock()
+
+        # 두 번 모두 안내문만 (도구 미사용)
+        announce = self._make_response(
+            stop_reason="end_turn",
+            blocks=[self._text_block("[emotion:neutral] 잠시만 기다려주세요.")],
+        )
+        b.client.messages.create.return_value = announce
+        b.history = [{"role": "user", "content": "오늘 뉴스"}]
+
+        emotion, body = b._think_with_tools()
+
+        # 정확히 2번만 호출 (재촉 1회 후 종료, 무한루프 X)
+        self.assertEqual(b.client.messages.create.call_count, 2)
+        # 마지막 응답을 그대로 반환
+        self.assertIn("기다", body)
+
+
+class IntentAnnounceDetectorTests(unittest.TestCase):
+    """_is_intent_only_announce — '검색해볼게요' 류 감지기."""
+
+    def test_detects_korean_search_intent(self):
+        from sarvis.brain import _is_intent_only_announce
+        self.assertTrue(_is_intent_only_announce("[emotion:thinking] 검색해볼게요"))
+        self.assertTrue(_is_intent_only_announce("찾아볼게요."))
+        self.assertTrue(_is_intent_only_announce("알아볼게."))
+        self.assertTrue(_is_intent_only_announce("확인해볼게요"))
+        self.assertTrue(_is_intent_only_announce("잠시만 기다려주세요"))
+
+    def test_detects_english_intent(self):
+        from sarvis.brain import _is_intent_only_announce
+        self.assertTrue(_is_intent_only_announce("Let me search for that"))
+        self.assertTrue(_is_intent_only_announce("I'll check that for you"))
+
+    def test_long_response_with_actual_answer_not_flagged(self):
+        from sarvis.brain import _is_intent_only_announce
+        # 100자 넘는 응답이면 이미 답변이 있다고 간주
+        long_text = (
+            "검색해보니 오늘 코스피는 2,750으로 마감했고 "
+            "삼성전자는 1.5% 상승, SK하이닉스는 0.8% 상승했어요. "
+            "전체적으로 반도체 섹터가 강세를 보였습니다."
+        )
+        self.assertFalse(_is_intent_only_announce(long_text))
+
+    def test_normal_answer_not_flagged(self):
+        from sarvis.brain import _is_intent_only_announce
+        self.assertFalse(_is_intent_only_announce("[emotion:happy] 안녕하세요!"))
+        self.assertFalse(_is_intent_only_announce("오늘 날씨는 맑아요."))
+
+    def test_empty_text_not_flagged(self):
+        from sarvis.brain import _is_intent_only_announce
+        self.assertFalse(_is_intent_only_announce(""))
+        self.assertFalse(_is_intent_only_announce(None))
+
 
 class ThinkErrorWrappingTests(_BrainNoInitMixin, unittest.TestCase):
     """think() 가 raw 영문 예외를 _friendly_error 로 감싸는지."""

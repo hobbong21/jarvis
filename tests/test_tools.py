@@ -288,6 +288,186 @@ class WebSearchTests(unittest.TestCase):
         self.assertIn("검색 실패", out)
 
 
+class WebSearchEnhancedTests(unittest.TestCase):
+    """강화된 웹 검색 — 캐시, 도메인 다양화, 뉴스 엔드포인트, 키워드 추출, 병렬 fetch."""
+
+    def setUp(self):
+        # 테스트 간 캐시 격리
+        ToolExecutor._cache.clear()
+        self.exec = _make_executor(tempfile.mkdtemp())
+
+    def tearDown(self):
+        ToolExecutor._cache.clear()
+        os.environ.pop("SARVIS_TOOL_MEMORY", None)
+
+    # --- 캐시 ---
+    def test_cache_returns_same_result_within_ttl(self):
+        ToolExecutor._cache_put("k1", "hello")
+        self.assertEqual(ToolExecutor._cache_get("k1"), "hello")
+
+    def test_cache_expires_after_ttl(self):
+        ToolExecutor._cache["k2"] = (time.time() - ToolExecutor._CACHE_TTL_S - 1, "stale")
+        self.assertIsNone(ToolExecutor._cache_get("k2"))
+
+    def test_cache_evicts_oldest_when_full(self):
+        original = ToolExecutor._CACHE_MAX
+        try:
+            ToolExecutor._CACHE_MAX = 2
+            ToolExecutor._cache_put("a", "A")
+            time.sleep(0.01)
+            ToolExecutor._cache_put("b", "B")
+            time.sleep(0.01)
+            ToolExecutor._cache_put("c", "C")  # 오래된 a 가 밀려야 함
+            self.assertIsNone(ToolExecutor._cache_get("a"))
+            self.assertEqual(ToolExecutor._cache_get("b"), "B")
+            self.assertEqual(ToolExecutor._cache_get("c"), "C")
+        finally:
+            ToolExecutor._CACHE_MAX = original
+
+    # --- 도메인 다양화 ---
+    def test_dedupe_by_domain_keeps_one_per_host(self):
+        results = [
+            {"href": "https://news.naver.com/a", "title": "A", "body": ""},
+            {"href": "https://news.naver.com/b", "title": "B", "body": ""},
+            {"href": "https://www.example.com/c", "title": "C", "body": ""},
+            {"href": "https://example.com/d", "title": "D", "body": ""},
+        ]
+        out = ToolExecutor._dedupe_by_domain(results, max_per_domain=1, max_total=10)
+        # naver.com 1개 + example.com 1개 가 primary, 나머지는 overflow
+        primary_hosts = [ToolExecutor._domain_of(r["href"]) for r in out[:2]]
+        self.assertEqual(set(primary_hosts), {"news.naver.com", "example.com"})
+
+    def test_domain_of_strips_www(self):
+        self.assertEqual(ToolExecutor._domain_of("https://www.example.com/x"), "example.com")
+        self.assertEqual(ToolExecutor._domain_of("http://sub.example.com/x"), "sub.example.com")
+        self.assertEqual(ToolExecutor._domain_of("notaurl"), "")
+
+    # --- 뉴스 의도 / 시간 민감 ---
+    def test_news_intent_detected(self):
+        self.assertTrue(ToolExecutor._is_news_intent("오늘 주요 뉴스"))
+        self.assertTrue(ToolExecutor._is_news_intent("breaking news today"))
+        self.assertFalse(ToolExecutor._is_news_intent("파이썬 리스트 사용법"))
+
+    # --- 키워드 추출 (한글 조사 제거) ---
+    def test_keywords_strip_korean_particles(self):
+        kws = ToolExecutor._query_keywords("삼성전자가 발표한 신제품은 무엇인가")
+        # "삼성전자가" → "삼성전자", "신제품은" → "신제품"
+        self.assertIn("삼성전자", kws)
+        self.assertIn("신제품", kws)
+        self.assertIn("발표한", kws)
+
+    def test_keywords_drop_stopwords(self):
+        kws = ToolExecutor._query_keywords("오늘 뭐야 알려줘")
+        # 모두 stopword → []
+        self.assertEqual(kws, [])
+
+    def test_keywords_dedupe_case_insensitive(self):
+        kws = ToolExecutor._query_keywords("Python python PYTHON")
+        # 대소문자 무시 dedupe
+        self.assertEqual(len(kws), 1)
+
+    def test_strip_ko_particle_safe_short_token(self):
+        # 길이 3 미만이면 그대로 (잘못된 절단 방지)
+        self.assertEqual(ToolExecutor._strip_ko_particle("나"), "나")
+        self.assertEqual(ToolExecutor._strip_ko_particle("너는"), "너는")
+
+    # --- window ranking (토큰 다양성) ---
+    def test_window_prefers_diverse_token_coverage(self):
+        # 텍스트: 앞쪽엔 "사과"만 5번, 뒤쪽엔 "사과"+"바나나"+"포도" 1번씩
+        text = (
+            "사과 사과 사과 사과 사과 " + ("x " * 200) +
+            "사과 바나나 포도"
+        )
+        out = ToolExecutor._extract_relevant_window(
+            text, "사과 바나나 포도", window=80, max_windows=1
+        )
+        # diverse 한 뒷부분 윈도우가 선택되어야 함
+        self.assertIn("바나나", out)
+        self.assertIn("포도", out)
+
+    def test_window_falls_back_to_head_when_no_match(self):
+        text = "전혀 다른 내용입니다"
+        out = ToolExecutor._extract_relevant_window(text, "존재하지않는키워드", window=10)
+        # 0건 매칭 → 본문 앞부분 반환
+        self.assertTrue(out.startswith("전혀"))
+
+    # --- _t_web_search 통합 (캐시 적중 확인) ---
+    def test_web_search_uses_cache(self):
+        fake_ddgs = MagicMock()
+        fake_ddgs.text.return_value = iter([
+            {"title": "T1", "body": "B1", "href": "https://a.com/1"},
+        ])
+        fake_module = MagicMock(DDGS=MagicMock(return_value=fake_ddgs))
+        with patch.dict(sys.modules, {"duckduckgo_search": fake_module}):
+            out1 = self.exec._t_web_search("재귀호출테스트")
+            out2 = self.exec._t_web_search("재귀호출테스트")
+        self.assertEqual(out1, out2)
+        # 두 번째 호출은 캐시 적중 → DDGS().text 는 1번만 호출
+        self.assertEqual(fake_ddgs.text.call_count, 1)
+
+    def test_web_search_diversifies_domains(self):
+        fake_ddgs = MagicMock()
+        fake_ddgs.text.return_value = iter([
+            {"title": "A1", "body": "X", "href": "https://news.naver.com/1"},
+            {"title": "A2", "body": "Y", "href": "https://news.naver.com/2"},
+            {"title": "B1", "body": "Z", "href": "https://other.com/1"},
+        ])
+        fake_module = MagicMock(DDGS=MagicMock(return_value=fake_ddgs))
+        with patch.dict(sys.modules, {"duckduckgo_search": fake_module}):
+            out = self.exec._t_web_search("다양화 테스트")
+        # other.com 이 등장 (도메인 다양화 효과로 상위에 살아남음)
+        self.assertIn("other.com", out)
+
+    def test_web_search_news_intent_calls_news_endpoint(self):
+        fake_ddgs = MagicMock()
+        fake_ddgs.text.return_value = iter([])
+        fake_ddgs.news.return_value = iter([
+            {"title": "속보!", "body": "내용", "url": "https://news.example.com/1"},
+        ])
+        fake_module = MagicMock(DDGS=MagicMock(return_value=fake_ddgs))
+        with patch.dict(sys.modules, {"duckduckgo_search": fake_module}):
+            out = self.exec._t_web_search("오늘 뉴스 알려줘")
+        # 뉴스 엔드포인트가 호출됐어야 함
+        self.assertGreaterEqual(fake_ddgs.news.call_count, 1)
+        self.assertIn("속보", out)
+
+    # --- _t_web_answer 통합 ---
+    def test_web_answer_parallel_fetch_combines_excerpts(self):
+        fake_ddgs = MagicMock()
+        fake_ddgs.text.return_value = iter([
+            {"title": "Title1", "body": "snippet1", "href": "https://a.com/1"},
+            {"title": "Title2", "body": "snippet2", "href": "https://b.com/2"},
+        ])
+        fake_module = MagicMock(DDGS=MagicMock(return_value=fake_ddgs))
+
+        def fake_fetch(url, max_chars=8000, timeout=5.0, max_redirects=3):
+            if "a.com" in url:
+                return "사과에 대한 자세한 본문 내용입니다 사과 정보 풍부"
+            if "b.com" in url:
+                return "바나나에 대한 본문 텍스트입니다 바나나 영양"
+            return ""
+
+        with patch.dict(sys.modules, {"duckduckgo_search": fake_module}), \
+             patch.object(ToolExecutor, "_fetch_clean_text", staticmethod(fake_fetch)):
+            out = self.exec._t_web_answer("사과 바나나")
+        self.assertIn("Title1", out)
+        self.assertIn("Title2", out)
+        # 두 출처 모두 본문 발췌가 포함되어야 함
+        self.assertIn("사과", out)
+        self.assertIn("바나나", out)
+
+    def test_web_answer_falls_back_to_snippets_when_fetch_fails(self):
+        fake_ddgs = MagicMock()
+        fake_ddgs.text.return_value = iter([
+            {"title": "OnlySnippet", "body": "유일한 스니펫", "href": "https://x.com/1"},
+        ])
+        fake_module = MagicMock(DDGS=MagicMock(return_value=fake_ddgs))
+        with patch.dict(sys.modules, {"duckduckgo_search": fake_module}), \
+             patch.object(ToolExecutor, "_fetch_clean_text", staticmethod(lambda *a, **k: "")):
+            out = self.exec._t_web_answer("테스트")
+        self.assertIn("스니펫", out)
+
+
 class SeeAndIdentifyTests(unittest.TestCase):
     """카메라 도구 — cv2 가 없거나 vision 이 frame 을 못 줄 때의 폴백."""
 
