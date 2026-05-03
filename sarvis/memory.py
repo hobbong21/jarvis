@@ -259,6 +259,42 @@ CREATE TABLE IF NOT EXISTS ha_validations (
 );
 CREATE INDEX IF NOT EXISTS idx_ha_validations_prop ON ha_validations(proposal_id, created_at DESC);
 
+-- 자체 진화 (사이클 #29) — 하네스 자기 자신의 상태를 추적.
+-- ha_self_metrics: MetaEvaluator 가 주기적으로 계산하는 퍼널/품질 스냅샷.
+--   metric_name: issue_count / diag_count / proposal_count / approved_count /
+--                rejected_count / abandoned_count / approval_rate /
+--                avg_diag_confidence / observer_precision / harness_health 등
+--   period: 'daily' / 'weekly' / 'snapshot'
+--   value: 숫자형 (비율은 0~1)
+--   metadata_json: 카테고리별 분해 등 부가정보 (선택)
+CREATE TABLE IF NOT EXISTS ha_self_metrics (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric_name     TEXT    NOT NULL,
+    period          TEXT    NOT NULL DEFAULT 'snapshot',
+    value           REAL    NOT NULL,
+    metadata_json   TEXT    NOT NULL DEFAULT '{}',
+    created_at      REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ha_self_metrics_name ON ha_self_metrics(metric_name, created_at DESC);
+
+-- ha_outcomes: 적용된 proposal 의 사후 결과 추적 (closed-loop).
+--   outcome: 'pending' (적용 후 관찰 중) / 'resolved' (이슈 사라짐) /
+--            'persistent' (이슈 지속) / 'regressed' (오히려 악화)
+--   baseline_metric / observed_metric: 비교 기준 (예: error_rate 0.15 → 0.05)
+CREATE TABLE IF NOT EXISTS ha_outcomes (
+    outcome_id      TEXT    PRIMARY KEY,
+    proposal_id     TEXT    NOT NULL REFERENCES ha_proposals(proposal_id) ON DELETE CASCADE,
+    issue_id        TEXT,
+    outcome         TEXT    NOT NULL DEFAULT 'pending',
+    baseline_metric REAL,
+    observed_metric REAL,
+    notes           TEXT,
+    applied_at      REAL    NOT NULL,
+    observed_at     REAL
+);
+CREATE INDEX IF NOT EXISTS idx_ha_outcomes_proposal ON ha_outcomes(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_ha_outcomes_outcome ON ha_outcomes(outcome, applied_at DESC);
+
 -- append-only 트리거 — strategies/validations. proposals 는 status UPDATE 필요로 제외.
 CREATE TRIGGER IF NOT EXISTS trg_ha_strategies_no_update
 BEFORE UPDATE ON ha_strategies
@@ -449,6 +485,29 @@ def _ensure_schema(path: str) -> None:
                     created_at REAL NOT NULL
                 )""",
                 "CREATE INDEX IF NOT EXISTS idx_ha_validations_prop ON ha_validations(proposal_id, created_at DESC)",
+                # 사이클 #29: 자체 진화 — 자기 메트릭 + 결과 추적.
+                """CREATE TABLE IF NOT EXISTS ha_self_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_name TEXT NOT NULL,
+                    period TEXT NOT NULL DEFAULT 'snapshot',
+                    value REAL NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_ha_self_metrics_name ON ha_self_metrics(metric_name, created_at DESC)",
+                """CREATE TABLE IF NOT EXISTS ha_outcomes (
+                    outcome_id TEXT PRIMARY KEY,
+                    proposal_id TEXT NOT NULL REFERENCES ha_proposals(proposal_id) ON DELETE CASCADE,
+                    issue_id TEXT,
+                    outcome TEXT NOT NULL DEFAULT 'pending',
+                    baseline_metric REAL,
+                    observed_metric REAL,
+                    notes TEXT,
+                    applied_at REAL NOT NULL,
+                    observed_at REAL
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_ha_outcomes_proposal ON ha_outcomes(proposal_id)",
+                "CREATE INDEX IF NOT EXISTS idx_ha_outcomes_outcome ON ha_outcomes(outcome, applied_at DESC)",
                 "CREATE TRIGGER IF NOT EXISTS trg_ha_strategies_no_update "
                 "BEFORE UPDATE ON ha_strategies BEGIN "
                 "SELECT RAISE(ABORT, 'ha_strategies is append-only'); END",
@@ -1561,6 +1620,141 @@ class Memory:
             d["auto_approval_blocked"] = bool(d.get("auto_approval_blocked"))
             out.append(d)
         return out
+
+    # ── 자체 진화: ha_self_metrics ────────────────────────────────────
+    def ha_self_metric_record(
+        self,
+        metric_name: str,
+        value: float,
+        period: str = "snapshot",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """MetaEvaluator 가 계산한 퍼널/품질 지표 1건 적재. id 반환."""
+        if not metric_name or len(metric_name) > 64:
+            raise ValueError("metric_name 1~64자")
+        if period not in ("snapshot", "daily", "weekly"):
+            raise ValueError(f"invalid period: {period}")
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("value must be numeric")
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                "INSERT INTO ha_self_metrics(metric_name, period, value, "
+                "metadata_json, created_at) VALUES (?,?,?,?,?)",
+                (metric_name, period, v,
+                 json.dumps(metadata or {}, ensure_ascii=False), time.time()),
+            )
+            return int(cur.lastrowid)
+
+    def ha_self_metric_recent(
+        self, metric_name: str, limit: int = 30,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ha_self_metrics WHERE metric_name=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (metric_name, limit),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.pop("metadata_json", "{}"))
+            except json.JSONDecodeError:
+                d["metadata"] = {}
+            out.append(d)
+        return out
+
+    def ha_self_metrics_latest(self) -> Dict[str, Dict[str, Any]]:
+        """metric_name 별 최신 1건 → {name: row} 매핑. 대시보드용."""
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT m.* FROM ha_self_metrics m "
+                "JOIN (SELECT metric_name, MAX(created_at) AS mx "
+                "      FROM ha_self_metrics GROUP BY metric_name) t "
+                "ON m.metric_name=t.metric_name AND m.created_at=t.mx",
+            ).fetchall()
+        out: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.pop("metadata_json", "{}"))
+            except json.JSONDecodeError:
+                d["metadata"] = {}
+            out[d["metric_name"]] = d
+        return out
+
+    # ── 자체 진화: ha_outcomes (closed-loop) ───────────────────────────
+    def ha_outcome_record(
+        self,
+        outcome_id: str,
+        proposal_id: str,
+        outcome: str = "pending",
+        issue_id: Optional[str] = None,
+        baseline_metric: Optional[float] = None,
+        observed_metric: Optional[float] = None,
+        notes: Optional[str] = None,
+    ) -> None:
+        """제안 적용 직후 baseline 을 기록 (outcome='pending'). 후속 호출에서
+        observed_metric + outcome=resolved/persistent/regressed 로 업데이트."""
+        if outcome not in ("pending", "resolved", "persistent", "regressed"):
+            raise ValueError(f"invalid outcome: {outcome}")
+        with _conn_ctx(self.path) as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO ha_outcomes(outcome_id, proposal_id, issue_id, "
+                    "outcome, baseline_metric, observed_metric, notes, "
+                    "applied_at, observed_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (outcome_id, proposal_id, issue_id, outcome,
+                     baseline_metric, observed_metric, notes,
+                     time.time(),
+                     time.time() if outcome != "pending" else None),
+                )
+            except sqlite3.IntegrityError as ex:
+                raise ValueError(f"outcome_id 중복: {outcome_id}") from ex
+
+    def ha_outcome_finalize(
+        self,
+        outcome_id: str,
+        outcome: str,
+        observed_metric: Optional[float] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        """pending → resolved/persistent/regressed. 한 번만 update 가능."""
+        if outcome not in ("resolved", "persistent", "regressed"):
+            raise ValueError(f"invalid outcome: {outcome}")
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                "UPDATE ha_outcomes SET outcome=?, observed_metric=?, "
+                "notes=COALESCE(?, notes), observed_at=? "
+                "WHERE outcome_id=? AND outcome='pending'",
+                (outcome, observed_metric, notes, time.time(), outcome_id),
+            )
+            return cur.rowcount > 0
+
+    def ha_outcomes_recent(
+        self, outcome: Optional[str] = None, limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        if outcome is not None and outcome not in (
+            "pending", "resolved", "persistent", "regressed",
+        ):
+            raise ValueError(f"invalid outcome: {outcome}")
+        with _conn_ctx(self.path) as conn:
+            if outcome:
+                rows = conn.execute(
+                    "SELECT * FROM ha_outcomes WHERE outcome=? "
+                    "ORDER BY applied_at DESC LIMIT ?",
+                    (outcome, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM ha_outcomes ORDER BY applied_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [dict(r) for r in rows]
 
     def ha_observer_input(
         self, window_sec: float = 24 * 3600.0, exclude_optout: bool = True,

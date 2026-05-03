@@ -109,6 +109,27 @@ _STRATEGY_RULES: Dict[str, List[Dict[str, str]]] = {
          "expected_impact": "이탈 방지",
          "cost_estimate": "낮음"},
     ],
+    # 사이클 #29: MetaEvaluator 가 발화하는 자기-이슈 카테고리.
+    # 하네스 자체의 노이즈/낮은 채택률/낮은 진단 신뢰도/낮은 효과성에 대응.
+    # 모두 카테고리 monitoring_only / heuristic_threshold — 코드 변경 없이도
+    # 사람이 사이클을 점검·결정하도록 가시화하는 데 집중.
+    "harness_meta": [
+        {"category": "heuristic_threshold",
+         "summary": "Observer 임계 재조정 (예: _ERROR_RATE_HIGH 0.10 → 0.07 또는 그 반대)",
+         "rationale": "현재 임계가 신호/잡음을 적절히 분리하지 못함",
+         "expected_impact": "다음 사이클에 채택률/효과성 회복",
+         "cost_estimate": "낮음 (단일 상수)"},
+        {"category": "monitoring_only",
+         "summary": "MetaEvaluator 자체-이슈를 daily summary 로 사람에게 통지",
+         "rationale": "자기 진단을 묵묵히 누적시키지 말고 즉시 가시화",
+         "expected_impact": "운영자 피드백 루프 단축",
+         "cost_estimate": "낮음 (이메일/대시보드 카드 1)"},
+        {"category": "knowledge_add",
+         "summary": "최근 채택된 제안 요약을 Strategist 룰 가이드로 시드",
+         "rationale": "사람의 채택 패턴을 학습 가능 지식으로 보존",
+         "expected_impact": "다음 사이클 strategy 품질 향상",
+         "cost_estimate": "낮음~중"},
+    ],
 }
 
 _FALLBACK_STRATS: List[Dict[str, str]] = [
