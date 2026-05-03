@@ -75,7 +75,7 @@ export PORCUPINE_ACCESS_KEY="..."            # https://console.picovoice.ai (무
 ## 3. 얼굴 등록 (선택)
 
 ```bash
-python face_setup.py
+python -m sarvis.face_setup
 ```
 
 ## 4. 실행
@@ -83,7 +83,7 @@ python face_setup.py
 ### 4-A. 데스크톱 모드 (pygame)
 
 ```bash
-python main.py
+python -m sarvis.main
 ```
 
 - 첫 실행 — 계정 생성 (사용자명 + 비밀번호 4자 이상)
@@ -101,8 +101,8 @@ python main.py
 ### 4-B. 웹 모드 (반응형 브라우저 UI)
 
 ```bash
-python server.py
-# 또는: uvicorn server:app --host 0.0.0.0 --port 8000
+python -m sarvis.server
+# 또는: uvicorn sarvis.server:app --host 0.0.0.0 --port 8000
 ```
 
 브라우저에서 `http://localhost:8000` 접속.

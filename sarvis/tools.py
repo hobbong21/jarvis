@@ -6,11 +6,12 @@ Microsoft SARVIS의 4단계 패턴을 Claude tool_use로 구현:
 import base64
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # cv2 는 vision 모듈의 lazy 로더를 재사용 (배포 cold start 60초 제한 회피).
 # 모듈 import 시 cv2 를 즉시 로드하면 uvicorn 이 포트 열기 전에 헬스체크 실패.
@@ -270,9 +271,48 @@ class ToolExecutor:
     # 시간 민감 질의 패턴 — 매칭되면 오늘 날짜를 query 에 자동 부착해 검색 신선도↑
     _TIME_SENSITIVE_PATTERNS = (
         "오늘", "지금", "현재", "최근", "요즘", "이번 주", "이번주", "올해",
-        "어제", "내일", "방금", "실시간", "라이브",
+        "어제", "내일", "방금", "실시간", "라이브", "지난주", "지난 주",
+        "이번 달", "이번달", "지난달", "오늘날짜",
         "today", "now", "current", "latest", "recent", "this week", "this year",
+        "this month", "last week",
     )
+
+    # 뉴스성 질의 — DDGS.news() 까지 추가로 호출해 신선한 뉴스 결과 합침.
+    _NEWS_INTENT_PATTERNS = (
+        "뉴스", "속보", "기사", "이슈", "보도", "헤드라인",
+        "news", "headline", "breaking",
+    )
+
+    # 검색 결과 in-memory TTL 캐시 — 같은 질의 재호출/도구 연속 호출 시
+    # DDGS rate-limit 회피 + 응답 속도 개선. (최대 항목/체류시간 작게 유지)
+    _CACHE_TTL_S = 600  # 10분
+    _CACHE_MAX = 64
+    _cache: Dict[str, Tuple[float, str]] = {}
+    _cache_lock = threading.Lock()
+
+    @staticmethod
+    def _cache_get(key: str) -> Optional[str]:
+        with ToolExecutor._cache_lock:
+            entry = ToolExecutor._cache.get(key)
+            if not entry:
+                return None
+            ts, val = entry
+            if time.time() - ts > ToolExecutor._CACHE_TTL_S:
+                ToolExecutor._cache.pop(key, None)
+                return None
+            return val
+
+    @staticmethod
+    def _cache_put(key: str, val: str) -> None:
+        with ToolExecutor._cache_lock:
+            if len(ToolExecutor._cache) >= ToolExecutor._CACHE_MAX:
+                # 가장 오래된 항목 제거 (FIFO)
+                try:
+                    oldest = min(ToolExecutor._cache.items(), key=lambda kv: kv[1][0])[0]
+                    ToolExecutor._cache.pop(oldest, None)
+                except ValueError:
+                    pass
+            ToolExecutor._cache[key] = (time.time(), val)
 
     @staticmethod
     def _date_hint(query: str) -> str:
@@ -295,7 +335,6 @@ class ToolExecutor:
     @staticmethod
     def _strip_time_qualifier(query: str) -> str:
         """검색 결과 0건 시 재시도용 — 시간 한정자/날짜를 제거한 더 일반적 질의."""
-        import re
         q = query
         for p in ToolExecutor._TIME_SENSITIVE_PATTERNS:
             q = q.replace(p, " ")
@@ -303,6 +342,89 @@ class ToolExecutor:
         q = re.sub(r"\b20\d{2}(-\d{2}-\d{2})?\b", " ", q)
         q = re.sub(r"\s+", " ", q).strip()
         return q or query
+
+    @staticmethod
+    def _is_news_intent(query: str) -> bool:
+        ql = (query or "").lower()
+        return any(p in ql for p in ToolExecutor._NEWS_INTENT_PATTERNS)
+
+    @staticmethod
+    def _domain_of(url: str) -> str:
+        """URL 의 호스트(www. 제거, lowercase) — 중복 출처 dedupe 용."""
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(url).hostname or "").lower()
+            if host.startswith("www."):
+                host = host[4:]
+            return host
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _dedupe_by_domain(results: List[dict], max_per_domain: int = 1,
+                         max_total: int = 8) -> List[dict]:
+        """검색 결과를 도메인별 빈도 제한으로 다양화.
+
+        같은 사이트에서 N개가 잡히면 1개만 살리고 나머지는 뒤쪽으로 밀어
+        다양한 출처가 상위에 오게 한다. 0건 시 입력 그대로 반환.
+        """
+        if not results:
+            return results
+        seen: Dict[str, int] = {}
+        primary: List[dict] = []
+        overflow: List[dict] = []
+        for r in results:
+            href = (r.get("href") or "").strip()
+            d = ToolExecutor._domain_of(href)
+            if not d:
+                primary.append(r)
+                continue
+            cnt = seen.get(d, 0)
+            if cnt < max_per_domain:
+                primary.append(r)
+                seen[d] = cnt + 1
+            else:
+                overflow.append(r)
+            if len(primary) >= max_total:
+                break
+        # 부족하면 overflow 로 채움
+        if len(primary) < max_total:
+            primary.extend(overflow[: max_total - len(primary)])
+        return primary
+
+    @staticmethod
+    def _ddgs_search(query: str, *, max_results: int = 8,
+                    region: str = "kr-kr",
+                    include_news: bool = False) -> List[dict]:
+        """DDGS.text() 호출. include_news=True 면 .news() 결과를 앞쪽에 합침.
+
+        반환 형식은 {title, body, href} dict 리스트. 실패는 [] 리턴(폴백 가능).
+        """
+        try:
+            from duckduckgo_search import DDGS
+        except Exception:
+            return []
+        out: List[dict] = []
+        ddgs = DDGS()
+        if include_news:
+            try:
+                # news 는 {title, body, url, date, source} 등을 줌 — href 키로 정규화.
+                for n in ddgs.news(query, max_results=min(4, max_results), region=region):
+                    href = (n.get("url") or n.get("href") or "").strip()
+                    if not href:
+                        continue
+                    title = (n.get("title") or "").strip()
+                    body = (n.get("body") or n.get("excerpt") or "").strip()
+                    out.append({"title": title, "body": body, "href": href})
+            except Exception:
+                pass
+        try:
+            for r in ddgs.text(query, max_results=max_results, region=region):
+                out.append(r)
+        except Exception:
+            # text 실패해도 news 결과는 반환
+            pass
+        return out
 
     @staticmethod
     def _is_safe_url(url: str) -> bool:
@@ -418,83 +540,146 @@ class ToolExecutor:
         except Exception:
             return ""
 
+    # 한글 조사 — 키워드 매칭 시 어미를 떼어내 회수율 향상.
+    # 짧은 명사("나", "너")의 잘못된 절단 방지를 위해 토큰 길이 ≥3 일 때만 적용.
+    _KO_PARTICLES = (
+        "으로써", "으로서", "으로", "에서", "에게", "께서", "한테", "이라고",
+        "라고", "이며", "보다", "처럼", "마저", "조차", "까지", "부터",
+        "이나", "이라", "이라도", "이든", "이면",
+        "은", "는", "이", "가", "을", "를", "와", "과", "의", "도", "만",
+    )
+
+    _STOPWORDS = {
+        "오늘", "지금", "현재", "최근", "요즘", "올해", "어제", "내일",
+        "오늘날짜", "이번주", "이번달", "지난주", "지난달",
+        "today", "now", "current", "latest", "what", "who", "how", "when",
+        "where", "why", "is", "are", "the", "a", "an", "of", "in", "on", "at",
+        "이거", "그거", "저거", "이건", "그건", "이것", "그것",
+        "뭐", "뭐야", "어때", "알려줘", "찾아줘", "검색", "관련",
+    }
+
+    @staticmethod
+    def _strip_ko_particle(tok: str) -> str:
+        """한글 토큰 끝의 조사를 제거. 길이 3미만/영문 단독 토큰은 그대로."""
+        if len(tok) < 3:
+            return tok
+        if not any("가" <= ch <= "힣" for ch in tok):
+            return tok
+        for p in ToolExecutor._KO_PARTICLES:
+            if tok.endswith(p) and len(tok) > len(p) + 1:
+                return tok[: -len(p)]
+        return tok
+
+    @staticmethod
+    def _query_keywords(query: str, max_tokens: int = 6) -> List[str]:
+        """질의에서 의미있는 키워드만 추출. 한글 조사 제거 + stopword 제거."""
+        raw = [t for t in re.split(r"[\s\.,!?·、，。！？\(\)\[\]\"'’“”~]+", query) if t]
+        out: List[str] = []
+        seen = set()
+        for t in raw:
+            tl = t.lower()
+            if tl in ToolExecutor._STOPWORDS:
+                continue
+            stripped = ToolExecutor._strip_ko_particle(t)
+            sl = stripped.lower()
+            if len(sl) < 2 or sl in seen or sl in ToolExecutor._STOPWORDS:
+                continue
+            seen.add(sl)
+            out.append(stripped)
+            if len(out) >= max_tokens:
+                break
+        return out
+
     @staticmethod
     def _extract_relevant_window(text: str, query: str, window: int = 500, max_windows: int = 3) -> str:
         """본문에서 query 키워드 주변 텍스트 윈도우 N개를 추출해 합침.
 
-        키워드 매칭 0건이면 본문 앞부분 1개 윈도우 반환.
+        Ranking: 윈도우 안의 *서로 다른* 키워드 개수가 많을수록 가점 (단순 hit 카운트
+        보다 의미적으로 관련된 구간을 우선). 키워드 매칭 0건이면 본문 앞부분 반환.
         """
         if not text:
             return ""
-        # 한글/영문 토큰 분해 (단순)
-        import re
-        tokens = [t for t in re.split(r"[\s\.,!?·、，。！？\(\)\[\]\"']+", query) if len(t) >= 2]
-        # 너무 일반적인 stopword 제거
-        STOP = {"오늘", "지금", "현재", "최근", "요즘", "올해", "어제", "내일",
-                "today", "now", "current", "latest", "what", "who", "how", "when",
-                "이거", "그거", "저거", "이건", "그건", "이것", "그것"}
-        tokens = [t for t in tokens if t.lower() not in STOP][:6]
+        tokens = ToolExecutor._query_keywords(query)
         if not tokens:
             return text[:window]
 
         text_l = text.lower()
-        hits: List[int] = []
+        # 토큰별 hit 위치 수집.
+        token_hits: Dict[str, List[int]] = {}
+        all_hits: List[Tuple[int, str]] = []
         for tok in tokens:
-            start = 0
             tl = tok.lower()
+            positions: List[int] = []
+            start = 0
             while True:
                 idx = text_l.find(tl, start)
                 if idx < 0:
                     break
-                hits.append(idx)
+                positions.append(idx)
+                all_hits.append((idx, tl))
                 start = idx + len(tl)
-                if len(hits) >= 30:
+                if len(positions) >= 30:
                     break
-        if not hits:
+            token_hits[tl] = positions
+
+        if not all_hits:
             return text[:window]
-        hits.sort()
-        # 인접한 hit 들을 합쳐 window 그룹화
-        windows: List[tuple] = []  # (lo, hi)
-        cur_lo = max(0, hits[0] - window // 2)
-        cur_hi = min(len(text), hits[0] + window // 2)
-        for h in hits[1:]:
-            lo = max(0, h - window // 2)
-            hi = min(len(text), h + window // 2)
+
+        # 인접 hit 들을 합쳐 window 그룹화.
+        all_hits.sort()
+        windows_raw: List[Tuple[int, int, set]] = []  # (lo, hi, distinct_tokens)
+        cur_lo = max(0, all_hits[0][0] - window // 2)
+        cur_hi = min(len(text), all_hits[0][0] + window // 2)
+        cur_set = {all_hits[0][1]}
+        for idx, tok in all_hits[1:]:
+            lo = max(0, idx - window // 2)
+            hi = min(len(text), idx + window // 2)
             if lo <= cur_hi:  # 겹치거나 인접
                 cur_hi = max(cur_hi, hi)
+                cur_set.add(tok)
             else:
-                windows.append((cur_lo, cur_hi))
-                cur_lo, cur_hi = lo, hi
-        windows.append((cur_lo, cur_hi))
-        windows = windows[:max_windows]
-        chunks = [text[lo:hi].strip() for (lo, hi) in windows]
-        return " … ".join(chunks)
+                windows_raw.append((cur_lo, cur_hi, cur_set))
+                cur_lo, cur_hi, cur_set = lo, hi, {tok}
+        windows_raw.append((cur_lo, cur_hi, cur_set))
+
+        # 점수: distinct 토큰 수 우선 + 길이 보너스(서로 동률일 때).
+        windows_raw.sort(key=lambda w: (-len(w[2]), -(w[1] - w[0])))
+        picked = windows_raw[:max_windows]
+        # 본문 순서로 다시 정렬 (자연스러운 읽기 순)
+        picked.sort(key=lambda w: w[0])
+        chunks = [text[lo:hi].strip() for (lo, hi, _) in picked]
+        return " … ".join(c for c in chunks if c)
 
     def _t_web_search(self, query: str) -> str:
-        """빠른 스니펫 검색 (상위 6개). 시간 민감 질의는 날짜 부착 + 빈 결과 시 재시도."""
+        """빠른 스니펫 검색 (상위 6개). 시간 민감 질의는 날짜 부착 + 뉴스 의도면
+        DDGS.news() 결과 합침 + 도메인 다양화 + TTL 캐시.
+
+        실패/0건 시: stripped query 로 wt-wt region 재시도 → 최후엔 친절 메시지.
+        """
         try:
-            from duckduckgo_search import DDGS
+            from duckduckgo_search import DDGS  # noqa: F401
         except Exception as e:
             return f"검색 실패: {e}"
+
+        ck = f"search::{query}"
+        cached = self._cache_get(ck)
+        if cached:
+            return cached
 
         q1 = self._date_hint(query)
-        results: list = []
-        try:
-            results = list(DDGS().text(q1, max_results=6, region="kr-kr"))
-        except Exception as e:
-            return f"검색 실패: {e}"
+        news = self._is_news_intent(query) or query != q1  # 시간/뉴스 의도면 news 합침
+        results = self._ddgs_search(q1, max_results=8, region="kr-kr", include_news=news)
 
-        # 1차 빈 결과 → 시간 한정자 제거 + region wt-wt 로 재시도
         if not results:
             q2 = self._strip_time_qualifier(query)
             if q2 and q2 != q1:
-                try:
-                    results = list(DDGS().text(q2, max_results=6, region="wt-wt"))
-                except Exception:
-                    results = []
+                results = self._ddgs_search(q2, max_results=8, region="wt-wt", include_news=False)
 
         if not results:
             return f"'{query}' 검색 결과 없음"
+
+        results = self._dedupe_by_domain(results, max_per_domain=1, max_total=6)
+
         lines = []
         for r in results[:6]:
             title = (r.get("title") or "").strip()
@@ -503,52 +688,98 @@ class ToolExecutor:
             if title and body:
                 src = f" ({href})" if href else ""
                 lines.append(f"- {title}{src}: {body}")
-        return "\n".join(lines) if lines else f"'{query}' 검색 결과 없음"
+        out = "\n".join(lines) if lines else f"'{query}' 검색 결과 없음"
+        self._cache_put(ck, out)
+        return out
 
     def _t_web_answer(self, query: str) -> str:
-        """검색 → 상위 3개 페이지 본문 fetch → 질문 키워드 주변 발췌 → 합쳐서 반환.
+        """검색 → 상위 페이지 본문 병렬 fetch → 키워드 주변 발췌 → 합쳐서 반환.
 
-        brain 이 받아서 종합 답변하기 좋은 형태:
-          [출처1] 제목 (URL)
+        강화 사항:
+          - DDGS.text + DDGS.news (시간/뉴스 질의) 결합
+          - 같은 도메인 1개로 dedupe → 출처 다양화
+          - 상위 5개 URL 을 ThreadPoolExecutor 로 병렬 fetch (지연 ↓)
+          - 본문 발췌는 토큰 다양성 기반 window ranking
+          - TTL 캐시(_CACHE_TTL_S) 로 동일 질의 즉시 재반환
+
+        반환 형식:
+          [출처1] 제목
+          URL: ...
           ...본문 발췌...
-          [출처2] ...
-        총 ~6KB 이내로 정렬.
+          ...
         """
         try:
-            from duckduckgo_search import DDGS
+            from duckduckgo_search import DDGS  # noqa: F401
         except Exception as e:
             return f"검색 실패: {e}"
 
+        ck = f"answer::{query}"
+        cached = self._cache_get(ck)
+        if cached:
+            return cached
+
         q1 = self._date_hint(query)
-        try:
-            results = list(DDGS().text(q1, max_results=8, region="kr-kr"))
-        except Exception as e:
-            return f"검색 실패: {e}"
+        news = self._is_news_intent(query) or query != q1
+        results = self._ddgs_search(q1, max_results=10, region="kr-kr", include_news=news)
         if not results:
             q2 = self._strip_time_qualifier(query)
             if q2 and q2 != q1:
-                try:
-                    results = list(DDGS().text(q2, max_results=8, region="wt-wt"))
-                except Exception:
-                    results = []
+                results = self._ddgs_search(q2, max_results=10, region="wt-wt", include_news=False)
         if not results:
             return f"'{query}' 검색 결과 없음"
 
-        # 상위 페이지 fetch — 최대 3개 성공할 때까지
-        sections: List[str] = []
-        used = 0
+        # 도메인 다양화 — 상위 5개를 후보로
+        results = self._dedupe_by_domain(results, max_per_domain=1, max_total=5)
+
+        # 후보 URL 목록 추출 (href 없는 결과 제외).
+        candidates: List[dict] = []
         for r in results:
-            if used >= 3:
-                break
             href = (r.get("href") or "").strip()
-            title = (r.get("title") or "").strip() or "(제목 없음)"
-            snippet = (r.get("body") or "").strip()
             if not href:
                 continue
-            body = self._fetch_clean_text(href, max_chars=8000)
+            candidates.append(r)
+            if len(candidates) >= 5:
+                break
+
+        if not candidates:
+            return f"'{query}' 검색 결과 없음"
+
+        # 상위 후보 URL 병렬 fetch (max 5 워커, 페이지당 5초 timeout).
+        urls = [(i, (c.get("href") or "").strip()) for i, c in enumerate(candidates)]
+        bodies: Dict[int, str] = {}
+        try:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=min(5, len(urls))) as ex:
+                fut_to_idx = {
+                    ex.submit(self._fetch_clean_text, url, 8000, 5.0): i
+                    for i, url in urls
+                }
+                for fut in as_completed(fut_to_idx, timeout=12):
+                    i = fut_to_idx[fut]
+                    try:
+                        bodies[i] = fut.result() or ""
+                    except Exception:
+                        bodies[i] = ""
+        except Exception:
+            # 병렬화 실패 시 순차 폴백
+            for i, url in urls:
+                try:
+                    bodies[i] = self._fetch_clean_text(url, max_chars=8000)
+                except Exception:
+                    bodies[i] = ""
+
+        # 발췌 합성 — 본문 성공한 출처 최대 3개 우선.
+        sections: List[str] = []
+        used = 0
+        for i, c in enumerate(candidates):
+            if used >= 3:
+                break
+            href = (c.get("href") or "").strip()
+            title = (c.get("title") or "").strip() or "(제목 없음)"
+            snippet = (c.get("body") or "").strip()
+            body = bodies.get(i, "")
             excerpt = self._extract_relevant_window(body, query, window=500, max_windows=2) if body else ""
             if not excerpt:
-                # 페이지 본문 못 받으면 스니펫이라도 사용
                 if not snippet:
                     continue
                 excerpt = snippet
@@ -556,20 +787,22 @@ class ToolExecutor:
             used += 1
 
         if not sections:
-            # 최후 폴백 — 스니펫만 합쳐서 반환
+            # 최후 폴백 — 스니펫만 합쳐서 반환 (페이지 차단된 환경)
             lines = []
-            for r in results[:5]:
+            for r in candidates[:5]:
                 t = (r.get("title") or "").strip()
                 b = (r.get("body") or "").strip()
                 h = (r.get("href") or "").strip()
                 if t and b:
                     lines.append(f"- {t} ({h}): {b}")
-            return "\n".join(lines) if lines else f"'{query}' 결과 없음"
+            out = "\n".join(lines) if lines else f"'{query}' 결과 없음"
+            self._cache_put(ck, out)
+            return out
 
         joined = "\n\n".join(sections)
-        # 안전 길이 제한
         if len(joined) > 7000:
             joined = joined[:7000] + " …"
+        self._cache_put(ck, joined)
         return joined
 
     def _t_get_weather(self, location: str) -> str:

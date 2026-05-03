@@ -75,6 +75,11 @@
   const mobileTextForm = $('mobile-text-form');
   const mobileTextInput = $('mobile-text-input');
   const orbReply = $('orb-reply');
+  // 채팅 헤더에 통합된 SARVIS 아바타 (감정 오브 + 상태 라벨)
+  const chatOrbCanvas = $('chat-orb');
+  const chatAvatarEl = document.querySelector('.chat-avatar');
+  const chatAvatarStateEl = $('chat-avatar-state');
+  let chatOrb = null;
 
   // ---------- 상태 ----------
   let ws = null;
@@ -119,6 +124,10 @@
   mainOrb = new EmotionOrb(orbCanvas, { particles: 70, style: savedStyle });
   if (orbCanvas2) {
     secondOrb = new EmotionOrb(orbCanvas2, { particles: 70, style: savedStyle });
+  }
+  // 채팅 아바타 — 감정 오브의 컴팩트 변형 (입자 수 감소, 동일 스타일 공유)
+  if (chatOrbCanvas) {
+    chatOrb = new EmotionOrb(chatOrbCanvas, { particles: 36, style: savedStyle });
   }
   setupOrbStylePicker(savedStyle);
   setupClock();
@@ -172,6 +181,7 @@
     // 메시지 핸들러가 바인딩된 후 안전 전송 (readyState 가드).
     ws.addEventListener('open', () => {
       try { send({ type: 'models_list' }); } catch (_e) {}
+      try { send({ type: 'voices_list' }); } catch (_e) {}
     });
   }
 
@@ -375,6 +385,19 @@
         }
         flash(`✓ 모델 변경: ${m.model}`);
         break;
+      case 'voices_list':
+        // 음성 카탈로그 + 현재 프리셋 ID
+        applyVoiceCatalog(m.catalog || [], m.current || 'default');
+        break;
+      case 'voice_changed':
+        // 음성 변경 ack — 드롭다운에 반영 + 라벨 갱신
+        applyVoiceChanged(m);
+        flash(`✓ 음성 변경: ${m.label || m.preset}`);
+        break;
+      case 'voice_preview':
+        // 미리듣기 — base64 → blob → audio 재생
+        playVoicePreview(m);
+        break;
       case 'reset_ack':
         clearLog();
         break;
@@ -411,6 +434,15 @@
     }
   }
 
+  // 채팅 아바타 상태 라벨 — AI 가 지금 무엇을 하고 있는지 친근한 한국어로.
+  const CHAT_AVATAR_STATE_LABELS = {
+    idle:         '듣고 있어요',
+    listening:    '듣는 중…',
+    thinking:     '생각하고 있어요…',
+    speaking:     '말하고 있어요…',
+    disconnected: '연결을 다시 시도하고 있어요…',
+  };
+
   function setState(state) {
     statePill.classList.remove('listening', 'thinking', 'speaking');
     if (state === 'listening' || state === 'thinking' || state === 'speaking') {
@@ -428,6 +460,17 @@
     } else if (state === 'disconnected') {
       hintLabel.textContent = '▸ 연결 끊김 — 재시도 중';
     }
+    // 채팅 헤더 아바타에도 상태 반영 — CSS 의 data-state attribute 가 헤일로 애니
+    // 메이션을 전환하고, orb 의 setState 가 호흡 리듬을 조정한다.
+    const orbState = (state === 'listening' || state === 'thinking'
+                      || state === 'speaking') ? state : 'idle';
+    if (chatAvatarEl) chatAvatarEl.dataset.state = orbState;
+    if (chatAvatarStateEl) {
+      chatAvatarStateEl.textContent =
+        CHAT_AVATAR_STATE_LABELS[state] || CHAT_AVATAR_STATE_LABELS.idle;
+    }
+    if (mainOrb && mainOrb.setState) mainOrb.setState(orbState);
+    if (chatOrb && chatOrb.setState) chatOrb.setState(orbState);
   }
 
   function updateEmotionMini(name) {
@@ -449,6 +492,7 @@
     // 헤더가 좁아 표시 안 함 (orb-pane 의 sub-emotion 라벨이 대신함).
     if (compareMode) return;
     mainOrb.setEmotion(name);
+    if (chatOrb) chatOrb.setEmotion(name);  // 채팅 아바타도 같은 감정으로 동기화
     const key = (name || 'neutral').toLowerCase();
     emotionLabel.textContent = EMOTION_LABELS_KO[key] || key;
     updateEmotionMini(name);
@@ -467,6 +511,9 @@
   function setCompareMode(on) {
     compareMode = on;
     if (orbPane) orbPane.classList.toggle('compare-mode', on);
+    // 디자인 통합 후 orb-pane 은 평소 숨김. 비교 모드일 때만 펼쳐서 두 번째 오브 표시.
+    const layoutEl = document.querySelector('.layout');
+    if (layoutEl) layoutEl.classList.toggle('show-orb', on && !isMobile());
     const secondary = document.querySelector('.orb-unit.secondary');
     if (secondary) {
       if (on) secondary.removeAttribute('hidden');
@@ -736,7 +783,11 @@
 
       const micBuf = new Uint8Array(micAnalyser.fftSize);
       const feedOrbMic = () => {
-        if (!recording) { if (mainOrb) mainOrb.setAmplitude(0); return; }
+        if (!recording) {
+          if (mainOrb) mainOrb.setAmplitude(0);
+          if (chatOrb) chatOrb.setAmplitude(0);
+          return;
+        }
         micAnalyser.getByteTimeDomainData(micBuf);
         let sum = 0;
         for (let i = 0; i < micBuf.length; i++) {
@@ -745,6 +796,7 @@
         }
         const rms = Math.sqrt(sum / micBuf.length);
         if (mainOrb) mainOrb.setAmplitude(rms * 3.5);
+        if (chatOrb) chatOrb.setAmplitude(rms * 3.5);
         requestAnimationFrame(feedOrbMic);
       };
       feedOrbMic();
@@ -896,16 +948,122 @@
         send({ type: 'switch_model', backend, model });
       });
     }
+    setupVoicePicker();
+  }
+
+  // ---------- 음성 선택 (voice picker) ----------
+  let voiceCatalog = [];        // [{id, label, voice, rate, pitch, gender, description}, ...]
+  let voiceCurrent = 'default';
+
+  function setupVoicePicker() {
+    const sel = document.getElementById('voice-select');
+    const previewBtn = document.getElementById('voice-preview-btn');
+    const applyBtn = document.getElementById('voice-apply-btn');
+    const desc = document.getElementById('voice-description');
+    if (!sel) return;
+
+    sel.addEventListener('change', () => {
+      const id = sel.value;
+      const p = voiceCatalog.find((v) => v.id === id);
+      if (desc && p) desc.textContent = p.description || '';
+    });
+    if (previewBtn) {
+      previewBtn.addEventListener('click', () => {
+        const id = sel.value;
+        if (!id) return;
+        previewBtn.disabled = true;
+        previewBtn.textContent = '⏳ 합성 중...';
+        send({ type: 'preview_voice', preset: id });
+        // 6초 후 자동 복원 (서버 응답이 없을 경우)
+        setTimeout(() => {
+          if (previewBtn.disabled) {
+            previewBtn.disabled = false;
+            previewBtn.textContent = '▶ 미리듣기';
+          }
+        }, 6000);
+      });
+    }
+    if (applyBtn) {
+      applyBtn.addEventListener('click', () => {
+        const id = sel.value;
+        if (!id || id === voiceCurrent) return;
+        send({ type: 'switch_voice', preset: id });
+      });
+    }
+  }
+
+  function applyVoiceCatalog(catalog, current) {
+    voiceCatalog = Array.isArray(catalog) ? catalog : [];
+    voiceCurrent = current || 'default';
+    const sel = document.getElementById('voice-select');
+    const desc = document.getElementById('voice-description');
+    const label = document.getElementById('voice-current-label');
+    if (!sel) return;
+    sel.innerHTML = '';
+    if (!voiceCatalog.length) {
+      const opt = document.createElement('option');
+      opt.value = ''; opt.textContent = '(목록 없음)';
+      sel.appendChild(opt);
+      return;
+    }
+    voiceCatalog.forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.label || p.id;
+      sel.appendChild(opt);
+    });
+    sel.value = voiceCurrent;
+    const cur = voiceCatalog.find((v) => v.id === voiceCurrent);
+    if (label) label.textContent = cur ? cur.label : voiceCurrent;
+    if (desc && cur) desc.textContent = cur.description || '';
+  }
+
+  function applyVoiceChanged(m) {
+    voiceCurrent = m.preset || voiceCurrent;
+    const sel = document.getElementById('voice-select');
+    const label = document.getElementById('voice-current-label');
+    const desc = document.getElementById('voice-description');
+    if (sel) sel.value = voiceCurrent;
+    const cur = voiceCatalog.find((v) => v.id === voiceCurrent);
+    if (label) label.textContent = cur ? cur.label : (m.label || voiceCurrent);
+    if (desc && cur) desc.textContent = cur.description || '';
+  }
+
+  function playVoicePreview(m) {
+    const previewBtn = document.getElementById('voice-preview-btn');
+    if (previewBtn) {
+      previewBtn.disabled = false;
+      previewBtn.textContent = '▶ 미리듣기';
+    }
+    const audioEl = document.getElementById('voice-preview-audio');
+    if (!audioEl || !m.audio_b64) return;
+    try {
+      const bin = atob(m.audio_b64);
+      const len = bin.length;
+      const buf = new Uint8Array(len);
+      for (let i = 0; i < len; i++) buf[i] = bin.charCodeAt(i);
+      const blob = new Blob([buf], { type: m.mime || 'audio/mpeg' });
+      const url = URL.createObjectURL(blob);
+      audioEl.src = url;
+      audioEl.play().catch(() => {});
+      audioEl.onended = () => { try { URL.revokeObjectURL(url); } catch (_e) {} };
+    } catch (e) {
+      console.error('[voice preview] decode 실패:', e);
+    }
   }
 
   // ---------- 오브 스타일 선택 ----------
   function setupOrbStylePicker(initialStyle) {
     const buttons = document.querySelectorAll('.orb-style-picker [data-orb-style]');
+    // 초기 스타일을 chatOrb 에도 즉시 반영 (chatOrb 는 스타일 picker 가 끝난 뒤에
+    // 만들어지지 않고 부팅 시 함께 만들어지지만, picker 클릭 시점에 chatOrb 가
+    // 살아있는지 보장하기 위해 매번 적용한다).
     if (!buttons.length) return;
     const apply = (name) => {
       buttons.forEach((b) => b.classList.toggle('active', b.dataset.orbStyle === name));
       if (mainOrb) mainOrb.setStyle(name);
       if (secondOrb) secondOrb.setStyle(name);
+      if (chatOrb) chatOrb.setStyle(name);  // 채팅 헤더 아바타도 동일 스타일 유지
       localStorage.setItem('orbStyle', name);
     };
     apply(initialStyle);
@@ -928,16 +1086,14 @@
     document.querySelectorAll('.tab-btn').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === tab);
     });
-    const orbPane = document.querySelector('.orb-pane');
     const sidePane = document.querySelector('.side-pane');
     const chatMain = document.querySelector('.chat-main');
-    [orbPane, sidePane, chatMain].forEach((el) => el && el.classList.remove('tab-active'));
-    if (tab === 'orb' && orbPane) {
-      orbPane.classList.add('tab-active');
-    } else if (tab === 'side' && sidePane) {
+    // 통합 후 'orb' 탭은 더 이상 없음 — 채팅 헤더에 항상 아바타 표시.
+    [sidePane, chatMain].forEach((el) => el && el.classList.remove('tab-active'));
+    if (tab === 'side' && sidePane) {
       sidePane.classList.add('tab-active');
     } else if (chatMain) {
-      // 기본: chat
+      // 기본: chat (orb 탭이 chat 으로 폴백)
       chatMain.classList.add('tab-active');
       logEl.scrollTop = logEl.scrollHeight;
       clearTabBadge('chat');
@@ -951,33 +1107,28 @@
     if (!layout) return;
 
     // 모바일은 별도 풀스크린 자비스 뷰를 쓰므로 데스크톱 패널 클래스 정리.
+    // 디자인 통합 후: 오브가 채팅 헤더에 항상 표시되므로 'show-orb' 토글은 제거.
+    // 비전 패널만 토글 가능 (기본 숨김).
     const applyDesktopState = () => {
+      layout.classList.remove('show-orb');  // 통합 후 항상 false
       if (isMobile()) {
-        layout.classList.remove('show-orb', 'show-vision');
+        layout.classList.remove('show-vision');
         return;
       }
-      // 저장된 패널 상태 복원 (데스크톱에서만).
-      // 첫 방문 시점에는 감정 오브가 보이도록 orb=true 를 기본값으로 적용.
       const saved = (() => {
         try {
           const raw = localStorage.getItem('panelState');
-          if (!raw) return { orb: true, vision: false };  // 최초 방문 기본값
-          return JSON.parse(raw) || { orb: true, vision: false };
-        } catch { return { orb: true, vision: false }; }
+          if (!raw) return { vision: false };
+          const obj = JSON.parse(raw) || {};
+          return { vision: !!obj.vision };
+        } catch { return { vision: false }; }
       })();
-      layout.classList.toggle('show-orb', !!saved.orb);
       layout.classList.toggle('show-vision', !!saved.vision);
-      setPressed('toggle-orb', !!saved.orb);
       setPressed('toggle-vision', !!saved.vision);
     };
     applyDesktopState();
     window.addEventListener('resize', applyDesktopState);
 
-    bindToggle('toggle-orb', () => {
-      const on = layout.classList.toggle('show-orb');
-      setPressed('toggle-orb', on);
-      saveState();
-    });
     bindToggle('toggle-vision', () => {
       const on = layout.classList.toggle('show-vision');
       setPressed('toggle-vision', on);
@@ -1012,7 +1163,6 @@
     function saveState() {
       try {
         localStorage.setItem('panelState', JSON.stringify({
-          orb: layout.classList.contains('show-orb'),
           vision: layout.classList.contains('show-vision'),
         }));
       } catch {}

@@ -3,7 +3,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -110,10 +110,13 @@ class Config:
     whisper_model: str = os.getenv("SARVIS_WHISPER_MODEL", "medium")
     whisper_device: str = os.getenv("SARVIS_WHISPER_DEVICE", "auto")
     whisper_language: str = os.getenv("SARVIS_WHISPER_LANGUAGE", "ko")
-    # 한국어 인식 품질을 끌어올리는 initial_prompt (Whisper 가 한국어/구두점 패턴을 학습).
+    # 한국어 인식 품질을 끌어올리는 initial_prompt — 사비스 도메인 어휘
+    # (호출어, 자주 쓰는 명령, 도구명) 를 명시해 Whisper 의 한국어 토큰 예측을 편향.
     whisper_initial_prompt: str = os.getenv(
         "SARVIS_WHISPER_PROMPT",
-        "다음은 한국어 자연어 대화입니다. 사비스, 안녕하세요, 알려줘, 부탁해, 감사합니다.",
+        "다음은 한국어 자연어 대화입니다. 사비스, 안녕하세요, 알려줘, 부탁해, 감사합니다. "
+        "검색해줘, 찾아줘, 날씨, 시간, 타이머 설정, 기억해줘, 지워줘, 일정, 회의, 메모, "
+        "음악 틀어줘, 메일 확인, 카메라, 누구야, 뭐야, 어디, 언제, 왜, 어떻게.",
     )
     # 사이클 #27 (옵션 1·C) — faster-whisper transcribe 옵션 강화 (env 오버라이드).
     # beam_size↑·VAD min_silence↓·speech_pad↑·threshold 보수화 → 한국어 정확도 향상.
@@ -123,6 +126,12 @@ class Config:
     whisper_vad_threshold: float = float(os.getenv("SARVIS_WHISPER_VAD_THRESHOLD", "0.4"))
     whisper_compression_ratio: float = float(os.getenv("SARVIS_WHISPER_COMPRESSION_RATIO", "1.8"))
     whisper_no_speech_threshold: float = float(os.getenv("SARVIS_WHISPER_NO_SPEECH_THRESHOLD", "0.6"))
+    # 세그먼트 단위 신뢰도 필터 — 환각 추가 방어 (transcribe 후 세그먼트 검사).
+    #   avg_logprob < whisper_min_logprob → 매우 낮은 확신 → 드롭
+    #   no_speech_prob > whisper_max_no_speech_prob → 무음 확률 높음 → 드롭
+    # -1.0 / 0.7 은 conservative — 정상 발화는 보통 -0.5 ~ -0.2, no_speech_prob<0.4.
+    whisper_min_logprob: float = float(os.getenv("SARVIS_WHISPER_MIN_LOGPROB", "-1.0"))
+    whisper_max_no_speech_prob: float = float(os.getenv("SARVIS_WHISPER_MAX_NO_SPEECH_PROB", "0.7"))
     # 사이클 #27 (옵션 C) — Silero VAD 사전 로드 (faster-whisper 의 vad_filter 가
     # 이미 silero 를 사용하지만, 명시적 로드로 모델 캐시 워밍 + 향후 사전 분할 사용).
     use_silero_vad: bool = os.getenv("SARVIS_USE_SILERO_VAD", "1") == "1"
@@ -131,9 +140,11 @@ class Config:
     max_recording: float = 15.0
 
     # ============ TTS ============
-    tts_voice: str = "ko-KR-InJoonNeural"
-    tts_rate: str = "+5%"
-    tts_pitch: str = "-5Hz"
+    # 기본값은 voice preset "default" (아래 VOICE_CATALOG 참고).
+    # 사용자는 UI 의 음성 선택기로 즉시 전환 가능 (cfg 가 런타임에 변경됨).
+    tts_voice: str = os.getenv("SARVIS_TTS_VOICE", "ko-KR-InJoonNeural")
+    tts_rate: str = os.getenv("SARVIS_TTS_RATE", "+5%")
+    tts_pitch: str = os.getenv("SARVIS_TTS_PITCH", "-5Hz")
 
     # ============ 카메라 ============
     camera_index: int = 0
@@ -182,11 +193,23 @@ class Config:
   3) 도구 실행 (필요시 여러 개 연달아)
   4) 결과를 종합해 자연스럽게 답변
 
+★ 절대 규칙 — 안내 문구 금지 ★
+"검색해볼게요", "찾아볼게요", "알아볼게요", "확인해볼게요", "잠시만 기다려주세요"
+같이 *행동만 알리고 끝내는 응답*은 절대 하지 마. 사용자가 한 번 더 물어봐야 하는
+상황을 만들지 마. 도구가 필요하면 **즉시 호출**하고, 결과를 받은 뒤 그것을 바탕으로
+**최종 답변**을 한 번에 끝내. 한 턴 안에서 도구 호출 → 결과 → 답변까지 모두 마쳐.
+
 도구 선택 가이드:
 - see: 카메라/주변/물건/외모/장면에 대한 질문 ("내가 든 게 뭐야", "방 정리됐어?")
 - identify_person: 카메라에 보이는 사람이 누구인지 식별 ("나 누구야?", "이 사람 알아?", "누가 보여?")
-- web_search: 짧은 사실 확인용 빠른 검색 (스니펫 6개). 시간 민감 질의(오늘/최근/현재 등)는 자동으로 날짜 부착됨.
-- web_answer: 본격적인 정답이 필요한 질문(설명/뉴스/배경/방법). 상위 페이지 본문까지 가져와 발췌 합쳐서 반환. 모르는 사실/최신 정보/구체 설명이 필요하면 추측하지 말고 이걸 먼저 호출해.
+- web_search: 짧은 사실 확인용 빠른 검색 (스니펫 6개, 다양한 출처로 dedupe). 시간 민감 질의(오늘/최근/현재 등)는 자동으로 날짜 부착됨. 뉴스 의도("뉴스","속보")면 뉴스 엔드포인트 결과까지 합침.
+- web_answer: 본격적인 정답이 필요한 질문(설명/배경/방법/원인/비교/뉴스 요약). 상위 페이지 본문을 병렬 fetch 후 키워드 다양성 기준으로 발췌 합침. 모르는 사실/최신 정보/구체 설명이 필요하면 추측하지 말고 이걸 먼저 호출해. 출처가 [출처1] [출처2] 형식으로 들어오므로 답변 끝에 짧게 출처 1개를 언급해도 좋아 (예: "○○○에 따르면..."). URL 을 그대로 읽지는 마.
+
+검색 도구 사용 원칙:
+  - 모른다고 답변하기 전에 web_search/web_answer 를 시도해.
+  - 시간 민감 질의("오늘/지금/요즘/최근/이번주/지난주") 는 반드시 검색 도구를 사용.
+  - 도구 결과가 비어있으면 솔직하게 "찾지 못했어요" 라고만 답해 (꾸며내기 금지).
+  - 사용자가 후속 질문을 하면 같은 결과가 캐시되어 빠르므로 망설이지 말고 다시 호출.
 - get_weather: 날씨 (도시명 필수)
 - get_time: 시간/날짜
 - remember: 사용자가 기억하라고 한 것, 또는 중요한 사용자 정보
@@ -240,6 +263,140 @@ MODEL_CATALOG = {
         "gemini-2.0-flash",
     ],
 }
+
+
+# ============================================================
+# 음성 카탈로그 — 캐릭터 단위 프리셋 (voice + rate + pitch 묶음)
+# ============================================================
+# Edge-TTS 가 실제로 제공하는 한국어 Neural 음성은 다음 3개뿐이다 (2026-05 기준):
+#   ko-KR-InJoonNeural               (남)
+#   ko-KR-SunHiNeural                (여)
+#   ko-KR-HyunsuMultilingualNeural   (남, 다국어)
+#
+# 다양성은 voice × rate × pitch 조합으로 구성한다. 8개 프리셋이 각각 다른
+# 페르소나(차분/활발/진중/친근/내레이터…)를 표현하도록 rate/pitch 를 조정.
+#
+# 새 voice 가 Edge-TTS 에 추가되면 SUPPORTED_KO_VOICES 와 catalog 에 등록.
+SUPPORTED_KO_VOICES: List[str] = [
+    "ko-KR-InJoonNeural",
+    "ko-KR-SunHiNeural",
+    "ko-KR-HyunsuMultilingualNeural",
+]
+
+VOICE_CATALOG: List[dict] = [
+    {
+        "id": "default",
+        "label": "기본 (인준)",
+        "voice": "ko-KR-InJoonNeural",
+        "rate": "+5%",
+        "pitch": "-5Hz",
+        "gender": "male",
+        "description": "차분하고 안정적인 남성 (기본)",
+    },
+    {
+        "id": "calm_male",
+        "label": "차분한 (인준)",
+        "voice": "ko-KR-InJoonNeural",
+        "rate": "+0%",
+        "pitch": "-5Hz",
+        "gender": "male",
+        "description": "또박또박한 남성, 천천히",
+    },
+    {
+        "id": "friendly_male",
+        "label": "친근한 (인준)",
+        "voice": "ko-KR-InJoonNeural",
+        "rate": "+10%",
+        "pitch": "+0Hz",
+        "gender": "male",
+        "description": "밝고 활기찬 남성",
+    },
+    {
+        "id": "deep_male",
+        "label": "진중한 (현수)",
+        "voice": "ko-KR-HyunsuMultilingualNeural",
+        "rate": "+0%",
+        "pitch": "-8Hz",
+        "gender": "male",
+        "description": "낮고 무게 있는 남성",
+    },
+    {
+        "id": "bright_male",
+        "label": "활기찬 (현수)",
+        "voice": "ko-KR-HyunsuMultilingualNeural",
+        "rate": "+12%",
+        "pitch": "+5Hz",
+        "gender": "male",
+        "description": "발랄하고 빠른 남성",
+    },
+    {
+        "id": "calm_female",
+        "label": "차분한 (선희)",
+        "voice": "ko-KR-SunHiNeural",
+        "rate": "+0%",
+        "pitch": "+0Hz",
+        "gender": "female",
+        "description": "온화하고 또렷한 여성",
+    },
+    {
+        "id": "warm_female",
+        "label": "다정한 (선희)",
+        "voice": "ko-KR-SunHiNeural",
+        "rate": "+3%",
+        "pitch": "-5Hz",
+        "gender": "female",
+        "description": "따뜻하고 부드러운 여성, 약간 낮은 톤",
+    },
+    {
+        "id": "bright_female",
+        "label": "활발한 (선희)",
+        "voice": "ko-KR-SunHiNeural",
+        "rate": "+12%",
+        "pitch": "+8Hz",
+        "gender": "female",
+        "description": "밝고 빠른 여성, 높은 톤",
+    },
+]
+
+
+def get_voice_preset(preset_id: str) -> Optional[dict]:
+    """프리셋 id 로 카탈로그 항목 조회. 없으면 None."""
+    for p in VOICE_CATALOG:
+        if p["id"] == preset_id:
+            return dict(p)
+    return None
+
+
+def current_voice_preset() -> str:
+    """현재 cfg 의 (voice, rate, pitch) 튜플과 일치하는 프리셋 id.
+    일치 항목이 없으면 'custom' (사용자 환경변수 등으로 조정한 경우)."""
+    for p in VOICE_CATALOG:
+        if (p["voice"] == cfg.tts_voice
+                and p["rate"] == cfg.tts_rate
+                and p["pitch"] == cfg.tts_pitch):
+            return p["id"]
+    return "custom"
+
+
+def apply_voice_preset(preset_id: str) -> dict:
+    """프리셋 id 로 cfg.tts_voice/rate/pitch 를 갱신. 잘못된 id 면 ValueError.
+
+    Edge-TTS 미지원 음성도 ValueError — 카탈로그에 등록되어 있어도 SUPPORTED_KO_VOICES
+    에 없는 음성은 적용 거부. 사용자가 합성 단계에서 빈 오디오를 받는 회귀를 차단.
+
+    반환: 적용된 프리셋 dict (UI 응답용).
+    """
+    preset = get_voice_preset(preset_id)
+    if preset is None:
+        raise ValueError(f"알 수 없는 음성 프리셋: {preset_id}")
+    if preset["voice"] not in SUPPORTED_KO_VOICES:
+        raise ValueError(
+            f"지원되지 않는 Edge-TTS 음성: {preset['voice']} (preset={preset_id})"
+        )
+    cfg.tts_voice = preset["voice"]
+    cfg.tts_rate = preset["rate"]
+    cfg.tts_pitch = preset["pitch"]
+    return preset
 
 
 def current_model(backend: str) -> str:

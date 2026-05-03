@@ -258,6 +258,71 @@ class OpenAIWhisperSTT:
             return ""
 
 
+# ============================================================
+# 음성 에너지 사전 게이트 — Whisper 호출 전 빠른 무음 감지
+# ============================================================
+def _audio_is_near_silent(audio_path: str,
+                          *,
+                          rms_threshold: float = 0.005,
+                          min_speech_ratio: float = 0.04) -> bool:
+    """파일이 사실상 무음/잡음만 담고 있으면 True (Whisper 호출 스킵 신호).
+
+    Whisper 는 무음/저레벨 입력에서 한국어 자막 환각 ("시청해주셔서 감사합니다")
+    을 생성하기 쉽다. transcribe 전에 numpy 로 RMS 와 speech-frame 비율을
+    빠르게 계산해 명백한 무음을 차단한다.
+
+    검사 기준:
+      - 전체 RMS 가 rms_threshold 미만 → 무음
+      - speech 프레임 비율이 min_speech_ratio 미만 → 잡음만
+
+    파일 디코드/numpy 미설치 등 예외 발생 시 False (Whisper 에 위임).
+    """
+    if not isinstance(audio_path, str) or not os.path.exists(audio_path):
+        return False
+    try:
+        import numpy as np
+        # webm/ogg/mp3 등 압축 포맷은 ffmpeg 디코드 필요 — soundfile 만으론 부족.
+        # 시도 순서: soundfile → wave (PCM only). 디코드 실패하면 False (Whisper 가 처리).
+        samples = None
+        try:
+            import soundfile as sf
+            data, _sr = sf.read(audio_path, dtype="float32", always_2d=False)
+            if hasattr(data, "ndim") and data.ndim > 1:
+                data = data.mean(axis=1)
+            samples = data
+        except Exception:
+            pass
+        if samples is None:
+            try:
+                import wave
+                with wave.open(audio_path, "rb") as wf:
+                    nframes = wf.getnframes()
+                    raw = wf.readframes(min(nframes, 16000 * 30))  # 최대 30초
+                    sw = wf.getsampwidth()
+                if sw == 2:
+                    arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                    samples = arr
+            except Exception:
+                return False
+        if samples is None or len(samples) == 0:
+            return False
+
+        rms = float(np.sqrt(np.mean(samples ** 2)))
+        if rms < rms_threshold:
+            return True
+
+        # speech-frame 비율: 100ms 청크별 RMS 가 임계 위인 비율
+        chunk = max(1, len(samples) // 80)  # ≈100ms@16kHz, 안전 분모
+        if chunk < 80:
+            return False
+        chunks = samples[: (len(samples) // chunk) * chunk].reshape(-1, chunk)
+        chunk_rms = np.sqrt((chunks ** 2).mean(axis=1))
+        speech_ratio = float((chunk_rms > rms_threshold).mean())
+        return speech_ratio < min_speech_ratio
+    except Exception:
+        return False
+
+
 class WhisperSTT:
     def __init__(self):
         from faster_whisper import WhisperModel
@@ -289,10 +354,16 @@ class WhisperSTT:
     def transcribe(self, audio, extra_prompt: str = "") -> str:
         """numpy 배열 또는 파일 경로(str) 모두 지원 (faster-whisper 가 내부적으로 디코드).
 
-        사이클 #27 (옵션 1·C) 강화:
+        강화:
         - beam_size·VAD threshold/min_silence/speech_pad 모두 cfg 로 외부화
         - compression_ratio·no_speech threshold 보수화 → 환각 감소
+        - 파일 입력 시 사전 무음 게이트 — 무음 파일에는 Whisper 호출 자체를 스킵
+        - 세그먼트별 avg_logprob / no_speech_prob 검사로 저신뢰 환각 추가 차단
         """
+        # 사전 무음 게이트 — 파일 경로일 때만 (numpy 입력은 SpeechRecorder 가 이미 검증)
+        if isinstance(audio, str) and _audio_is_near_silent(audio):
+            return ""
+
         initial = _build_stt_prompt(extra_prompt)
         try:
             segments, _ = self.model.transcribe(
@@ -311,7 +382,24 @@ class WhisperSTT:
                 compression_ratio_threshold=cfg.whisper_compression_ratio,
                 no_speech_threshold=cfg.whisper_no_speech_threshold,
             )
-            return " ".join(s.text for s in segments).strip()
+            # 세그먼트 신뢰도 필터 — 환각 추가 방어막.
+            #   avg_logprob < cfg.whisper_min_logprob → 매우 낮은 확신 (드롭)
+            #   no_speech_prob > cfg.whisper_max_no_speech_prob → 무음 가능성 높음 (드롭)
+            kept: list = []
+            min_lp = cfg.whisper_min_logprob
+            max_nsp = cfg.whisper_max_no_speech_prob
+            for s in segments:
+                avg_lp = getattr(s, "avg_logprob", None)
+                nsp = getattr(s, "no_speech_prob", None)
+                txt = (getattr(s, "text", "") or "").strip()
+                if not txt:
+                    continue
+                if avg_lp is not None and avg_lp < min_lp:
+                    continue
+                if nsp is not None and nsp > max_nsp:
+                    continue
+                kept.append(txt)
+            return " ".join(kept).strip()
         except Exception as e:
             print(f"[STT] 트랜스크립션 실패: {type(e).__name__}: {e}")
             return ""
@@ -376,14 +464,43 @@ class EdgeTTS:
     def _synthesize(self, text: str) -> str:
         return asyncio.run(self._synthesize_async(text))
 
+    # 알려진 안전 폴백 — Edge-TTS 가 항상 제공하는 기본 한국어 음성.
+    # 사용자가 잘못된 voice 를 cfg 에 넣었거나 카탈로그가 stale 한 경우에 사용.
+    _FALLBACK_VOICE = "ko-KR-InJoonNeural"
+    _FALLBACK_RATE = "+5%"
+    _FALLBACK_PITCH = "-5Hz"
+
     async def _synthesize_async(self, text: str) -> str:
+        """Edge-TTS 합성. 설정 음성으로 실패하면 기본 음성으로 1회 폴백."""
         import edge_tts
-        communicate = edge_tts.Communicate(
-            text, voice=cfg.tts_voice, rate=cfg.tts_rate, pitch=cfg.tts_pitch
-        )
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             path = f.name
-        await communicate.save(path)
+
+        async def _try(voice: str, rate: str, pitch: str) -> bool:
+            try:
+                communicate = edge_tts.Communicate(
+                    text, voice=voice, rate=rate, pitch=pitch
+                )
+                await communicate.save(path)
+                # 빈 파일이면 실패로 간주
+                return os.path.getsize(path) > 0
+            except Exception as exc:
+                print(f"[TTS] 합성 실패 (voice={voice}): {type(exc).__name__}: {exc}")
+                return False
+
+        # 1차: 사용자 설정 음성
+        if await _try(cfg.tts_voice, cfg.tts_rate, cfg.tts_pitch):
+            return path
+
+        # 2차: 기본 폴백 음성 — 카탈로그가 stale 해도 항상 작동
+        if (cfg.tts_voice != EdgeTTS._FALLBACK_VOICE
+                and await _try(EdgeTTS._FALLBACK_VOICE,
+                               EdgeTTS._FALLBACK_RATE,
+                               EdgeTTS._FALLBACK_PITCH)):
+            print(f"[TTS] '{cfg.tts_voice}' 합성 실패 → 기본 음성으로 폴백")
+            return path
+
+        # 둘 다 실패 — 빈 파일을 반환 (synthesize_bytes_verified 가 audio verify 단계에서 차단)
         return path
 
     def synthesize_bytes(self, text: str) -> bytes:

@@ -17,17 +17,8 @@
     <div class="brand-sm">S . A . R . V . I . S</div>
     <div id="state-pill" class="state-pill">STATE · IDLE</div>
 
-    <!-- 패널 토글 (대화 우선, 나머지는 원하면 표시) -->
+    <!-- 패널 토글 — 통합 후 비전/모드만. 오브는 채팅 헤더에 항상 표시. -->
     <div class="panel-toggles" role="group" aria-label="패널 표시">
-      <button id="toggle-orb" class="panel-toggle ghost" type="button"
-              aria-pressed="false" title="오브 패널 (1)">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="5"/>
-          <circle cx="12" cy="12" r="9" opacity="0.4"/>
-        </svg>
-        <span>오브</span>
-      </button>
       <button id="toggle-vision" class="panel-toggle ghost" type="button"
               aria-pressed="false" title="비전 (카메라/얼굴) 패널 (2)">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
@@ -123,11 +114,21 @@
       <div id="orb-reply" class="orb-reply" role="status" aria-live="assertive" aria-label="사비스 응답"></div>
     </div>
 
-    <!-- 가운데: 대화 메인 (기본) -->
+    <!-- 가운데: 대화 메인 (기본) — SARVIS 아바타와 통합 -->
     <div class="chat-main">
+      <!-- AI 아바타 — 채팅 위에 항상 표시되는 감정 오브 (시선 중심) -->
+      <div class="chat-avatar" data-state="idle" aria-hidden="true">
+        <div class="chat-avatar-halo"></div>
+        <canvas id="chat-orb" class="chat-avatar-canvas" width="180" height="180"></canvas>
+        <div class="chat-avatar-status">
+          <span class="chat-avatar-name">SARVIS</span>
+          <span id="chat-avatar-state" class="chat-avatar-state">듣고 있어요</span>
+        </div>
+      </div>
+
       <div class="log-pane">
         <div class="log-header">
-          <span>SARVIS · 대화</span>
+          <span>대화</span>
           <span class="log-sub">한국어로 대화하거나 SPACE 로 음성 입력</span>
         </div>
         <div id="log" class="log-body" role="log" aria-live="polite"></div>
@@ -153,6 +154,23 @@
             <option value="">(불러오는 중...)</option>
           </select>
           <div class="model-hint muted">선택 즉시 적용. compare 는 변경 불가.</div>
+        </div>
+
+        <div class="mode-section" id="voice-select-section">
+          <div class="mode-title">음성 선택 <span id="voice-current-label" class="muted">—</span></div>
+          <select id="voice-select" class="model-select" aria-label="SARVIS 음성 선택">
+            <option value="">(불러오는 중...)</option>
+          </select>
+          <div class="voice-actions">
+            <button id="voice-preview-btn" class="ghost mini" type="button" title="현재 선택한 음성으로 미리듣기">
+              ▶ 미리듣기
+            </button>
+            <button id="voice-apply-btn" class="ghost mini" type="button" title="이 음성으로 변경">
+              ✓ 적용
+            </button>
+          </div>
+          <div id="voice-description" class="model-hint muted">선택 후 미리듣고 적용을 눌러 SARVIS 의 목소리를 바꾸세요.</div>
+          <audio id="voice-preview-audio" preload="auto"></audio>
         </div>
       </div>
 
@@ -249,7 +267,7 @@
     <button type="submit" class="mobile-send-btn">↑</button>
   </form>
 
-  <!-- Mobile: 하단 탭바 (대화 우선) -->
+  <!-- Mobile: 하단 탭바 — 통합 후 2개 (대화에 오브 내장, 비전은 별도) -->
   <div class="mobile-tabs">
     <nav>
       <button class="tab-btn active" data-tab="chat">
@@ -257,13 +275,6 @@
           <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
         </svg>
         대화
-      </button>
-      <button class="tab-btn" data-tab="orb">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">
-          <circle cx="12" cy="12" r="5"/>
-          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
-        </svg>
-        오브
       </button>
       <button class="tab-btn" data-tab="side">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">

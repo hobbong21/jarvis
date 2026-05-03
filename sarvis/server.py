@@ -1693,6 +1693,97 @@ async def websocket_endpoint(ws: WebSocket):
                 }
                 await emit(type="models_list", catalog=payload)
 
+            elif mtype == "voices_list":
+                # 음성 카탈로그 + 현재 선택 프리셋 id 조회.
+                from .config import VOICE_CATALOG, current_voice_preset
+                await emit(
+                    type="voices_list",
+                    catalog=list(VOICE_CATALOG),
+                    current=current_voice_preset(),
+                )
+
+            elif mtype == "switch_voice":
+                # 음성 프리셋 변경. body: {preset: <id>}.
+                # cfg.tts_voice/rate/pitch 를 갱신해 다음 합성부터 즉시 반영.
+                preset_id = (data.get("preset") or "").strip()
+                try:
+                    from .config import apply_voice_preset
+                    applied = await asyncio.to_thread(apply_voice_preset, preset_id)
+                    await emit(
+                        type="voice_changed",
+                        preset=applied["id"],
+                        label=applied["label"],
+                        voice=applied["voice"],
+                        rate=applied["rate"],
+                        pitch=applied["pitch"],
+                    )
+                except ValueError:
+                    # 알려지지 않은 프리셋 id — 친절 한국어 메시지만 노출.
+                    await emit(
+                        type="error",
+                        message="⚠ 음성 변경 실패: 알 수 없는 음성 프리셋입니다.",
+                    )
+                except Exception:
+                    traceback.print_exc()
+                    await emit(
+                        type="error",
+                        message="⚠ 음성 변경 중 오류가 발생했습니다.",
+                    )
+
+            elif mtype == "preview_voice":
+                # 미리듣기 — 선택한 프리셋(또는 현재 설정) 으로 짧은 샘플 합성.
+                # cfg 는 변경하지 않음 (사용자가 OK 눌러야만 switch_voice 로 적용).
+                # 오디오는 base64 로 JSON 페이로드에 실어 보냄 — 바이너리 채널은 정상
+                # 응답 TTS 만 사용해 충돌 없음.
+                preset_id = (data.get("preset") or "").strip()
+                sample_text = (data.get("text") or "안녕하세요. 저는 사비스예요. 잘 들리시나요?").strip()
+                if len(sample_text) > 120:
+                    sample_text = sample_text[:120]
+                try:
+                    from .config import get_voice_preset
+                    preset = get_voice_preset(preset_id) if preset_id else None
+                    voice = preset["voice"] if preset else cfg.tts_voice
+                    rate = preset["rate"] if preset else cfg.tts_rate
+                    pitch = preset["pitch"] if preset else cfg.tts_pitch
+
+                    import edge_tts
+                    import tempfile as _tf
+                    async def _do():
+                        # 합성 실패 시에도 temp 파일이 leak 되지 않도록 try/finally 로 감싼다.
+                        with _tf.NamedTemporaryFile(suffix=".mp3", delete=False) as _f:
+                            _path = _f.name
+                        try:
+                            comm = edge_tts.Communicate(
+                                sample_text, voice=voice, rate=rate, pitch=pitch,
+                            )
+                            await comm.save(_path)
+                            with open(_path, "rb") as _rf:
+                                return _rf.read()
+                        finally:
+                            try:
+                                os.unlink(_path)
+                            except OSError:
+                                pass
+                    audio_bytes = await _do()
+                    if audio_bytes:
+                        await emit(
+                            type="voice_preview",
+                            preset=preset_id,
+                            audio_b64=base64.b64encode(audio_bytes).decode("ascii"),
+                            mime="audio/mpeg",
+                        )
+                    else:
+                        await emit(
+                            type="error",
+                            message="⚠ 음성 미리듣기 실패: 빈 오디오",
+                        )
+                except Exception:
+                    traceback.print_exc()
+                    await emit(
+                        type="error",
+                        message="⚠ 음성 미리듣기 중 오류가 발생했습니다.",
+                    )
+
             elif mtype == "reset":
                 session.brain.reset_history()
                 await emit(type="reset_ack")
@@ -2627,9 +2718,10 @@ async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, b
         # 사용자에게 안내도 보내지 않는다 — 실제로 말한 게 아니므로.
         cleaned = clean_stt_text(text)
         turn_meta["stt_text_len"] = len(cleaned)
-        # 환각 또는 너무 짧은 잡음 (1글자 이하) 은 silent skip — 사용자에게
-        # 안내도 보내지 않는다 (Whisper 가 무음에서 만든 가짜 발화).
-        if not cleaned or len(cleaned) < 2:
+        # 1글자 답변은 화이트리스트("네", "예", "응") 에 속할 때만 살린다.
+        # 그 외 1글자는 Whisper 가 노이즈를 한 음절로 환각한 결과일 가능성이 높음.
+        _SHORT_AFFIRMATIVES = {"네", "예", "응"}
+        if not cleaned or (len(cleaned) < 2 and cleaned not in _SHORT_AFFIRMATIVES):
             if text and not cleaned:
                 turn_meta["stt_hallucination_dropped"] = text[:80]
             await emit(type="state", state="idle")

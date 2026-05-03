@@ -71,6 +71,74 @@ class HallucinationDetectionTests(unittest.TestCase):
                 self.assertEqual(clean_stt_text(s), "")
 
 
+class ExpandedHallucinationTests(unittest.TestCase):
+    """확장된 환각 패턴 — 유튜브 인트로/사인오프, 영어 환각, URL, 반복 토큰 등."""
+
+    def test_youtube_intro_dropped(self) -> None:
+        for s in [
+            "안녕하세요 여러분",
+            "여러분 안녕하세요",
+            "안녕하세요 사비스입니다",
+            "오늘은 인공지능에 대해 알아보겠습니다",
+            "지금까지 김철수였습니다",
+            "이상 박영희였습니다",
+        ]:
+            with self.subTest(s=s):
+                self.assertEqual(clean_stt_text(s), "", f"통과되면 안 됨: {s}")
+
+    def test_extended_subscribe_patterns_dropped(self) -> None:
+        for s in [
+            "알림 설정 부탁드립니다",
+            "영상 시청해주셔서 감사합니다",
+            "시청해 주신 여러분 감사합니다",
+        ]:
+            with self.subTest(s=s):
+                self.assertEqual(clean_stt_text(s), "")
+
+    def test_news_desk_signoff_dropped(self) -> None:
+        for s in ["YTN 김철수", "MBC 뉴스 데스크", "KBS 뉴스 데스크."]:
+            with self.subTest(s=s):
+                self.assertEqual(clean_stt_text(s), "")
+
+    def test_english_hallucinations_dropped(self) -> None:
+        for s in [
+            "Thank you for watching",
+            "Thanks for watching!",
+            "Please subscribe and like",
+            "See you next time",
+            "Bye bye",
+        ]:
+            with self.subTest(s=s):
+                self.assertEqual(clean_stt_text(s), "")
+
+    def test_url_only_dropped(self) -> None:
+        for s in ["https://www.example.com", "www.example.com", "example.com"]:
+            with self.subTest(s=s):
+                self.assertEqual(clean_stt_text(s), "")
+
+    def test_repetition_spam_dropped(self) -> None:
+        for s in ["음 음 음 음", "어 어 어 어", "테스트 테스트 테스트 테스트"]:
+            with self.subTest(s=s):
+                self.assertEqual(clean_stt_text(s), "")
+
+    def test_youtube_specific_greeting_dropped(self) -> None:
+        # "안녕하세요" 단독은 진짜 인사일 수 있어 통과시킴 (false positive 회피).
+        # YouTube 컨텍스트가 명확한 패턴만 차단.
+        for s in ["여러분 안녕하세요", "안녕하세요 여러분", "안녕하세요 김철수입니다"]:
+            with self.subTest(s=s):
+                self.assertEqual(clean_stt_text(s), "")
+
+    def test_subtitle_attribution_dropped(self) -> None:
+        for s in ["자막 by 김철수", "자막 제공: 어떤회사", "번역 by 박영희"]:
+            with self.subTest(s=s):
+                self.assertEqual(clean_stt_text(s), "")
+
+    def test_genuine_long_korean_with_url_preserved(self) -> None:
+        # URL 이 일부에 있어도 전체가 환각이 아니면 통과
+        s = "이 사이트 www.naver.com 좀 알려줘"
+        self.assertEqual(clean_stt_text(s), s)
+
+
 class GenuineSpeechPreservedTests(unittest.TestCase):
     """진짜 사용자 발화는 절대 잘리지 않아야 한다 (false positive 방지)."""
 
@@ -78,6 +146,17 @@ class GenuineSpeechPreservedTests(unittest.TestCase):
         for s in ["네", "아니", "응", "맞아", "좋아"]:
             with self.subTest(s=s):
                 self.assertEqual(clean_stt_text(s), s)
+
+    def test_real_greeting_with_context_preserved(self) -> None:
+        # "안녕하세요" 단독은 환각이지만 뒤에 내용이 붙으면 통과
+        for s in ["안녕하세요 사비스", "안녕하세요 오늘 날씨 어때"]:
+            with self.subTest(s=s):
+                self.assertEqual(clean_stt_text(s), s)
+
+    def test_real_thanks_with_context_preserved(self) -> None:
+        # 사이클 #17 기존 회귀 테스트와 동일 — 단독 "감사합니다" 만 차단
+        s = "도와주셔서 감사합니다"
+        self.assertEqual(clean_stt_text(s), s)
 
     def test_normal_questions_preserved(self) -> None:
         cases = [

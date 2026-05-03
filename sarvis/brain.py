@@ -13,6 +13,43 @@ _ollama_health_cache: dict = {"checked_at": 0.0, "ok": False, "client": None}
 
 _EMOTION_PREFIX_RE = re.compile(r"^\s*\[emotion:\w+\]\s*", re.IGNORECASE)
 
+# "검색해볼게요" 류 — 도구를 부르지 않고 의도만 말하는 패턴 감지용.
+# 매칭되면 brain 이 한 번 더 Claude 를 호출해 실제 도구 사용을 강제한다 (사용자가 두 번 묻지 않게).
+_INTENT_ANNOUNCE_RE = re.compile(
+    r"("
+    r"검색(을\s*)?(해|할|하)(\s*볼)?게|"
+    r"찾(아|을)\s*볼게|"
+    r"알아(\s*볼게|보(고|러))|"
+    r"확인(해|할)(\s*볼)?게|"
+    r"조사(해|할)(\s*볼)?게|"
+    r"한\s*번\s*(검색|찾아|알아)|"
+    r"잠시(\s*만)?\s*(기다|있)|"
+    r"잠깐(만)?\s*(기다|있)|"
+    r"let me (search|look|check)|"
+    r"i('?ll| will) (search|look|check)|"
+    r"give me a (sec|moment)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_intent_only_announce(text: str) -> bool:
+    """텍스트가 '검색하겠다' 류 안내문이며 실질적 답변을 담지 않는지 판정.
+
+    True 반환 = brain 이 도구를 자동 호출해야 함 (사용자 재질문 방지).
+    안내문 + 진짜 답변이 함께 있으면 False (re-issue 불필요).
+    """
+    if not text:
+        return False
+    body = _EMOTION_PREFIX_RE.sub("", text).strip()
+    if not body:
+        return False
+    if not _INTENT_ANNOUNCE_RE.search(body):
+        return False
+    # 짧은 응답 (≤80자) 이면 안내문만 있을 가능성 높음 → 재시도.
+    # 긴 응답이면 이미 답변이 있는 셈 → 재시도 안함.
+    return len(body) <= 80
+
 
 _ALT_BUTTONS = {
     "claude": "[2·OPENAI] 또는 [5·GEMINI]",
@@ -315,6 +352,12 @@ class Brain:
     # ============================================================
     def _think_with_tools(self) -> Tuple[Emotion, str]:
         max_iters = 8
+        used_any_tool = False
+        nudged_once = False  # "도구 즉시 호출" 자동 재촉을 1회만 적용 (무한루프 방지)
+        # 자동 재촉 시 history 에 들어간 임시 메시지(intent-only assistant + synthetic
+        # user)의 시작 인덱스. 함수 종료 직전에 splice 하여 다음 turn 의 컨텍스트가
+        # 깨끗하도록 정리한다.
+        nudge_artifact_start: Optional[int] = None
         for _ in range(max_iters):
             response = self.client.messages.create(
                 model=cfg.claude_model,
@@ -338,6 +381,7 @@ class Brain:
                         "input": block.input,
                     })
                     tool_use_blocks.append(block)
+                    used_any_tool = True
 
             self.history.append({"role": "assistant", "content": content_dicts})
 
@@ -346,6 +390,33 @@ class Brain:
                 final_text = "".join(
                     b["text"] for b in content_dicts if b["type"] == "text"
                 )
+
+                # 안내문만 하고 도구 안 쓴 경우 자동 재촉 — 사용자가 두 번 묻지 않게.
+                # 한 사이클에 1회만 적용, 그 후엔 무조건 답변 반환.
+                if (not nudged_once and not used_any_tool
+                        and _is_intent_only_announce(final_text)):
+                    nudged_once = True
+                    # 직전에 추가된 intent-only assistant 의 인덱스 — 종료 시 splice 대상.
+                    nudge_artifact_start = len(self.history) - 1
+                    self.history.append({
+                        "role": "user",
+                        "content": (
+                            "방금 말한 작업을 지금 *반드시* 도구를 사용해 실제로 수행해줘. "
+                            "안내 문구만 말하지 말고, 도구 결과를 받아서 그걸 바탕으로 사용자에게 "
+                            "최종 답변해. 도구 호출 → 결과 → 답변을 한 번에 끝내."
+                        ),
+                    })
+                    print("[BRAIN] 의도-only 응답 감지 → 도구 사용 재촉")
+                    continue
+
+                # 자동 재촉 임시 메시지 정리 — 다음 turn 의 LLM 컨텍스트가 깨끗하도록.
+                # [intent_only_assistant, synthetic_user] 2개를 history 에서 제거하면
+                # [original_user, ..., final_assistant] 의 자연스러운 흐름만 남는다.
+                if nudge_artifact_start is not None:
+                    end = min(nudge_artifact_start + 2, len(self.history))
+                    if end > nudge_artifact_start:
+                        del self.history[nudge_artifact_start:end]
+
                 emotion, body = parse_emotion(final_text)
                 self._trim_history()
                 return emotion, body

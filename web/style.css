@@ -333,6 +333,134 @@ input, select { outline: none; }
   background: var(--bg-panel);
   min-width: 0; min-height: 0;
 }
+
+/* ===== Chat Avatar — 채팅 상단의 SARVIS 감정 오브 (AI 대화 페르소나) ===== */
+.chat-avatar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 22px 16px 14px;
+  gap: 8px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: linear-gradient(180deg, var(--bg-soft) 0%, var(--bg-panel) 100%);
+}
+.chat-avatar-canvas {
+  position: relative;
+  width: 110px;
+  height: 110px;
+  border-radius: 50%;
+  z-index: 2;
+  filter: drop-shadow(0 6px 18px rgba(201, 100, 66, 0.18));
+  transition: transform 0.4s cubic-bezier(.2,.8,.2,1);
+}
+/* 헤일로 — 듣기/생각/말하기 상태에 따라 색·크기 변화 */
+.chat-avatar-halo {
+  position: absolute;
+  top: 22px;
+  width: 138px;
+  height: 138px;
+  border-radius: 50%;
+  background: radial-gradient(circle,
+    rgba(var(--emo-primary), 0.18) 0%,
+    rgba(var(--emo-primary), 0.08) 45%,
+    transparent 72%);
+  z-index: 1;
+  transform: scale(1);
+  transition: transform 0.5s cubic-bezier(.2,.8,.2,1), opacity 0.5s;
+  opacity: 0.75;
+  pointer-events: none;
+}
+/* idle: 천천히 호흡 */
+.chat-avatar[data-state="idle"] .chat-avatar-halo {
+  animation: avatar-breath 4.2s ease-in-out infinite;
+}
+/* listening: 마이크 입력 — 따뜻한 amber halo 가 활성화 + 외곽 ripple */
+.chat-avatar[data-state="listening"] .chat-avatar-halo {
+  background: radial-gradient(circle,
+    rgba(217, 164, 65, 0.30) 0%,
+    rgba(217, 164, 65, 0.14) 45%,
+    transparent 72%);
+  animation: avatar-listen 1.4s ease-out infinite;
+  opacity: 1;
+}
+.chat-avatar[data-state="listening"] .chat-avatar-canvas {
+  transform: scale(1.04);
+}
+/* thinking: 보라색 swirl ring */
+.chat-avatar[data-state="thinking"] .chat-avatar-halo {
+  background: conic-gradient(from 0deg,
+    rgba(139, 122, 184, 0.32),
+    rgba(139, 122, 184, 0.05) 35%,
+    rgba(139, 122, 184, 0.32) 70%,
+    rgba(139, 122, 184, 0.05));
+  animation: avatar-think 2.4s linear infinite;
+  opacity: 0.95;
+}
+/* speaking: 녹색 외곽 ripple — 오브가 말하는 듯이 확장 */
+.chat-avatar[data-state="speaking"] .chat-avatar-halo {
+  background: radial-gradient(circle,
+    rgba(106, 144, 121, 0.32) 0%,
+    rgba(106, 144, 121, 0.16) 50%,
+    transparent 72%);
+  animation: avatar-speak 0.9s ease-out infinite;
+  opacity: 1;
+}
+.chat-avatar[data-state="speaking"] .chat-avatar-canvas {
+  transform: scale(1.02);
+}
+.chat-avatar-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  z-index: 2;
+}
+.chat-avatar-name {
+  font-size: 10px;
+  letter-spacing: 0.32em;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.chat-avatar-state {
+  font-size: 12.5px;
+  color: var(--text-mid);
+  letter-spacing: 0.02em;
+  transition: color 0.3s;
+}
+.chat-avatar[data-state="listening"] .chat-avatar-state { color: var(--amber); }
+.chat-avatar[data-state="thinking"] .chat-avatar-state { color: var(--violet); }
+.chat-avatar[data-state="speaking"] .chat-avatar-state { color: var(--green); }
+
+@keyframes avatar-breath {
+  0%, 100% { transform: scale(1); opacity: 0.75; }
+  50%      { transform: scale(1.06); opacity: 1; }
+}
+@keyframes avatar-listen {
+  0%   { transform: scale(0.95); opacity: 0.55; }
+  60%  { transform: scale(1.18); opacity: 0.95; }
+  100% { transform: scale(1.32); opacity: 0; }
+}
+@keyframes avatar-think {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes avatar-speak {
+  0%   { transform: scale(0.96); opacity: 0.9; }
+  60%  { transform: scale(1.22); opacity: 0.5; }
+  100% { transform: scale(1.42); opacity: 0; }
+}
+
+/* 모바일에서는 더 컴팩트 */
+@media (max-width: 640px) {
+  .chat-avatar { padding: 14px 14px 10px; gap: 4px; }
+  .chat-avatar-canvas { width: 88px; height: 88px; }
+  .chat-avatar-halo { top: 14px; width: 116px; height: 116px; }
+  .chat-avatar-name { font-size: 9px; letter-spacing: 0.28em; }
+  .chat-avatar-state { font-size: 12px; }
+}
 .chat-main .log-pane {
   flex: 1; border: none; border-radius: 0;
   background: var(--bg-panel);
@@ -435,6 +563,29 @@ input, select { outline: none; }
 }
 .model-select:focus { outline: 1px solid var(--accent); }
 .model-hint { font-size: 10px; margin-top: 6px; }
+
+/* 음성 선택 — 미리듣기/적용 액션 */
+.voice-actions {
+  display: flex; gap: 6px; margin-top: 8px;
+}
+.voice-actions .ghost.mini {
+  flex: 1;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 6px 10px;
+  min-height: 30px;
+  border-radius: 4px;
+}
+.voice-actions .ghost.mini:disabled {
+  opacity: 0.5; cursor: not-allowed;
+}
+#voice-current-label { color: var(--accent); font-weight: 500; margin-left: 6px; }
+#voice-description {
+  margin-top: 6px;
+  font-style: italic;
+  min-height: 14px;
+}
+#voice-preview-audio { display: none; }
 #model-backend-label { color: var(--text); font-weight: 500; margin-left: 6px; }
 
 /* ===== Orb pane (좌/데스크톱, 토글식) ===== */
@@ -1107,15 +1258,18 @@ input, select { outline: none; }
     position: relative;
     grid-template-columns: none !important;
   }
-  /* 사이클 #26 — 모바일 default = 채팅. 탭으로 orb / vision 전환. */
+  /* 사이클 #26 — 모바일 default = 채팅 (오브 통합). 탭으로 vision 전환. */
   .chat-main, .side-pane, .orb-pane { display: none !important; }
   .chat-main.tab-active {
     display: flex !important;
     position: absolute; inset: 0;
     bottom: calc(var(--safe-bottom) + var(--tabbar-h) + 80px);
     flex-direction: column;
-    padding: 8px 12px 0;
+    padding: 0;
     overflow: hidden;
+  }
+  .chat-main.tab-active .chat-avatar {
+    flex-shrink: 0;
   }
   .chat-main.tab-active .log-pane {
     flex: 1; min-height: 0; overflow-y: auto;

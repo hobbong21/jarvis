@@ -77,3 +77,12 @@ chromadb/
 
 # Runtime telemetry log (transient append-only)
 data/harness_telemetry.jsonl
+
+# HA 안전 시스템 런타임 상태 (kill switch / reports)
+data/ha/
+
+# Replit / 에이전트 도구의 로컬 작업 상태 (skills, workflow logs, tasks)
+.local/
+
+# Claude Code 로컬 권한 설정 (계정별로 다르므로 공유 안 함)
+.claude/settings.local.json
