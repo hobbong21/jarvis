@@ -13,9 +13,11 @@ anthropic>=0.40.0
 openai>=1.0.0
 ollama>=0.3.0
 duckduckgo-search>=6.0.0
+beautifulsoup4>=4.12.0
 # --- 웹 모드 (server.py) ---
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 python-multipart>=0.0.9
 silero-vad
 mediapipe
+beautifulsoup4

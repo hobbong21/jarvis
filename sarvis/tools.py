@@ -51,13 +51,35 @@ TOOL_DEFINITIONS = [
     {
         "name": "web_search",
         "description": (
-            "Search the web for current information. Use when the user asks about "
-            "recent news, current facts, or anything beyond your knowledge."
+            "Quick fact check via web search snippets (top 6). Use for short, "
+            "lookup-style questions where titles + snippets are enough. "
+            "Time-sensitive queries automatically get today's date appended. "
+            "For deep answers needing article body, prefer 'web_answer'."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_answer",
+        "description": (
+            "Search + fetch top pages and return relevant excerpts so you can give "
+            "a grounded answer. Use whenever the user asks a factual / 'what is' / "
+            "'how does' / 'who is' / 'latest news on' question that goes beyond a "
+            "one-line snippet. Slower than web_search but returns real article text "
+            "with sources."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language question to research",
+                },
             },
             "required": ["query"],
         },
@@ -244,22 +266,311 @@ class ToolExecutor:
         except Exception as e:
             return f"비전 분석 실패: {e}"
 
+    # ---- 웹 검색 헬퍼들 (사이클 #29) ------------------------------------
+    # 시간 민감 질의 패턴 — 매칭되면 오늘 날짜를 query 에 자동 부착해 검색 신선도↑
+    _TIME_SENSITIVE_PATTERNS = (
+        "오늘", "지금", "현재", "최근", "요즘", "이번 주", "이번주", "올해",
+        "어제", "내일", "방금", "실시간", "라이브",
+        "today", "now", "current", "latest", "recent", "this week", "this year",
+    )
+
+    @staticmethod
+    def _date_hint(query: str) -> str:
+        """시간 민감 질의면 'YYYY-MM-DD' 부착, 아니면 원본 그대로.
+
+        검색 엔진은 보통 최근 키워드보다 명시적 날짜를 우선시하므로,
+        '오늘 환율', 'latest news on X' 같은 질의에 신선도 향상 효과.
+        """
+        q = (query or "").strip()
+        if not q:
+            return q
+        ql = q.lower()
+        if not any(p in ql for p in ToolExecutor._TIME_SENSITIVE_PATTERNS):
+            return q
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today in q:
+            return q
+        return f"{q} {today}"
+
+    @staticmethod
+    def _strip_time_qualifier(query: str) -> str:
+        """검색 결과 0건 시 재시도용 — 시간 한정자/날짜를 제거한 더 일반적 질의."""
+        import re
+        q = query
+        for p in ToolExecutor._TIME_SENSITIVE_PATTERNS:
+            q = q.replace(p, " ")
+        # YYYY-MM-DD / YYYY 제거
+        q = re.sub(r"\b20\d{2}(-\d{2}-\d{2})?\b", " ", q)
+        q = re.sub(r"\s+", " ", q).strip()
+        return q or query
+
+    @staticmethod
+    def _is_safe_url(url: str) -> bool:
+        """SSRF 방어 — http/https 만 허용 + 호스트의 모든 해석 IP 가 공인망인지 검증.
+
+        차단: 사설/loopback/link-local/multicast/reserved/unspecified + 클라우드
+        metadata IP(169.254.169.254 / fd00:ec2::254). DNS 가 여러 레코드를
+        리턴하면 "하나라도" 내부 IP 면 거부 (rebinding 부분 방어).
+        """
+        try:
+            import ipaddress
+            import socket
+            from urllib.parse import urlparse
+            p = urlparse(url)
+            if p.scheme not in ("http", "https"):
+                return False
+            host = p.hostname
+            if not host:
+                return False
+            infos = socket.getaddrinfo(host, None)
+            if not infos:
+                return False
+            for fam, _stype, _proto, _cn, sa in infos:
+                ip_str = sa[0]
+                # IPv6 zone id 제거
+                if "%" in ip_str:
+                    ip_str = ip_str.split("%", 1)[0]
+                try:
+                    ip = ipaddress.ip_address(ip_str)
+                except Exception:
+                    return False
+                if (ip.is_private or ip.is_loopback or ip.is_link_local
+                        or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+                    return False
+                if ip_str in ("169.254.169.254", "fd00:ec2::254"):
+                    return False
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _fetch_clean_text(url: str, max_chars: int = 6000, timeout: float = 5.0,
+                         max_redirects: int = 3) -> str:
+        """URL 의 본문 텍스트를 추출. script/style/nav/footer 제거 후 잘라서 반환.
+
+        SSRF 방어: 매 리다이렉트 hop 마다 _is_safe_url 재검증 + 자동 follow 차단.
+        에러는 빈 문자열로 리턴 (호출자가 다음 URL 로 폴백).
+        """
+        try:
+            import urllib.request
+            import urllib.error
+
+            class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None  # 자동 리다이렉트 차단 — 수동 처리
+
+            opener = urllib.request.build_opener(_NoRedirect())
+            current = url
+            raw: bytes = b""
+            ctype: str = ""
+            for _ in range(max_redirects + 1):
+                if not ToolExecutor._is_safe_url(current):
+                    return ""
+                req = urllib.request.Request(
+                    current,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 SARVIS/1.0"
+                        ),
+                        "Accept-Language": "ko,en;q=0.7",
+                    },
+                )
+                try:
+                    r = opener.open(req, timeout=timeout)
+                except urllib.error.HTTPError as he:
+                    # 3xx — 자동 follow 가 막혀서 raise 됨. 수동으로 다음 hop 검증.
+                    if 300 <= he.code < 400:
+                        loc = he.headers.get("Location") if he.headers else None
+                        if not loc:
+                            return ""
+                        # 상대 URL 절대화
+                        from urllib.parse import urljoin
+                        current = urljoin(current, loc)
+                        continue
+                    return ""
+                with r:
+                    ctype = r.headers.get("Content-Type", "") or ""
+                    if "html" not in ctype.lower():
+                        return ""
+                    raw = r.read(800_000)
+                break
+            else:
+                return ""
+            if not raw:
+                return ""
+            try:
+                from bs4 import BeautifulSoup
+            except Exception:
+                # bs4 없으면 매우 단순 strip
+                import re
+                text = re.sub(r"<[^>]+>", " ", raw.decode("utf-8", errors="replace"))
+                return re.sub(r"\s+", " ", text).strip()[:max_chars]
+            soup = BeautifulSoup(raw, "html.parser")
+            for tag in soup(["script", "style", "noscript", "nav", "footer", "header", "aside", "form"]):
+                tag.decompose()
+            # main/article 우선, 없으면 body 전체
+            root = soup.find("article") or soup.find("main") or soup.body or soup
+            text = root.get_text(separator=" ", strip=True) if root else ""
+            import re
+            text = re.sub(r"\s+", " ", text).strip()
+            return text[:max_chars]
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _extract_relevant_window(text: str, query: str, window: int = 500, max_windows: int = 3) -> str:
+        """본문에서 query 키워드 주변 텍스트 윈도우 N개를 추출해 합침.
+
+        키워드 매칭 0건이면 본문 앞부분 1개 윈도우 반환.
+        """
+        if not text:
+            return ""
+        # 한글/영문 토큰 분해 (단순)
+        import re
+        tokens = [t for t in re.split(r"[\s\.,!?·、，。！？\(\)\[\]\"']+", query) if len(t) >= 2]
+        # 너무 일반적인 stopword 제거
+        STOP = {"오늘", "지금", "현재", "최근", "요즘", "올해", "어제", "내일",
+                "today", "now", "current", "latest", "what", "who", "how", "when",
+                "이거", "그거", "저거", "이건", "그건", "이것", "그것"}
+        tokens = [t for t in tokens if t.lower() not in STOP][:6]
+        if not tokens:
+            return text[:window]
+
+        text_l = text.lower()
+        hits: List[int] = []
+        for tok in tokens:
+            start = 0
+            tl = tok.lower()
+            while True:
+                idx = text_l.find(tl, start)
+                if idx < 0:
+                    break
+                hits.append(idx)
+                start = idx + len(tl)
+                if len(hits) >= 30:
+                    break
+        if not hits:
+            return text[:window]
+        hits.sort()
+        # 인접한 hit 들을 합쳐 window 그룹화
+        windows: List[tuple] = []  # (lo, hi)
+        cur_lo = max(0, hits[0] - window // 2)
+        cur_hi = min(len(text), hits[0] + window // 2)
+        for h in hits[1:]:
+            lo = max(0, h - window // 2)
+            hi = min(len(text), h + window // 2)
+            if lo <= cur_hi:  # 겹치거나 인접
+                cur_hi = max(cur_hi, hi)
+            else:
+                windows.append((cur_lo, cur_hi))
+                cur_lo, cur_hi = lo, hi
+        windows.append((cur_lo, cur_hi))
+        windows = windows[:max_windows]
+        chunks = [text[lo:hi].strip() for (lo, hi) in windows]
+        return " … ".join(chunks)
+
     def _t_web_search(self, query: str) -> str:
+        """빠른 스니펫 검색 (상위 6개). 시간 민감 질의는 날짜 부착 + 빈 결과 시 재시도."""
         try:
             from duckduckgo_search import DDGS
-            results = list(DDGS().text(query, max_results=4, region="kr-kr"))
         except Exception as e:
             return f"검색 실패: {e}"
+
+        q1 = self._date_hint(query)
+        results: list = []
+        try:
+            results = list(DDGS().text(q1, max_results=6, region="kr-kr"))
+        except Exception as e:
+            return f"검색 실패: {e}"
+
+        # 1차 빈 결과 → 시간 한정자 제거 + region wt-wt 로 재시도
+        if not results:
+            q2 = self._strip_time_qualifier(query)
+            if q2 and q2 != q1:
+                try:
+                    results = list(DDGS().text(q2, max_results=6, region="wt-wt"))
+                except Exception:
+                    results = []
 
         if not results:
             return f"'{query}' 검색 결과 없음"
         lines = []
-        for r in results[:4]:
-            title = r.get("title", "").strip()
-            body = r.get("body", "").strip()
+        for r in results[:6]:
+            title = (r.get("title") or "").strip()
+            body = (r.get("body") or "").strip()
+            href = (r.get("href") or "").strip()
             if title and body:
-                lines.append(f"- {title}: {body}")
-        return "\n".join(lines) if lines else "검색 결과 없음"
+                src = f" ({href})" if href else ""
+                lines.append(f"- {title}{src}: {body}")
+        return "\n".join(lines) if lines else f"'{query}' 검색 결과 없음"
+
+    def _t_web_answer(self, query: str) -> str:
+        """검색 → 상위 3개 페이지 본문 fetch → 질문 키워드 주변 발췌 → 합쳐서 반환.
+
+        brain 이 받아서 종합 답변하기 좋은 형태:
+          [출처1] 제목 (URL)
+          ...본문 발췌...
+          [출처2] ...
+        총 ~6KB 이내로 정렬.
+        """
+        try:
+            from duckduckgo_search import DDGS
+        except Exception as e:
+            return f"검색 실패: {e}"
+
+        q1 = self._date_hint(query)
+        try:
+            results = list(DDGS().text(q1, max_results=8, region="kr-kr"))
+        except Exception as e:
+            return f"검색 실패: {e}"
+        if not results:
+            q2 = self._strip_time_qualifier(query)
+            if q2 and q2 != q1:
+                try:
+                    results = list(DDGS().text(q2, max_results=8, region="wt-wt"))
+                except Exception:
+                    results = []
+        if not results:
+            return f"'{query}' 검색 결과 없음"
+
+        # 상위 페이지 fetch — 최대 3개 성공할 때까지
+        sections: List[str] = []
+        used = 0
+        for r in results:
+            if used >= 3:
+                break
+            href = (r.get("href") or "").strip()
+            title = (r.get("title") or "").strip() or "(제목 없음)"
+            snippet = (r.get("body") or "").strip()
+            if not href:
+                continue
+            body = self._fetch_clean_text(href, max_chars=8000)
+            excerpt = self._extract_relevant_window(body, query, window=500, max_windows=2) if body else ""
+            if not excerpt:
+                # 페이지 본문 못 받으면 스니펫이라도 사용
+                if not snippet:
+                    continue
+                excerpt = snippet
+            sections.append(f"[출처{used + 1}] {title}\nURL: {href}\n{excerpt}")
+            used += 1
+
+        if not sections:
+            # 최후 폴백 — 스니펫만 합쳐서 반환
+            lines = []
+            for r in results[:5]:
+                t = (r.get("title") or "").strip()
+                b = (r.get("body") or "").strip()
+                h = (r.get("href") or "").strip()
+                if t and b:
+                    lines.append(f"- {t} ({h}): {b}")
+            return "\n".join(lines) if lines else f"'{query}' 결과 없음"
+
+        joined = "\n\n".join(sections)
+        # 안전 길이 제한
+        if len(joined) > 7000:
+            joined = joined[:7000] + " …"
+        return joined
 
     def _t_get_weather(self, location: str) -> str:
         import urllib.parse
