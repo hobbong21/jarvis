@@ -1764,5 +1764,104 @@ class VoiceInputAdjacentTests(unittest.TestCase):
         )
 
 
+class FeedbackAndMySarvisWSTests(unittest.TestCase):
+    """사이클 #22 (HARN-12 + HARN-05) — feedback_submit / my_sarvis_summary WS."""
+
+    def test_ws_text_input_emits_turn_logged_with_cmd_id(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({"type": "text_input", "text": "안녕"}))
+                tl, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "turn_logged", max_msgs=120,
+                )
+                self.assertIsNotNone(tl, "turn_logged 미수신")
+                self.assertIsInstance(tl.get("cmd_id"), int)
+                self.assertGreater(tl["cmd_id"], 0)
+
+    def test_ws_feedback_submit_roundtrip(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({"type": "text_input", "text": "테스트"}))
+                tl, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "turn_logged", max_msgs=120,
+                )
+                self.assertIsNotNone(tl)
+                cid = tl["cmd_id"]
+                ws.send_text(json.dumps({
+                    "type": "feedback_submit",
+                    "cmd_id": cid, "rating": 1, "comment": "좋아요",
+                }))
+                fr, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "feedback_result", max_msgs=20,
+                )
+                self.assertIsNotNone(fr)
+                self.assertTrue(fr["ok"])
+                self.assertEqual(fr["rating"], 1)
+                self.assertEqual(fr["cmd_id"], cid)
+
+    def test_ws_feedback_submit_invalid_cmd_id(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({
+                    "type": "feedback_submit",
+                    "cmd_id": 0, "rating": 1,
+                }))
+                fr, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "feedback_result", max_msgs=20,
+                )
+                self.assertIsNotNone(fr)
+                self.assertFalse(fr["ok"])
+
+    def test_ws_feedback_submit_invalid_rating(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({"type": "text_input", "text": "x"}))
+                tl, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "turn_logged", max_msgs=120,
+                )
+                self.assertIsNotNone(tl)
+                ws.send_text(json.dumps({
+                    "type": "feedback_submit",
+                    "cmd_id": tl["cmd_id"], "rating": 99,
+                }))
+                fr, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "feedback_result", max_msgs=20,
+                )
+                self.assertIsNotNone(fr)
+                self.assertFalse(fr["ok"])
+
+    def test_ws_my_sarvis_summary_default_empty_or_counts(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({"type": "my_sarvis_summary"}))
+                s, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "my_sarvis_summary", max_msgs=20,
+                )
+                self.assertIsNotNone(s)
+                for key in ("command_count", "error_count", "feedback",
+                            "top_kinds", "recent_negative", "window_days",
+                            "storage_mb"):
+                    self.assertIn(key, s)
+                self.assertIsInstance(s["feedback"], dict)
+
+    def test_ws_my_sarvis_summary_custom_window_days(self):
+        with TestClient(server.app) as client:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                ws.send_text(json.dumps({
+                    "type": "my_sarvis_summary", "window_days": 1,
+                }))
+                s, _ = _drain_until(
+                    ws, lambda o: o.get("type") == "my_sarvis_summary", max_msgs=20,
+                )
+                self.assertIsNotNone(s)
+                self.assertEqual(s["window_days"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

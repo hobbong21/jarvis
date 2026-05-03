@@ -1849,3 +1849,37 @@ input, select { outline: none; }
   font-size: 14px; padding: 2px 4px;
 }
 .todo-item button:hover { color: #f3f4f6; }
+
+/* 사이클 #22 (HARN-12) — 응답 메시지 옆 👍/👎 피드백 버튼 */
+.fb-row {
+  display: flex; gap: 6px; align-items: center;
+  margin-top: 6px; padding-top: 6px;
+  border-top: 1px dashed rgba(120,120,120,0.18);
+  font-size: 12px;
+}
+.fb-row[data-pending="1"] { display: none; }
+.fb-btn {
+  background: transparent; border: 1px solid rgba(120,120,120,0.25);
+  border-radius: 14px; padding: 2px 8px; cursor: pointer;
+  font-size: 13px; line-height: 1; color: inherit;
+  transition: background 120ms, border-color 120ms;
+}
+.fb-btn:hover { background: rgba(120,120,120,0.10); }
+.fb-btn.active.fb-up   { background: #16a34a; color: #fff; border-color: #16a34a; }
+.fb-btn.active.fb-down { background: #dc2626; color: #fff; border-color: #dc2626; }
+.fb-status { color: #9ca3af; font-size: 11px; }
+
+/* My Sarvis 패널 */
+.my-sarvis-summary { font-size: 12px; line-height: 1.5; }
+.my-sarvis-summary .ms-row { margin-top: 4px; }
+.my-sarvis-summary .ms-row:first-child { margin-top: 0; }
+.my-sarvis-summary .ms-pill {
+  display: inline-block; padding: 1px 7px; margin: 2px 4px 0 0;
+  background: rgba(96,165,250,0.18); border-radius: 9px;
+  color: #93c5fd; font-size: 11px;
+}
+.my-sarvis-summary .ms-neg {
+  margin: 4px 0 0 0; padding-left: 18px; color: #fca5a5;
+}
+.my-sarvis-summary .ms-neg li { margin-bottom: 2px; }
+.my-sarvis-summary .my-sarvis-loading { color: #9ca3af; font-style: italic; }

@@ -33,6 +33,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 DB_PATH = os.environ.get("SARVIS_MEMORY_DB", "data/memory.db")
@@ -133,6 +134,19 @@ CREATE TABLE IF NOT EXISTS knowledge (
     updated_at    REAL    NOT NULL
 );
 
+-- 사이클 #22 (HARN-12): 사용자 피드백 (👍/👎 + 코멘트). command 단위로 1건.
+-- rating: -1 (👎) / +1 (👍) / 0 (취소). UNIQUE(command_id) 로 토글 의미.
+CREATE TABLE IF NOT EXISTS command_feedback (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    command_id    INTEGER NOT NULL REFERENCES commands(id) ON DELETE CASCADE,
+    user_id       TEXT    NOT NULL,
+    rating        INTEGER NOT NULL DEFAULT 0,
+    comment       TEXT,
+    created_at    REAL    NOT NULL,
+    updated_at    REAL    NOT NULL,
+    UNIQUE(command_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content);
 CREATE INDEX IF NOT EXISTS idx_facts_user ON facts(user_id, updated_at DESC);
@@ -192,6 +206,19 @@ def _ensure_schema(path: str) -> None:
             # 기존 DB (사이클 #14 만 적용된 상태) 는 여기서 채워진다.
             _migrate_add_column_if_missing(conn, "commands", "audio_path", "TEXT")
             _migrate_add_column_if_missing(conn, "commands", "video_path", "TEXT")
+            # 사이클 #22 (HARN-12): 레거시 DB 에 command_feedback 테이블 보장.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS command_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    command_id INTEGER NOT NULL REFERENCES commands(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL,
+                    rating INTEGER NOT NULL DEFAULT 0,
+                    comment TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(command_id)
+                )
+            """)
             # 사이클 #16: knowledge 테이블이 없는 레거시 DB 도 자동 생성.
             # _SCHEMA_SQL 의 CREATE TABLE IF NOT EXISTS 가 이미 처리하지만,
             # 인덱스도 함께 ensure 한다 (no-op for fresh DBs).
@@ -770,6 +797,134 @@ class Memory:
                 except OSError:
                     pass
         return True
+
+    # ── 사이클 #22 (HARN-12 + HARN-05): 사용자 피드백 + My Sarvis 요약 ──
+    def set_feedback(
+        self,
+        command_id: int,
+        user_id: str,
+        rating: int,
+        comment: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """command 1건에 대한 👍(+1)/👎(-1)/취소(0) + 코멘트 기록 (upsert).
+
+        같은 command_id 에 다시 호출 시 rating/comment 갱신.
+        rating: -1 | 0 | +1 외 값은 ValueError.
+        """
+        try:
+            r = int(rating)
+        except (TypeError, ValueError):
+            raise ValueError(f"invalid rating: {rating!r}")
+        if r not in (-1, 0, 1):
+            raise ValueError(f"rating must be -1|0|+1, got {r}")
+        if comment is not None and not isinstance(comment, str):
+            comment = str(comment)
+        if comment is not None:
+            comment = comment.strip()[:1000] or None
+        now = time.time()
+        with _conn_ctx(self.path) as conn:
+            row = conn.execute(
+                "SELECT id FROM commands WHERE id=?", (int(command_id),),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"command not found: {command_id}")
+            cur = conn.execute(
+                """
+                INSERT INTO command_feedback(command_id, user_id, rating,
+                                             comment, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(command_id) DO UPDATE SET
+                    rating=excluded.rating,
+                    comment=excluded.comment,
+                    updated_at=excluded.updated_at
+                """,
+                (int(command_id), user_id, r, comment, now, now),
+            )
+            fb_row = conn.execute(
+                "SELECT * FROM command_feedback WHERE command_id=?",
+                (int(command_id),),
+            ).fetchone()
+        return dict(fb_row) if fb_row else {}
+
+    def get_feedback(self, command_id: int) -> Optional[Dict[str, Any]]:
+        with _conn_ctx(self.path) as conn:
+            row = conn.execute(
+                "SELECT * FROM command_feedback WHERE command_id=?",
+                (int(command_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def my_sarvis_summary(
+        self, user_id: str, window_sec: float = 7 * 86400.0,
+    ) -> Dict[str, Any]:
+        """사용자용 'My Sarvis' 패널용 집계 (기획서 17.5.2).
+
+        - 최근 window 내 명령 수, 만족도(👍/👎 비율), Top5 종류, 저장 용량.
+        """
+        cutoff = time.time() - max(60.0, float(window_sec))
+        with _conn_ctx(self.path) as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) AS n FROM commands "
+                "WHERE user_id=? AND created_at>=?",
+                (user_id, cutoff),
+            ).fetchone()["n"]
+            kind_rows = conn.execute(
+                "SELECT kind, COUNT(*) AS n FROM commands "
+                "WHERE user_id=? AND created_at>=? "
+                "GROUP BY kind ORDER BY n DESC LIMIT 5",
+                (user_id, cutoff),
+            ).fetchall()
+            fb_rows = conn.execute(
+                "SELECT f.rating AS r FROM command_feedback f "
+                "JOIN commands c ON c.id=f.command_id "
+                "WHERE c.user_id=? AND f.updated_at>=?",
+                (user_id, cutoff),
+            ).fetchall()
+            err_n = conn.execute(
+                "SELECT COUNT(*) AS n FROM commands "
+                "WHERE user_id=? AND created_at>=? AND status='error'",
+                (user_id, cutoff),
+            ).fetchone()["n"]
+            recent_neg = conn.execute(
+                """
+                SELECT c.id AS cmd_id, c.command_text, c.kind, c.created_at,
+                       f.rating, f.comment, f.updated_at AS fb_at
+                FROM command_feedback f
+                JOIN commands c ON c.id=f.command_id
+                WHERE c.user_id=? AND f.rating<0 AND f.updated_at>=?
+                ORDER BY f.updated_at DESC LIMIT 5
+                """,
+                (user_id, cutoff),
+            ).fetchall()
+        up = sum(1 for r in fb_rows if r["r"] > 0)
+        dn = sum(1 for r in fb_rows if r["r"] < 0)
+        rated = up + dn
+        sat_pct = (100.0 * up / rated) if rated else None
+        # 저장 용량 (best-effort): data/ + chromadb/ 디스크 사용량
+        storage_mb = 0.0
+        try:
+            root = Path(self.path).resolve().parent
+            for p in root.rglob("*"):
+                if p.is_file():
+                    try:
+                        storage_mb += p.stat().st_size
+                    except OSError:
+                        pass
+            storage_mb = round(storage_mb / (1024 * 1024), 2)
+        except Exception:
+            storage_mb = 0.0
+        return {
+            "window_days": round(window_sec / 86400.0, 1),
+            "command_count": int(total),
+            "error_count": int(err_n),
+            "feedback": {
+                "up": up, "down": dn, "rated": rated,
+                "satisfaction_pct": sat_pct,
+            },
+            "top_kinds": [{"kind": r["kind"], "n": r["n"]} for r in kind_rows],
+            "recent_negative": [dict(r) for r in recent_neg],
+            "storage_mb": storage_mb,
+        }
 
     # ── 멀티모달 학습 지식 (knowledge) ──────────────────────────────
     # 사비스가 시간이 지나며 쌓는 "알게 된 것" 들을 영구 저장하는 자유 서술

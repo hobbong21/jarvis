@@ -22,6 +22,54 @@ P0 17개 + P1 6개 + P2 2개, 총 ~174 인일).
 - **보류** (단일 주인엔 과잉): HARN-02 ClickHouse, HARN-04 Grafana, HARN-17 A/B,
   HARN-18 Canary, HARN-23 옵트인 학습, HARN-24 SOC2, HARN-25 커뮤니티 규칙.
 
+## Cycle #22 — Observe v1 (HARN-12 피드백 + HARN-05 미니 "내 Sarvis")
+
+Harness 첫 사이클. 사용자가 응답 품질을 명시적으로 표현하고(👍/👎),
+사비스가 "내가 어떻게 쓰이고 있는지" 한눈에 보여주는 최소 기능 셋.
+
+**메모리 (`sarvis/memory.py`)**
+- 신규 테이블 `command_feedback(id, command_id FK→commands ON DELETE CASCADE,
+  user_id, rating ∈ {-1,0,+1}, comment ≤1000자, created_at, updated_at,
+  UNIQUE(command_id))` — `_SCHEMA_SQL` + 레거시 DB 마이그레이션 양쪽에 정의.
+- `set_feedback(cmd_id, user_id, rating, comment=None)` — rating 검증
+  (ValueError), command 존재 확인 (ValueError), comment 1000자 자동 절단,
+  UPSERT(`ON CONFLICT(command_id) DO UPDATE`).
+- `get_feedback(cmd_id) → dict | None`.
+- `my_sarvis_summary(user_id, window_sec=7d) → dict` — 윈도우 내 명령 수,
+  오류 수, 종류별 top-5, 만족도(up/(up+down) %), 최근 부정 피드백 5건,
+  DB 파일 크기(MB). window_sec ≥ 60s clamp.
+
+**서버 (`sarvis/server.py`)**
+- `respond_internal` 끝에서 `log_command(channel) + update_command(response_text)`
+  하여 turn 별 cmd_id 확보 → `emit(type="turn_logged", cmd_id=...)`.
+  meta 에 `{emotion, backend, intent, fallback_used}` 적재.
+- 신규 WS 메시지 2종 (인증 게이트 set 에 추가):
+  - `feedback_submit{cmd_id, rating, comment?}` → `feedback_result{ok, cmd_id, rating, comment}`.
+  - `my_sarvis_summary{window_days?}` → `my_sarvis_summary{...}`.
+
+**UI (`web/{index.html, app.js, style.css}`)**
+- 응답 버블 finalize 시 placeholder `.fb-row[data-pending=1]` 슬롯 생성 →
+  `turn_logged` 수신 시 마지막 placeholder 에 👍/👎 버튼 attach. 클릭 시
+  `feedback_submit` 송신, `feedback_result` 로 상태/색상 갱신.
+- prod-dock 에 "내 Sarvis (Ch.17)" 카드 추가 — 만족도/명령 수/오류 수/저장 MB/
+  자주 쓴 종류 pill/최근 아쉬웠던 답변 5건. 패널 열 때 + 피드백 후 자동 갱신.
+
+**테스트**
+- `tests/test_feedback.py` (19건): set/get/UPSERT/검증/취소(0)/긴 comment 절단/
+  존재 안 하는 cmd/CASCADE/empty summary/카운팅/top kinds/만족도/오류 수/
+  최근 부정/타 사용자 격리/오래된 행 제외/window clamp/recent_negative 5건 제한.
+- `tests/test_server_endpoints.py::FeedbackAndMySarvisWSTests` (6건):
+  turn_logged + cmd_id 발화, feedback round-trip, invalid cmd_id, invalid rating,
+  my_sarvis_summary 기본/custom window.
+- 전체 회귀 **635/635 PASS** (이전 610 → +25, 28.66s).
+
+**알려진 한계 (다음 사이클 후보)**
+- **compare 모드(Claude+OpenAI A/B)** 는 `respond_compare` 가 별도 경로라 `turn_logged` 를
+  발화하지 않음. compare_end 는 finalizeStreamBubble 을 호출하지 않으므로 placeholder
+  누적은 없으나, A/B 답변 각각에 👍/👎 를 달려면 compare 경로에 cmd_id 발화 추가 필요.
+- HARN-01 trace 컬럼 확장(요청·응답 토큰 수 등)은 이번 사이클에서 미실시 — `commands.meta`
+  에 `{emotion, backend, intent, fallback_used}` 만 적재. 다음 사이클에서 트레이스 보강.
+
 ## Cycle #21 — 회의록(F-04) + 할 일/캘린더(F-10)
 
 기획서 P0/P1 미구현 우선순위 두 항목을 한 사이클로 묶어 추가.

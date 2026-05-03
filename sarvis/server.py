@@ -665,6 +665,30 @@ async def websocket_endpoint(ws: WebSocket):
                 except Exception:
                     traceback.print_exc()
 
+            # 사이클 #22 (HARN-12): 사용자 피드백 부착 대상 cmd 행 기록 + cmd_id emit.
+            # PII 본문은 commands.command_text/response_text 에만 저장 (DB 로컬), telemetry 는
+            # 길이만. UI 가 cmd_id 를 받아 응답 메시지 옆 👍/👎 버튼을 그린다.
+            if log_user and final_text:
+                try:
+                    cmd_id = await asyncio.to_thread(
+                        session.memory.log_command,
+                        session.memory_user_id, prompt,
+                        turn_meta.get("input_channel", "text"),
+                        None, session.get_conv_id(), "done",
+                        {"emotion": final_emotion,
+                         "backend": cfg.llm_backend,
+                         "intent": turn_meta.get("intent"),
+                         "fallback_used": bool(turn_meta.get("fallback_used"))},
+                    )
+                    await asyncio.to_thread(
+                        session.memory.update_command, cmd_id,
+                        response_text=final_text,
+                    )
+                    turn_meta["cmd_id"] = int(cmd_id)
+                    await emit(type="turn_logged", cmd_id=int(cmd_id))
+                except Exception:
+                    traceback.print_exc()
+
             await emit(type="emotion", emotion=final_emotion)
             await emit(type="state", state="speaking")
 
@@ -1918,9 +1942,59 @@ async def websocket_endpoint(ws: WebSocket):
                 "meeting_start", "meeting_chunk", "meeting_end",
                 "meeting_list", "meeting_get",
                 "todo_list", "todo_add", "todo_done", "todo_remove", "todo_extract",
+                "feedback_submit", "my_sarvis_summary",  # 사이클 #22
             } and OWNER_AUTH.is_enrolled() and not _is_authed():
                 await emit(type="error", message="주인 인증이 필요합니다.")
                 continue
+
+            # ── 사이클 #22 (HARN-12 + HARN-05) — 피드백 / My Sarvis ─────
+            elif mtype == "feedback_submit":
+                # body: {cmd_id: int, rating: -1|0|+1, comment?: str}
+                try:
+                    cmd_id = int(data.get("cmd_id") or 0)
+                    rating = int(data.get("rating") or 0)
+                except (TypeError, ValueError):
+                    await emit(type="feedback_result", ok=False,
+                               message="cmd_id/rating 형식 오류")
+                    continue
+                comment = (data.get("comment") or "").strip() or None
+                if cmd_id <= 0:
+                    await emit(type="feedback_result", ok=False,
+                               message="cmd_id 필요")
+                    continue
+                try:
+                    fb = await asyncio.to_thread(
+                        session.memory.set_feedback,
+                        cmd_id, session.memory_user_id, rating, comment,
+                    )
+                    await emit(type="feedback_result", ok=True,
+                               cmd_id=cmd_id,
+                               rating=int(fb.get("rating", rating)),
+                               comment=fb.get("comment"))
+                except ValueError as ve:
+                    await emit(type="feedback_result", ok=False,
+                               message=str(ve))
+                except Exception as ex:
+                    print(f"[feedback_submit] 실패: {ex!r}")
+                    await emit(type="feedback_result", ok=False,
+                               message="피드백 저장 실패")
+
+            elif mtype == "my_sarvis_summary":
+                # body: {window_days?: float, default 7}
+                try:
+                    days = float(data.get("window_days") or 7.0)
+                except (TypeError, ValueError):
+                    days = 7.0
+                window_sec = max(60.0, days * 86400.0)
+                try:
+                    summary = await asyncio.to_thread(
+                        session.memory.my_sarvis_summary,
+                        session.memory_user_id, window_sec,
+                    )
+                    await emit(type="my_sarvis_summary", **summary)
+                except Exception as ex:
+                    print(f"[my_sarvis_summary] 실패: {ex!r}")
+                    await emit(type="error", message="My Sarvis 집계 실패")
 
             elif mtype == "meeting_start":
                 title = (data.get("title") or "").strip()

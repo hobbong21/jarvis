@@ -321,6 +321,10 @@
         // 다음 바이너리 프레임이 환영 인사 오디오임을 표시 (마이크/SEND 즉시 클릭 시 폐기 판단용)
         _expectingWelcomeAudio = !!m.is_welcome;
         break;
+      case 'turn_logged':
+        // 사이클 #22 (HARN-12) — 응답 메시지 옆 👍/👎 버튼 활성화.
+        if (m.cmd_id) attachFeedbackButtons(m.cmd_id);
+        break;
       case 'compare_start':
         beginCompareBubbles(m.sources || ['claude', 'openai']);
         setOrbEmotion('claude', 'thinking');
@@ -1218,6 +1222,13 @@
       _streamEl.textContent = cleanText;
       const bubble = _streamEl.closest('.streaming');
       if (bubble) bubble.classList.remove('streaming');
+      // 사이클 #22: cmd_id 가 도착하면 피드백 버튼 부착 — 우선 placeholder 슬롯만.
+      if (bubble && !bubble.querySelector('.fb-row')) {
+        const fb = document.createElement('div');
+        fb.className = 'fb-row';
+        fb.dataset.pending = '1';
+        bubble.appendChild(fb);
+      }
       _streamEl = null;
     }
     logEl.scrollTop = logEl.scrollHeight;
@@ -1229,6 +1240,29 @@
     }
     _orbStreamBuf = '';
   }
+
+  // 사이클 #22 (HARN-12) — 마지막 응답 버블에 피드백 버튼 부착.
+  function attachFeedbackButtons(cmdId) {
+    const pending = logEl.querySelectorAll('.fb-row[data-pending="1"]');
+    const slot = pending[pending.length - 1];
+    if (!slot) return;
+    delete slot.dataset.pending;
+    slot.dataset.cmdId = String(cmdId);
+    slot.innerHTML =
+      `<button class="fb-btn fb-up"   type="button" title="이 답변이 도움됐어요">👍</button>` +
+      `<button class="fb-btn fb-down" type="button" title="이 답변은 아쉬워요">👎</button>` +
+      `<span class="fb-status" aria-live="polite"></span>`;
+    const status = slot.querySelector('.fb-status');
+    function send(rating) {
+      const w = window.__sendWS;
+      if (!w) return;
+      w({ type: 'feedback_submit', cmd_id: cmdId, rating });
+      status.textContent = '저장 중…';
+    }
+    slot.querySelector('.fb-up').addEventListener('click', () => send(1));
+    slot.querySelector('.fb-down').addEventListener('click', () => send(-1));
+  }
+  window.__attachFeedbackButtons = attachFeedbackButtons;
 
   // ---------- A/B 비교 모드 ----------
   let _compareEls = {};
@@ -2159,6 +2193,64 @@
     });
   }
 
+  // ── 사이클 #22 — My Sarvis (HARN-05 미니) ─────────────────
+  const mySumEl = $("my-sarvis-summary");
+  const mySumBtn = $("my-sarvis-refresh-btn");
+  function escapeMs(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[c]);
+  }
+  function renderMySarvis(s) {
+    if (!mySumEl) return;
+    const fb = s.feedback || {};
+    const sat = (fb.satisfaction_pct == null) ? "—"
+              : (Math.round(fb.satisfaction_pct) + "%");
+    const kinds = (s.top_kinds || [])
+      .map(k => `<span class="ms-pill">${escapeMs(k.kind)} · ${k.n}</span>`)
+      .join("") || "<i>아직 데이터 없음</i>";
+    const neg = (s.recent_negative || [])
+      .map(r => `<li><b>👎</b> ${escapeMs((r.command_text || "").slice(0,40))}` +
+                (r.comment ? ` — <i>${escapeMs(r.comment)}</i>` : "") + "</li>")
+      .join("");
+    mySumEl.innerHTML =
+      `<div class="ms-row"><b>최근 ${s.window_days}일</b>` +
+      ` · 명령 <b>${s.command_count}</b>` +
+      ` · 오류 ${s.error_count}` +
+      ` · 저장 ${s.storage_mb} MB</div>` +
+      `<div class="ms-row">만족도 <b>${sat}</b>` +
+      ` <small>(👍 ${fb.up||0} / 👎 ${fb.down||0} / 평가 ${fb.rated||0})</small></div>` +
+      `<div class="ms-row">자주 쓴 종류: ${kinds}</div>` +
+      (neg ? `<div class="ms-row">최근 아쉬웠던 답변<ul class="ms-neg">${neg}</ul></div>` : "");
+  }
+  function refreshMySarvis() {
+    if (mySumEl) mySumEl.querySelector('.my-sarvis-loading') &&
+      (mySumEl.querySelector('.my-sarvis-loading').textContent = '집계 중…');
+    sendMsg({ type: "my_sarvis_summary", window_days: 7 });
+  }
+  if (mySumBtn) mySumBtn.addEventListener("click", refreshMySarvis);
+
+  // 피드백 결과 처리 — 버튼 상태/카운터 갱신.
+  function handleFeedbackResult(msg) {
+    const slots = logEl.querySelectorAll('.fb-row[data-cmd-id]');
+    slots.forEach(slot => {
+      if (Number(slot.dataset.cmdId) !== Number(msg.cmd_id)) return;
+      const status = slot.querySelector('.fb-status');
+      if (!msg.ok) {
+        if (status) status.textContent = "오류: " + (msg.message || "");
+        return;
+      }
+      slot.querySelectorAll('.fb-btn').forEach(b => b.classList.remove('active'));
+      const cls = msg.rating > 0 ? '.fb-up' : msg.rating < 0 ? '.fb-down' : null;
+      if (cls) slot.querySelector(cls).classList.add('active');
+      if (status) status.textContent = msg.rating > 0 ? '감사합니다 👍'
+                                       : msg.rating < 0 ? '의견 반영하겠습니다 👎'
+                                       : '취소됨';
+    });
+    // My Sarvis 자동 갱신.
+    refreshMySarvis();
+  }
+
   // ── 메인 app.js 의 WS 메시지 분기를 보강 (monkey-patch) ──
   // 기존 코드가 onmessage 리스너를 한 번에 register 하므로, document 전역 이벤트로 hooking.
   // app.js 가 발행하는 'sarvis:ws' CustomEvent 가 없어도 직접 ws 객체에 추가 리스너 부착.
@@ -2214,10 +2306,17 @@
         case "todo_error":
           alert("[할 일] " + (msg.message || "오류"));
           break;
+        case "my_sarvis_summary":
+          renderMySarvis(msg);
+          break;
+        case "feedback_result":
+          handleFeedbackResult(msg);
+          break;
       }
     });
-    // 초기 todo 목록 로드.
+    // 초기 todo 목록 + My Sarvis 로드.
     setTimeout(() => sendMsg({ type: "todo_list" }), 1000);
+    setTimeout(refreshMySarvis, 1500);
   }
   attachWSListener();
 })();
