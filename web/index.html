@@ -371,6 +371,61 @@
   </div>
 </div>
 
+<!-- 사이클 #21 — F-04 회의록 + F-10 할 일/캘린더 미니 패널 -->
+<div id="productivity-dock" class="prod-dock" aria-label="생산성 패널">
+  <button id="prod-toggle" class="prod-fab" type="button" aria-expanded="false"
+          title="회의록 / 할 일 패널">📋</button>
+  <div id="prod-panels" class="prod-panels" hidden>
+    <!-- 회의록 -->
+    <section class="prod-card" id="meeting-card">
+      <header class="prod-card-head">
+        <span class="prod-card-title">회의록 (F-04)</span>
+        <span id="meeting-status" class="prod-status">대기</span>
+      </header>
+      <div class="prod-row">
+        <input id="meeting-title" type="text" placeholder="회의 제목 (선택)"
+               maxlength="80" class="prod-input">
+        <button id="meeting-start-btn" class="prod-btn primary" type="button">시작</button>
+        <button id="meeting-end-btn" class="prod-btn" type="button" disabled>종료+요약</button>
+      </div>
+      <div class="prod-row">
+        <input id="meeting-text" type="text" placeholder="발언 텍스트 입력 후 Enter (또는 ↩)"
+               maxlength="500" class="prod-input">
+        <button id="meeting-add-btn" class="prod-btn" type="button" disabled>추가</button>
+      </div>
+      <div id="meeting-transcript" class="prod-list prod-transcript" aria-live="polite"></div>
+      <div id="meeting-summary" class="prod-summary" hidden></div>
+    </section>
+
+    <!-- 할 일 -->
+    <section class="prod-card" id="todo-card">
+      <header class="prod-card-head">
+        <span class="prod-card-title">할 일 (F-10)</span>
+        <button id="todo-refresh-btn" class="prod-btn ghost mini" type="button">새로고침</button>
+      </header>
+      <div class="prod-row">
+        <input id="todo-title" type="text" placeholder="할 일 제목"
+               maxlength="200" class="prod-input">
+        <input id="todo-due" type="text" placeholder="마감 (선택)"
+               maxlength="80" class="prod-input prod-input-sm">
+        <select id="todo-priority" class="prod-input prod-input-sm">
+          <option value="normal">보통</option>
+          <option value="high">높음</option>
+          <option value="low">낮음</option>
+        </select>
+        <button id="todo-add-btn" class="prod-btn primary" type="button">추가</button>
+      </div>
+      <div class="prod-row">
+        <input id="todo-extract-text" type="text"
+               placeholder="자유 발화에서 자동 추출 (예: 내일 우유 사고 3시 회의 잡기)"
+               maxlength="500" class="prod-input">
+        <button id="todo-extract-btn" class="prod-btn" type="button">자동 추출</button>
+      </div>
+      <ul id="todo-list" class="prod-list"></ul>
+    </section>
+  </div>
+</div>
+
 <script src="/static/orb.js"></script>
 <script src="/static/app.js"></script>
 </body>

@@ -2,6 +2,40 @@
 
 A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning → Model Selection → Task Execution → Response Generation). Features face recognition, voice interaction, and tool-augmented intelligence.
 
+## Cycle #21 — 회의록(F-04) + 할 일/캘린더(F-10)
+
+기획서 P0/P1 미구현 우선순위 두 항목을 한 사이클로 묶어 추가.
+
+**F-04 회의록 자동 기록·요약**
+- `sarvis/meeting.py` — `Meeting`, `Utterance`, `MeetingRegistry`. 잡음
+  필터(빈/단음절 거부), 동시 회의 1개 강제(이중 시작 시 RuntimeError), 종료
+  후 chunk 무시, 마크다운 산출물(요약/결정사항/액션아이템 테이블/타임스탬프 트랜스크립트).
+- LLM 요약은 의존성 주입(`brain_summarize_fn`) → 단위 테스트 가능. 실제 호출은
+  `server.py` 가 `session.brain.anthropic_client` 직접 사용 + `parse_summary_json`
+  으로 코드펜스/잡음 강건 파싱. LLM 실패/형식이상 시 fallback (트랜스크립트 앞 3줄).
+- WS 핸들러: `meeting_start`, `meeting_chunk` (text 또는 audio_b64 → STT),
+  `meeting_end` (요약+저장), `meeting_list`, `meeting_get`. 영속화는
+  `data/meetings/<id>/{meeting.json,meeting.md}`.
+
+**F-10 할 일/캘린더**
+- `sarvis/todos.py` — `TodoStore`(원자적 rename 쓰기, 손상 파일 .corrupt.json 백업),
+  `TodoItem`(priority high/normal/low, source voice/manual/meeting/llm),
+  우선순위+최신순 정렬, 자유 발화에서 LLM 으로 항목 자동 추출(`extract_todos_from_text`).
+- WS 핸들러: `todo_list`, `todo_add`, `todo_done`, `todo_remove`, `todo_extract`
+  (LLM 추출 + 자동 추가). 영속화는 `data/todos.json`.
+
+**UI**
+- 우하단 floating dock(📋) — 회의 시작/종료/요약 카드 + 할 일 추가/완료/자동추출 카드.
+- 기존 app.js 의 ws 인스턴스를 `window.__ws/__sendWS` 로 노출 → 패널이 추가
+  message 리스너만 부착하도록 minimal-invasive 통합.
+
+**테스트**
+- `tests/test_meeting.py` (14건): 잡음 필터, 종료 후 거부, summarize 정상/깨진/예외
+  fallback, 영속화 round-trip, 마크다운 섹션, registry 동시 1개 강제, JSON 파서.
+- `tests/test_todos.py` (12건): persist, 정규화, 우선순위 정렬, mark_done/remove,
+  손상 파일 복구, parse_todo_json 펜스, extract 짧은 텍스트/예외/정상.
+- 26/26 PASS (0.35s).
+
 ## Cycle #20 — Owner Authentication 보강 (F-01: 5각도 + 라이브니스 + 챌린지)
 
 기획서 F-01("주인 인증") 의 보안 갭 보강. 사이클 #18 의 단일-각도 + 패스프레이즈만 매칭 한계를 다음 3축으로 강화.

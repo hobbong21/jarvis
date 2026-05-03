@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "V1yRE6m19WGdw4yMq7_uc"
+uri = "file://docs/SARVIS_DEVELOPMENT_REPORT.md"
+type = "text"
+title = "SARVIS 개발 결과 보고서 (사이클 #18~#21)"

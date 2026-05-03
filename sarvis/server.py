@@ -149,6 +149,11 @@ FACE_REGISTRY = FaceRegistry(cfg.faces_dir)
 # 미등록 상태에선 게이트 비활성화 → 기존 테스트/사용자 흐름 회귀 0.
 # 등록되면 매 WS 연결마다 두 단계 모두 통과해야 메인 기능 사용 가능.
 OWNER_AUTH = OwnerAuth("data/owner.json")
+# 사이클 #21 — F-04 회의록 + F-10 할 일/캘린더.
+from .meeting import MeetingRegistry, build_summary_prompt, parse_summary_json
+from .todos import TodoStore, extract_todos_from_text
+MEETINGS = MeetingRegistry()
+TODOS = TodoStore()
 _known = FACE_REGISTRY.list_people()
 if _known:
     print(f"      등록된 얼굴: {', '.join(_known)}")
@@ -1904,6 +1909,204 @@ async def websocket_endpoint(ws: WebSocket):
                 else:
                     ok = await asyncio.to_thread(session.memory.delete_knowledge, kid)
                     await emit(type="knowledge_deleted", id=kid, ok=ok)
+
+            # ── 사이클 #21 (F-04 + F-10) — 회의록/할 일 ────────────────
+            # architect P0: 모든 사이클 #21 핸들러는 인증 필수.
+            # 단일 주인 시스템이지만, 외부 노출된 WS 에 미인증 접근으로
+            # MEETINGS/TODOS(모듈 전역) 가 노출/오염되지 않도록 게이트.
+            elif mtype in {
+                "meeting_start", "meeting_chunk", "meeting_end",
+                "meeting_list", "meeting_get",
+                "todo_list", "todo_add", "todo_done", "todo_remove", "todo_extract",
+            } and OWNER_AUTH.is_enrolled() and not _is_authed():
+                await emit(type="error", message="주인 인증이 필요합니다.")
+                continue
+
+            elif mtype == "meeting_start":
+                title = (data.get("title") or "").strip()
+                try:
+                    m = MEETINGS.start(title)
+                    await emit(
+                        type="meeting_started",
+                        meeting_id=m.meeting_id, title=m.title,
+                        started_at=m.started_at,
+                    )
+                except RuntimeError as ex:
+                    # 이미 진행 중인 회의가 있으면 현재 active 정보를 함께 돌려준다.
+                    cur = MEETINGS.active
+                    await emit(
+                        type="meeting_error", message=str(ex),
+                        active_meeting_id=cur.meeting_id if cur else None,
+                    )
+
+            elif mtype == "meeting_chunk":
+                # body: {text?: str, audio_b64?: base64 webm/wav, speaker?: str}
+                # 클라이언트가 선택적으로 자체 STT 결과(text) 또는 raw audio 를 보낸다.
+                speaker = (data.get("speaker") or "Owner").strip() or "Owner"
+                text = (data.get("text") or "").strip()
+                if not text and data.get("audio_b64"):
+                    if STT is None:
+                        await emit(type="meeting_error",
+                                   message="STT 모델 로딩 중입니다. 잠시 후 다시 시도해주세요.")
+                        continue
+                    try:
+                        raw = base64.b64decode(data["audio_b64"])
+                        # 임시 파일로 STT (sarvis._do_voice_login 과 동일 패턴).
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".webm", delete=False
+                        ) as tf:
+                            tf.write(raw); audio_path = tf.name
+                        try:
+                            text = await asyncio.to_thread(STT.transcribe, audio_path, "")
+                        finally:
+                            try: os.unlink(audio_path)
+                            except Exception: pass
+                    except Exception as e:
+                        traceback.print_exc()
+                        await emit(type="meeting_error", message=f"오디오 처리 실패: {e}")
+                        continue
+                ut = MEETINGS.append_active(text, speaker=speaker)
+                if ut is None:
+                    await emit(type="meeting_chunk_skipped", reason="empty_or_inactive",
+                               text=text)
+                else:
+                    await emit(
+                        type="meeting_chunk_added",
+                        meeting_id=MEETINGS.active.meeting_id if MEETINGS.active else None,
+                        ts=ut.ts, speaker=ut.speaker, text=ut.text,
+                        utterance_count=len(MEETINGS.active.utterances)
+                                       if MEETINGS.active else 0,
+                    )
+
+            elif mtype == "meeting_end":
+                if MEETINGS.active is None:
+                    await emit(type="meeting_error", message="진행 중인 회의가 없습니다.")
+                    continue
+
+                # LLM 요약 함수 — anthropic_client 직접 호출. 키/클라이언트가 없거나
+                # 실패하면 Meeting.summarize 의 fallback 으로 처리.
+                def _summarize_with_llm(transcript_md: str) -> Dict[str, Any]:
+                    client = session.brain.anthropic_client
+                    if client is None:
+                        # Anthropic 미사용 환경 — fallback (트랜스크립트 앞부분).
+                        return {}
+                    prompt = build_summary_prompt(transcript_md)
+                    try:
+                        resp = client.messages.create(
+                            model=getattr(cfg, "claude_model", "claude-sonnet-4-5"),
+                            max_tokens=1500,
+                            messages=[{"role": "user", "content": prompt}],
+                        )
+                        text = "".join(
+                            getattr(b, "text", "") for b in (resp.content or [])
+                        )
+                        return parse_summary_json(text)
+                    except Exception as ex:
+                        print(f"[meeting_end] LLM 요약 실패: {ex}")
+                        return {}
+
+                ended = await asyncio.to_thread(MEETINGS.end_active, _summarize_with_llm)
+                if ended is None:
+                    await emit(type="meeting_error", message="회의 종료 실패")
+                    continue
+                await emit(
+                    type="meeting_ended",
+                    meeting_id=ended.meeting_id, title=ended.title,
+                    summary=ended.summary, decisions=ended.decisions,
+                    action_items=ended.action_items,
+                    markdown=ended.to_markdown(),
+                    saved_path=str((MEETINGS.base_dir / ended.meeting_id).resolve()),
+                )
+
+            elif mtype == "meeting_list":
+                items = await asyncio.to_thread(MEETINGS.list_meetings)
+                await emit(type="meeting_list", items=items)
+
+            elif mtype == "meeting_get":
+                mid = (data.get("meeting_id") or "").strip()
+                m = await asyncio.to_thread(MEETINGS.get, mid)
+                if m is None:
+                    await emit(type="meeting_error", message="회의를 찾을 수 없습니다.")
+                else:
+                    await emit(type="meeting_get",
+                               meeting=m.to_dict(include_transcript=True),
+                               markdown=m.to_markdown())
+
+            # ── 사이클 #21 (F-10) — 할 일/캘린더 ──────────────────────────
+            elif mtype == "todo_list":
+                await emit(
+                    type="todo_list",
+                    active=[it.as_dict() for it in TODOS.list_active()],
+                    done=[it.as_dict() for it in TODOS.list_done()],
+                )
+
+            elif mtype == "todo_add":
+                title = (data.get("title") or "").strip()
+                due = (data.get("due") or "").strip()
+                priority = (data.get("priority") or "normal").strip()
+                source = (data.get("source") or "manual").strip()
+                note = (data.get("note") or "").strip()
+                it = TODOS.add(title, due=due, priority=priority,
+                               source=source, note=note)
+                if it is None:
+                    await emit(type="todo_error", message="제목이 비어있습니다.")
+                else:
+                    await emit(type="todo_added", item=it.as_dict())
+
+            elif mtype == "todo_done":
+                item_id = (data.get("id") or "").strip()
+                done = bool(data.get("done", True))
+                ok = TODOS.mark_done(item_id, done=done)
+                await emit(type="todo_done", id=item_id, ok=ok, done=done)
+
+            elif mtype == "todo_remove":
+                item_id = (data.get("id") or "").strip()
+                ok = TODOS.remove(item_id)
+                await emit(type="todo_removed", id=item_id, ok=ok)
+
+            elif mtype == "todo_extract":
+                # body: {text: 발화} → LLM 으로 항목 추출 후 자동 추가.
+                utterance = (data.get("text") or "").strip()
+                if len(utterance) < 4:
+                    await emit(type="todo_extract_result", added=[],
+                               message="추출할 텍스트가 너무 짧습니다.")
+                    continue
+
+                def _llm_call(prompt: str) -> str:
+                    client = session.brain.anthropic_client
+                    if client is None:
+                        return ""
+                    try:
+                        resp = client.messages.create(
+                            model=getattr(cfg, "claude_model", "claude-sonnet-4-5"),
+                            max_tokens=600,
+                            messages=[{"role": "user", "content": prompt}],
+                        )
+                        return "".join(
+                            getattr(b, "text", "") for b in (resp.content or [])
+                        )
+                    except Exception as ex:
+                        print(f"[todo_extract] LLM 호출 실패: {ex}")
+                        return ""
+
+                extracted = await asyncio.to_thread(
+                    extract_todos_from_text, utterance, _llm_call,
+                )
+                added = []
+                for raw in extracted:
+                    it = TODOS.add(
+                        title=raw["title"], due=raw["due"],
+                        priority=raw["priority"], source="llm",
+                    )
+                    if it is not None:
+                        added.append(it.as_dict())
+                await emit(
+                    type="todo_extract_result",
+                    added=added,
+                    message=(f"{len(added)}개 항목을 자동 추출했습니다."
+                             if added else "추출된 항목이 없습니다."),
+                )
 
             elif mtype == "ping":
                 await emit(type="pong")

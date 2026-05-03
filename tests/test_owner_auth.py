@@ -103,28 +103,28 @@ class OwnerAuthTests(unittest.TestCase):
 
     def test_verify_voice_exact(self):
         self.auth.enroll("민수", "사비스 안녕 나야")
-        self.assertTrue(self.auth.verify_voice("사비스 안녕 나야"))
+        self.assertTrue(self.auth.verify_voice("사비스 안녕 나야")[0])
 
     def test_verify_voice_with_punct_and_case(self):
         self.auth.enroll("민수", "Sarvis Hello Me")
-        self.assertTrue(self.auth.verify_voice("sarvis, hello me!"))
+        self.assertTrue(self.auth.verify_voice("sarvis, hello me!")[0])
 
     def test_verify_voice_one_char_typo(self):
         self.auth.enroll("민수", "사비스 안녕 나야 민수")
         # STT 가 한 글자 누락한 경우.
-        self.assertTrue(self.auth.verify_voice("사비스 안녕 나야 민"))
+        self.assertTrue(self.auth.verify_voice("사비스 안녕 나야 민")[0])
 
     def test_verify_voice_rejects_different(self):
         self.auth.enroll("민수", "사비스 안녕 나야 민수")
-        self.assertFalse(self.auth.verify_voice("오늘 날씨 어때"))
+        self.assertFalse(self.auth.verify_voice("오늘 날씨 어때")[0])
 
     def test_verify_voice_rejects_empty(self):
         self.auth.enroll("민수", "사비스 안녕 나야")
-        self.assertFalse(self.auth.verify_voice(""))
-        self.assertFalse(self.auth.verify_voice("   "))
+        self.assertFalse(self.auth.verify_voice("")[0])
+        self.assertFalse(self.auth.verify_voice("   ")[0])
 
     def test_verify_voice_unenrolled_returns_false(self):
-        self.assertFalse(self.auth.verify_voice("뭐든지"))
+        self.assertFalse(self.auth.verify_voice("뭐든지")[0])
 
     def test_face_encoding_round_trip(self):
         enc = [0.01 * i for i in range(128)]
@@ -157,10 +157,12 @@ class OwnerAuthTests(unittest.TestCase):
 
     def test_re_enroll_overwrites(self):
         self.auth.enroll("민수", "사비스 안녕 나야")
-        self.auth.enroll("영희", "사비스 안녕 나야 영희")
+        # 사이클 #20 이후 fuzzy matching — 새 패스프레이즈는 옛것과 충분히 달라야
+        # 회귀가 의미 있다(substring 일치 방지).
+        self.auth.enroll("영희", "오늘은 좋은 날씨")
         self.assertEqual(self.auth.face_name, "영희")
-        self.assertFalse(self.auth.verify_voice("사비스 안녕 나야"))
-        self.assertTrue(self.auth.verify_voice("사비스 안녕 나야 영희"))
+        self.assertFalse(self.auth.verify_voice("사비스 안녕 나야")[0])
+        self.assertTrue(self.auth.verify_voice("오늘은 좋은 날씨")[0])
 
     def test_corrupted_file_treated_as_unenrolled(self):
         self.path.write_text("{not json", encoding="utf-8")

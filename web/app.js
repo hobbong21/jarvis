@@ -149,6 +149,9 @@
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.binaryType = 'arraybuffer';
+    // 사이클 #21 — 생산성 패널이 추가 메시지 리스너를 부착할 수 있게 노출.
+    window.__ws = ws;
+    window.__sendWS = send;
 
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {
@@ -2000,4 +2003,221 @@
     tick();
     setInterval(tick, 1000);
   }
+})();
+
+// ─────────────────────────────────────────────────────────────
+// 사이클 #21 — F-04 회의록 + F-10 할 일/캘린더 미니 패널.
+// 기존 app.js 의 send() / WS 인스턴스 (ws) / 메시지 분기 패턴을 그대로 재사용.
+// ─────────────────────────────────────────────────────────────
+(function setupProductivityDock() {
+  const $ = (id) => document.getElementById(id);
+  const dock = $("productivity-dock");
+  if (!dock) return;
+  const fab = $("prod-toggle");
+  const panels = $("prod-panels");
+  fab.addEventListener("click", () => {
+    const open = !panels.hidden;
+    panels.hidden = open;
+    fab.setAttribute("aria-expanded", String(!open));
+    if (open === false) {
+      // 열 때 todo 자동 새로고침.
+      try { window.__sendWS && window.__sendWS({ type: "todo_list" }); } catch (_) {}
+    }
+  });
+
+  // ── 송신 헬퍼 — 기존 send() 가 클로저 안이므로 ws 객체로 직접. ──
+  function sendMsg(obj) {
+    if (window.__sendWS) { window.__sendWS(obj); return; }
+    // 전역 헬퍼가 없으면 window 의 ws 후보를 시도 (보수적 fallback).
+    const w = window.ws || window.__ws;
+    if (w && w.readyState === 1) { w.send(JSON.stringify(obj)); }
+  }
+
+  // ── 회의 패널 ────────────────────────────────────
+  const mStatus = $("meeting-status");
+  const mTitle = $("meeting-title");
+  const mStartBtn = $("meeting-start-btn");
+  const mEndBtn = $("meeting-end-btn");
+  const mText = $("meeting-text");
+  const mAddBtn = $("meeting-add-btn");
+  const mTrans = $("meeting-transcript");
+  const mSummary = $("meeting-summary");
+
+  function setMeetingActive(active) {
+    mStartBtn.disabled = !!active;
+    mEndBtn.disabled = !active;
+    mAddBtn.disabled = !active;
+    mTitle.disabled = !!active;
+    mStatus.textContent = active ? "진행 중" : "대기";
+    mStatus.dataset.state = active ? "active" : "";
+  }
+  setMeetingActive(false);
+
+  mStartBtn.addEventListener("click", () => {
+    mTrans.innerHTML = "";
+    mSummary.hidden = true;
+    sendMsg({ type: "meeting_start", title: mTitle.value || "" });
+  });
+  mEndBtn.addEventListener("click", () => sendMsg({ type: "meeting_end" }));
+  function addUtterance() {
+    const t = mText.value.trim();
+    if (!t) return;
+    sendMsg({ type: "meeting_chunk", text: t, speaker: "Owner" });
+    mText.value = "";
+  }
+  mAddBtn.addEventListener("click", addUtterance);
+  mText.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addUtterance(); }
+  });
+
+  function appendUtterance(ts, sp, txt) {
+    const mm = String(Math.floor(ts / 60)).padStart(2, "0");
+    const ss = String(Math.floor(ts % 60)).padStart(2, "0");
+    const div = document.createElement("div");
+    div.className = "ut";
+    div.innerHTML = `<span class="ts">[${mm}:${ss}]</span>` +
+                    `<span class="sp">${escapeHtml(sp)}:</span> ${escapeHtml(txt)}`;
+    mTrans.appendChild(div);
+    mTrans.scrollTop = mTrans.scrollHeight;
+  }
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[c]);
+  }
+
+  function renderSummary(msg) {
+    let html = "<h4>요약</h4><div>" + escapeHtml(msg.summary || "(없음)") + "</div>";
+    if (Array.isArray(msg.decisions) && msg.decisions.length) {
+      html += "<h4>결정사항</h4><ul>" +
+              msg.decisions.map(d => "<li>" + escapeHtml(d) + "</li>").join("") + "</ul>";
+    }
+    if (Array.isArray(msg.action_items) && msg.action_items.length) {
+      html += "<h4>액션 아이템</h4><ul>" +
+              msg.action_items.map(it =>
+                "<li><b>" + escapeHtml(it.owner || "—") + "</b>: " +
+                escapeHtml(it.task || "") +
+                (it.due ? ` <i>(${escapeHtml(it.due)})</i>` : "") + "</li>"
+              ).join("") + "</ul>";
+    }
+    mSummary.innerHTML = html;
+    mSummary.hidden = false;
+  }
+
+  // ── 할 일 패널 ───────────────────────────────────
+  const tList = $("todo-list");
+  const tTitle = $("todo-title");
+  const tDue = $("todo-due");
+  const tPrio = $("todo-priority");
+  const tAddBtn = $("todo-add-btn");
+  const tRefreshBtn = $("todo-refresh-btn");
+  const tExtractText = $("todo-extract-text");
+  const tExtractBtn = $("todo-extract-btn");
+
+  function addTodo() {
+    const title = tTitle.value.trim();
+    if (!title) return;
+    sendMsg({
+      type: "todo_add", title, due: tDue.value.trim(),
+      priority: tPrio.value, source: "manual",
+    });
+    tTitle.value = ""; tDue.value = "";
+  }
+  tAddBtn.addEventListener("click", addTodo);
+  tTitle.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addTodo(); }
+  });
+  tRefreshBtn.addEventListener("click", () => sendMsg({ type: "todo_list" }));
+  tExtractBtn.addEventListener("click", () => {
+    const t = tExtractText.value.trim();
+    if (t.length < 4) return;
+    sendMsg({ type: "todo_extract", text: t });
+    tExtractText.value = "";
+  });
+
+  function renderTodos(active, done) {
+    tList.innerHTML = "";
+    const items = (active || []).concat((done || []).slice(0, 5));
+    for (const it of items) {
+      const li = document.createElement("li");
+      li.className = "todo-item" + (it.done ? " done" : "");
+      li.innerHTML =
+        `<input type="checkbox" ${it.done ? "checked" : ""} data-id="${escapeHtml(it.id)}">` +
+        `<span class="todo-title">${escapeHtml(it.title)}</span>` +
+        (it.due ? `<span class="todo-due">${escapeHtml(it.due)}</span>` : "") +
+        `<span class="todo-prio" data-p="${escapeHtml(it.priority)}">${escapeHtml(it.priority)}</span>` +
+        `<button type="button" data-remove="${escapeHtml(it.id)}" title="삭제">✕</button>`;
+      tList.appendChild(li);
+    }
+    tList.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener("change", () =>
+        sendMsg({ type: "todo_done", id: cb.dataset.id, done: cb.checked }));
+    });
+    tList.querySelectorAll('button[data-remove]').forEach(btn => {
+      btn.addEventListener("click", () =>
+        sendMsg({ type: "todo_remove", id: btn.dataset.remove }));
+    });
+  }
+
+  // ── 메인 app.js 의 WS 메시지 분기를 보강 (monkey-patch) ──
+  // 기존 코드가 onmessage 리스너를 한 번에 register 하므로, document 전역 이벤트로 hooking.
+  // app.js 가 발행하는 'sarvis:ws' CustomEvent 가 없어도 직접 ws 객체에 추가 리스너 부착.
+  function attachWSListener() {
+    const w = window.__ws || window.ws;
+    if (!w || w.readyState === undefined) {
+      setTimeout(attachWSListener, 500); return;
+    }
+    w.addEventListener("message", (ev) => {
+      let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
+      if (!msg || !msg.type) return;
+      switch (msg.type) {
+        case "meeting_started":
+          setMeetingActive(true);
+          mStatus.textContent = "진행 중: " + (msg.title || "(무제)");
+          mStatus.dataset.state = "active";
+          break;
+        case "meeting_chunk_added":
+          appendUtterance(msg.ts || 0, msg.speaker || "Owner", msg.text || "");
+          break;
+        case "meeting_chunk_skipped":
+          // 무시 — 잡음 필터.
+          break;
+        case "meeting_ended":
+          setMeetingActive(false);
+          mStatus.textContent = "종료됨";
+          mStatus.dataset.state = "ended";
+          renderSummary(msg);
+          break;
+        case "meeting_error":
+          mStatus.textContent = "오류";
+          mStatus.dataset.state = "";
+          alert("[회의] " + (msg.message || "오류"));
+          break;
+        case "todo_list":
+          renderTodos(msg.active || [], msg.done || []);
+          break;
+        case "todo_added":
+        case "todo_done":
+        case "todo_removed":
+          sendMsg({ type: "todo_list" });
+          break;
+        case "todo_extract_result":
+          if (msg.message) {
+            const note = document.createElement("li");
+            note.className = "todo-item";
+            note.innerHTML = `<span class="todo-title" style="color:#93c5fd">${escapeHtml(msg.message)}</span>`;
+            tList.prepend(note);
+            setTimeout(() => note.remove(), 4000);
+          }
+          sendMsg({ type: "todo_list" });
+          break;
+        case "todo_error":
+          alert("[할 일] " + (msg.message || "오류"));
+          break;
+      }
+    });
+    // 초기 todo 목록 로드.
+    setTimeout(() => sendMsg({ type: "todo_list" }), 1000);
+  }
+  attachWSListener();
 })();
