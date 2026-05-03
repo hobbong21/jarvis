@@ -2,6 +2,26 @@
 
 A multimodal AI assistant inspired by the 4-stage agent pattern (Task Planning → Model Selection → Task Execution → Response Generation). Features face recognition, voice interaction, and tool-augmented intelligence.
 
+## 기획서 업데이트 — v1.0 (2026-05-03)
+
+새 기획서 `attached_assets/Sarvis_기획서_및_개발요구사항_1777803382509.docx`
+(74KB, 4325줄)에 **Chapter 17 — Sarvis Harness System (Control & Evolution
+Harness)** 가 신규 추가되었다. F-01~F-13 기능 매트릭스는 변동 없음.
+
+**Harness 핵심**: AI 비서 자체를 ① Observe(관찰) ② Evaluate(평가) ③ Tune(통제)
+④ Evolve(진화) 시키는 메타 관리 프레임워크. 25개 백로그 항목(HARN-01~25,
+P0 17개 + P1 6개 + P2 2개, 총 ~174 인일).
+
+**SARVIS 단일 주인 시스템 맞춤 우선순위** (`docs/SARVIS_HARNESS_MATRIX.md` 상세):
+- **사이클 #22** (Observe v1): HARN-01 축소(commands 테이블 trace 컬럼 확장),
+  HARN-12(👍/👎 피드백 UI), HARN-05 미니("내 Sarvis" 패널).
+- **사이클 #23** (Tune v1): HARN-06(성향 8축 슬라이더), HARN-07(페르소나
+  프리셋 6종) — F-13 자동 충족.
+- **사이클 #24** (Evaluate+Evolve v1): HARN-11(LLM-as-Judge), HARN-10 보강,
+  HARN-14 미니(suggestions.json).
+- **보류** (단일 주인엔 과잉): HARN-02 ClickHouse, HARN-04 Grafana, HARN-17 A/B,
+  HARN-18 Canary, HARN-23 옵트인 학습, HARN-24 SOC2, HARN-25 커뮤니티 규칙.
+
 ## Cycle #21 — 회의록(F-04) + 할 일/캘린더(F-10)
 
 기획서 P0/P1 미구현 우선순위 두 항목을 한 사이클로 묶어 추가.

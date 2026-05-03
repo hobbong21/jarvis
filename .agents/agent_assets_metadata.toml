@@ -6,3 +6,9 @@ id = "V1yRE6m19WGdw4yMq7_uc"
 uri = "file://docs/SARVIS_DEVELOPMENT_REPORT.md"
 type = "text"
 title = "SARVIS 개발 결과 보고서 (사이클 #18~#21)"
+
+[[outputs]]
+id = "uUxkeZVRyQMGUZ-QcjNf8"
+uri = "file://docs/SARVIS_HARNESS_MATRIX.md"
+type = "text"
+title = "SARVIS — Harness System 백로그 매트릭스 (기획서 v1.0 Ch.17)"
