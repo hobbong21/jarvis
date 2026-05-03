@@ -10,7 +10,6 @@ L0 자율 등급 (Observe-only) — 어떤 변경도 적용하지 않음.
 """
 from __future__ import annotations
 
-import os
 import random
 import time
 import uuid

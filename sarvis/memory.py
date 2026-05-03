@@ -34,7 +34,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 DB_PATH = os.environ.get("SARVIS_MEMORY_DB", "data/memory.db")
 

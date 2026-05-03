@@ -2,7 +2,7 @@
 import re
 import time
 import traceback
-from typing import Generator, Iterator, Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 from .config import cfg
 from .emotion import Emotion, parse_emotion

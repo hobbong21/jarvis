@@ -20,16 +20,14 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .audio_io import EdgeTTS, WhisperSTT, OpenAIWhisperSTT, make_stt
+from .audio_io import EdgeTTS, make_stt
 from .brain import Brain, _friendly_error, _model_switch_friendly
 from .config import cfg
-from .emotion import Emotion
 from .memory import get_memory, extract_user_facts
 from .stt_filter import clean_stt_text, build_dynamic_initial_prompt
 from .tools import ToolExecutor
