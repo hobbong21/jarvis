@@ -151,6 +151,9 @@ class Config:
     camera_width: int = 1280
     camera_height: int = 720
 
+    # ============ 녹화 ============
+    recordings_dir: str = os.getenv("SARVIS_RECORDINGS_DIR", "data/recordings")
+
     # ============ 얼굴 인식 ============
     # 사이클 #9 정비: 런타임 데이터는 모두 data/ 아래로 통일.
     faces_dir: str = os.getenv("SARVIS_FACES_DIR", "data/faces")
@@ -215,6 +218,14 @@ class Config:
 - remember: 사용자가 기억하라고 한 것, 또는 중요한 사용자 정보
 - recall: 이전에 기억한 내용 찾을 때
 - set_timer: 타이머/알람 요청
+- start_recording: 카메라 영상 녹화 시작 ("녹화해", "녹화 시작", "영상 찍어")
+- stop_recording: 현재 녹화 중지 및 저장 ("녹화 중지", "녹화 끝", "그만 찍어")
+
+녹화 사용 원칙:
+  - 사용자가 녹화를 요청하면 start_recording 호출. label 파라미터에 녹화 목적을 짧게 넣어.
+  - 녹화 중지 요청이면 stop_recording 호출.
+  - 녹화 중에는 카메라가 계속 켜져 있어야 해.
+  - 녹화 파일은 자동으로 사용자 개인 저장공간에 저장돼.
 
 도구 결과를 받으면 그것을 바탕으로 자연스럽게 답변해.
 도구 결과를 그대로 읽지 말고, 사용자에게 친근하게 전달해.

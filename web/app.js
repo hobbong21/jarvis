@@ -88,6 +88,11 @@
   let recording = false;
   let camStream = null;
   let frameInterval = null;
+  let videoRecorder = null;
+  let videoChunks = [];
+  let videoRecording = false;
+  let videoRecordingStart = 0;
+  let videoRecordingLabel = '';
   let mainOrb = null;
   let secondOrb = null;
   let compareMode = false;
@@ -430,6 +435,12 @@
         break;
       case 'enroll_owner_result':
         applyEnrollResult(m);
+        break;
+      case 'recording_cmd':
+        handleRecordingCmd(m);
+        break;
+      case 'recording_saved':
+        handleRecordingSaved(m);
         break;
     }
   }
@@ -2856,6 +2867,98 @@
     sendMsg({ type: "ha_kill_switch", on });
   });
   setTimeout(() => sendMsg({ type: "ha_growth_diary", limit: 10 }), 2000);
+
+  // -------- 녹화 기능 --------
+  function handleRecordingCmd(m) {
+    if (m.action === 'start') {
+      startVideoRecording(m.label || '');
+    } else if (m.action === 'stop') {
+      stopVideoRecording();
+    }
+  }
+
+  function handleRecordingSaved(m) {
+    const dur = m.duration_s ? `${m.duration_s}초` : '';
+    const size = m.size_mb ? `${m.size_mb}MB` : '';
+    const label = m.label ? ` (${m.label})` : '';
+    flash(`녹화 저장 완료${label} — ${dur}, ${size}`, 'ok');
+  }
+
+  function startVideoRecording(label) {
+    if (videoRecording) return;
+    if (!camStream) { flash('카메라가 꺼져 있습니다.', 'error'); return; }
+    videoChunks = [];
+    videoRecordingLabel = label;
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+      ? 'video/webm;codecs=vp9' : 'video/webm';
+    try {
+      videoRecorder = new MediaRecorder(camStream, { mimeType });
+    } catch (e) {
+      flash('녹화를 시작할 수 없습니다: ' + e.message, 'error');
+      return;
+    }
+    videoRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) videoChunks.push(e.data);
+    };
+    videoRecorder.onstop = () => {
+      const blob = new Blob(videoChunks, { type: 'video/webm' });
+      videoChunks = [];
+      sendRecordingBlob(blob);
+      updateRecordingUI(false);
+    };
+    videoRecorder.start(1000);
+    videoRecording = true;
+    videoRecordingStart = Date.now();
+    updateRecordingUI(true);
+  }
+
+  function stopVideoRecording() {
+    if (!videoRecording || !videoRecorder) return;
+    videoRecording = false;
+    try { videoRecorder.stop(); } catch (_) {}
+  }
+
+  function sendRecordingBlob(blob) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    blob.arrayBuffer().then(buf => {
+      const durationMs = Date.now() - videoRecordingStart;
+      const labelBytes = new TextEncoder().encode(videoRecordingLabel);
+      const header = new Uint8Array(1 + 4 + 2 + labelBytes.length);
+      header[0] = 0x09;
+      header[1] = (durationMs >> 24) & 0xFF;
+      header[2] = (durationMs >> 16) & 0xFF;
+      header[3] = (durationMs >> 8) & 0xFF;
+      header[4] = durationMs & 0xFF;
+      header[5] = (labelBytes.length >> 8) & 0xFF;
+      header[6] = labelBytes.length & 0xFF;
+      header.set(labelBytes, 7);
+      const payload = new Uint8Array(header.length + buf.byteLength);
+      payload.set(header, 0);
+      payload.set(new Uint8Array(buf), header.length);
+      ws.send(payload.buffer);
+    });
+  }
+
+  let recTimerInterval = null;
+  function updateRecordingUI(active) {
+    const indicator = document.getElementById('recording-indicator');
+    const timeEl = document.getElementById('recording-time');
+    if (!indicator) return;
+    if (active) {
+      indicator.classList.add('active');
+      const start = Date.now();
+      recTimerInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - start) / 1000);
+        const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+        const ss = String(elapsed % 60).padStart(2, '0');
+        if (timeEl) timeEl.textContent = `${mm}:${ss}`;
+      }, 500);
+    } else {
+      indicator.classList.remove('active');
+      if (recTimerInterval) { clearInterval(recTimerInterval); recTimerInterval = null; }
+      if (timeEl) timeEl.textContent = '00:00';
+    }
+  }
 
   attachWSListener();
 })();

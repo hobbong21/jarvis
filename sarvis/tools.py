@@ -155,6 +155,33 @@ TOOL_DEFINITIONS = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "start_recording",
+        "description": (
+            "Start recording video from the user's camera. Use when the user asks "
+            "'녹화해', '녹화 시작', 'record', 'start recording', '찍어', '영상 찍어'. "
+            "Returns confirmation that recording has started."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Optional label for this recording (e.g. '운동 기록', '요리 과정')",
+                }
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "stop_recording",
+        "description": (
+            "Stop the current video recording and save the file. Use when the user asks "
+            "'녹화 중지', '녹화 끝', '녹화 멈춰', 'stop recording', '그만 찍어'. "
+            "Returns the saved file info."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "observe_action",
         "description": (
             "Analyze the user's recent action/behavior visible on camera. "
@@ -187,12 +214,16 @@ class ToolExecutor:
         on_event: Optional[Callable[[str, str], None]] = None,
         on_timer: Optional[Callable[[str], None]] = None,
         face_registry=None,
+        on_recording: Optional[Callable[[str, str], None]] = None,
     ):
         self.vision = vision_system
         self.client = anthropic_client  # Claude Vision 호출용
         self.on_event = on_event       # callback(tool_name, status: "start"|"end")
         self.on_timer = on_timer       # callback(label) — 타이머 만료 시 호출
         self.face_registry = face_registry  # FaceRegistry (선택)
+        self.on_recording = on_recording   # callback(action, label) — "start"|"stop"
+        self.is_recording = False
+        self._recording_label = ""
 
         # 사이클 #9 정비: 도구의 영속 메모리도 data/ 아래로 통일.
         self.memory_path = Path(os.environ.get("SARVIS_TOOL_MEMORY", "data/memory.json"))
@@ -1021,6 +1052,32 @@ class ToolExecutor:
         else:
             human = f"{seconds}초"
         return f"{human} 타이머 '{label}' 설정됨"
+
+    # -------- 녹화 --------
+    def _t_start_recording(self, label: str = "") -> str:
+        if self.is_recording:
+            return "이미 녹화 중입니다. 먼저 녹화를 중지해주세요."
+        frame = self.vision.read()
+        if frame is None:
+            return "카메라가 켜져 있지 않습니다. 먼저 카메라를 시작해주세요."
+        self.is_recording = True
+        self._recording_label = label or ""
+        if self.on_recording:
+            self.on_recording("start", self._recording_label)
+        msg = "녹화를 시작했습니다."
+        if label:
+            msg += f" (라벨: {label})"
+        return msg
+
+    def _t_stop_recording(self) -> str:
+        if not self.is_recording:
+            return "현재 녹화 중이 아닙니다."
+        self.is_recording = False
+        label = self._recording_label
+        self._recording_label = ""
+        if self.on_recording:
+            self.on_recording("stop", label)
+        return "녹화를 중지했습니다. 파일을 저장하고 있습니다."
 
     # -------- 메모리 입출력 --------
     def _load_memory(self) -> dict:

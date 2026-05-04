@@ -134,6 +134,17 @@ CREATE TABLE IF NOT EXISTS knowledge (
     updated_at    REAL    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS recordings (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       TEXT    NOT NULL,
+    filename      TEXT    NOT NULL,
+    file_path     TEXT    NOT NULL,
+    label         TEXT    NOT NULL DEFAULT '',
+    duration_ms   INTEGER NOT NULL DEFAULT 0,
+    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    created_at    REAL    NOT NULL
+);
+
 -- 사이클 #22 (HARN-12): 사용자 피드백 (👍/👎 + 코멘트). command 단위로 1건.
 -- rating: -1 (👎) / +1 (👍) / 0 (취소). UNIQUE(command_id) 로 토글 의미.
 CREATE TABLE IF NOT EXISTS command_feedback (
@@ -1099,6 +1110,54 @@ class Memory:
                     os.remove(p)
                 except OSError:
                     pass
+        return True
+
+    # ── 녹화 ──
+    def save_recording(
+        self,
+        user_id: str,
+        filename: str,
+        file_path: str,
+        label: str = "",
+        duration_ms: int = 0,
+        size_bytes: int = 0,
+    ) -> int:
+        now = time.time()
+        with _conn_ctx(self.path) as conn:
+            cur = conn.execute(
+                "INSERT INTO recordings (user_id, filename, file_path, label, "
+                "duration_ms, size_bytes, created_at) VALUES (?,?,?,?,?,?,?)",
+                (user_id, filename, file_path, label, duration_ms, size_bytes, now),
+            )
+            return int(cur.lastrowid)
+
+    def list_recordings(
+        self,
+        user_id: str,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with _conn_ctx(self.path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM recordings WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_recording(self, rec_id: int) -> bool:
+        with _conn_ctx(self.path) as conn:
+            row = conn.execute(
+                "SELECT file_path FROM recordings WHERE id=?", (int(rec_id),)
+            ).fetchone()
+            if not row:
+                return False
+            conn.execute("DELETE FROM recordings WHERE id=?", (int(rec_id),))
+        fp = row["file_path"]
+        if fp and os.path.isfile(fp):
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
         return True
 
     # ── 사이클 #22 (HARN-12 + HARN-05): 사용자 피드백 + My Sarvis 요약 ──

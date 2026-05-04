@@ -189,6 +189,9 @@ KNOWLEDGE_DIR = os.environ.get(
 )
 os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
 
+RECORDINGS_DIR = cfg.recordings_dir
+os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
 print("[3/3] 설정 완료.")
 
 print("=" * 60)
@@ -230,6 +233,10 @@ class UserSession:
         self._turn_tool_t0: Optional[float] = None
         self._turn_tool_total_ms: float = 0.0
 
+        self.is_recording = False
+        self._recording_label = ""
+        self._recording_start_ts: float = 0.0
+
         if cfg.llm_backend == "claude" and cfg.anthropic_api_key:
             self._attach_tools()
 
@@ -267,8 +274,19 @@ class UserSession:
                 on_event=self._on_tool_event,
                 on_timer=self._on_timer,
                 face_registry=FACE_REGISTRY,
+                on_recording=self._on_recording,
             )
         self.brain.tools = self.tools
+
+    def _on_recording(self, action: str, label: str):
+        if action == "start":
+            self.is_recording = True
+            self._recording_label = label
+            self._recording_start_ts = time.time()
+            self._emit({"type": "recording_cmd", "action": "start", "label": label})
+        elif action == "stop":
+            self.is_recording = False
+            self._emit({"type": "recording_cmd", "action": "stop", "label": label})
 
     def detach_tools(self):
         self.brain.tools = None
@@ -1374,6 +1392,51 @@ async def websocket_endpoint(ws: WebSocket):
                     except Exception as e:
                         print(f"[WS 0x{kind:02x} command media save] {e}")
                         await emit(type="error", message="명령 미디어를 저장하지 못했습니다.")
+                    continue
+                elif kind == 0x09:
+                    if not payload or len(payload) < 10:
+                        continue
+                    try:
+                        dur_bytes = payload[:4]
+                        duration_ms = int.from_bytes(dur_bytes, "big")
+                        label_len = int.from_bytes(payload[4:6], "big")
+                        label = payload[6:6 + label_len].decode("utf-8", errors="replace") if label_len else ""
+                        blob = payload[6 + label_len:]
+                        if not blob:
+                            continue
+                        ts = time.strftime("%Y%m%d_%H%M%S")
+                        safe_label = re.sub(r'[^\w가-힣-]', '_', label)[:30] if label else ""
+                        fname = f"{ts}_{safe_label}.webm" if safe_label else f"{ts}.webm"
+                        user_dir = os.path.join(RECORDINGS_DIR, session.memory_user_id)
+                        os.makedirs(user_dir, exist_ok=True)
+                        fpath = os.path.join(user_dir, fname)
+                        await asyncio.to_thread(_write_bytes, fpath, blob)
+                        rec_id = await asyncio.to_thread(
+                            functools.partial(
+                                session.memory.save_recording,
+                                user_id=session.memory_user_id,
+                                filename=fname,
+                                file_path=fpath,
+                                label=label,
+                                duration_ms=duration_ms,
+                                size_bytes=len(blob),
+                            )
+                        )
+                        size_mb = len(blob) / (1024 * 1024)
+                        dur_s = duration_ms / 1000
+                        await emit(
+                            type="recording_saved",
+                            id=rec_id,
+                            filename=fname,
+                            label=label,
+                            duration_s=round(dur_s, 1),
+                            size_mb=round(size_mb, 2),
+                        )
+                        print(f"[녹화 저장] {fname} ({size_mb:.1f}MB, {dur_s:.1f}s)")
+                    except Exception as e:
+                        print(f"[WS 0x09 recording save] {e}")
+                        await emit(type="error", message="녹화 파일을 저장하지 못했습니다.")
+                    continue
                 continue
 
             # 텍스트 (JSON)
