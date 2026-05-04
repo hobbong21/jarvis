@@ -25,8 +25,10 @@ _INTENT_ANNOUNCE_RE = re.compile(
     r"한\s*번\s*(검색|찾아|알아)|"
     r"잠시(\s*만)?\s*(기다|있)|"
     r"잠깐(만)?\s*(기다|있)|"
-    r"let me (search|look|check)|"
-    r"i('?ll| will) (search|look|check)|"
+    r"(녹화|녹음|사진|캡처|촬영).{0,15}(시작|찍|켜|해\s*드리|할게|하겠|해\s*볼게|해드릴게)|"
+    r"(녹화|녹음|사진|캡처|촬영).{0,5}(할게요|하겠습니다|드리겠습니다|드릴게요|해드릴게요)|"
+    r"let me (search|look|check|start|record)|"
+    r"i('?ll| will) (search|look|check|start|record)|"
     r"give me a (sec|moment)"
     r")",
     re.IGNORECASE,
