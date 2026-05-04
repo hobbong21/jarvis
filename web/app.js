@@ -2438,6 +2438,252 @@
     tick();
     setInterval(tick, 1000);
   }
+
+  // -------- 녹화/사진 기능 --------
+  function handleRecordingCmd(m) {
+    const kind = m.kind || 'video';
+    if (kind === 'audio') {
+      handleAudioRecordingCmd(m);
+      return;
+    }
+    if (m.action === 'start') {
+      startVideoRecording(m.label || '');
+    } else if (m.action === 'stop') {
+      stopVideoRecording();
+    }
+  }
+
+  function handleAudioRecordingCmd(m) {
+    if (m.action === 'start') {
+      startAudioRecording(m.label || '');
+    } else if (m.action === 'stop') {
+      stopAudioRecording();
+    }
+  }
+
+  function handleRecordingSaved(m) {
+    const label = m.label ? ` (${m.label})` : '';
+    if (m.kind === 'photo') {
+      const size = m.size_mb ? `${m.size_mb}MB` : '';
+      flash(`📷 사진 저장 완료${label} — ${size}`, 'ok');
+      return;
+    }
+    const dur = m.duration_s ? `${m.duration_s}초` : '';
+    const size = m.size_mb ? `${m.size_mb}MB` : '';
+    const kindLabel = (m.kind === 'audio') ? '녹음' : '녹화';
+    flash(`${kindLabel} 저장 완료${label} — ${dur}, ${size}`, 'ok');
+  }
+
+  function captureAndSendPhoto(label) {
+    if (!camStream || !camVideo || !camVideo.videoWidth) {
+      flash('카메라가 꺼져 있습니다.', 'error');
+      return;
+    }
+    const w = camVideo.videoWidth;
+    const h = camVideo.videoHeight;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(camVideo, 0, 0, w, h);
+    c.toBlob((blob) => {
+      if (!blob) { flash('사진 캡처 실패', 'error'); return; }
+      blob.arrayBuffer().then((buf) => {
+        const jpegBytes = new Uint8Array(buf);
+        const labelBytes = new TextEncoder().encode(label);
+        const header = new Uint8Array(3 + labelBytes.length);
+        header[0] = 0x0B;
+        header[1] = (labelBytes.length >> 8) & 0xFF;
+        header[2] = labelBytes.length & 0xFF;
+        header.set(labelBytes, 3);
+        const packet = new Uint8Array(header.length + jpegBytes.length);
+        packet.set(header, 0);
+        packet.set(jpegBytes, header.length);
+        if (ws && ws.readyState === 1) {
+          ws.send(packet.buffer);
+        }
+      });
+    }, 'image/jpeg', 0.92);
+  }
+
+  function startVideoRecording(label) {
+    if (videoRecording) return;
+    if (!camStream) { flash('카메라가 꺼져 있습니다.', 'error'); return; }
+    videoChunks = [];
+    videoRecordingLabel = label;
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+      ? 'video/webm;codecs=vp9' : 'video/webm';
+    try {
+      videoRecorder = new MediaRecorder(camStream, { mimeType });
+    } catch (e) {
+      flash('녹화를 시작할 수 없습니다: ' + e.message, 'error');
+      return;
+    }
+    videoRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) videoChunks.push(e.data);
+    };
+    videoRecorder.onstop = () => {
+      const blob = new Blob(videoChunks, { type: 'video/webm' });
+      videoChunks = [];
+      videoRecording = false;
+      videoRecorder = null;
+      flash('녹화 중지. 서버로 전송 중...', 'ok');
+      sendRecordingBlob(blob);
+      updateRecordingUI(false);
+    };
+    videoRecorder.start(1000);
+    videoRecording = true;
+    videoRecordingStart = Date.now();
+    updateRecordingUI(true);
+    flash('🔴 영상 녹화를 시작했습니다.' + (label ? ` (${label})` : ''), 'ok');
+  }
+
+  function stopVideoRecording() {
+    if (!videoRecorder) return;
+    if (!videoRecording) return;
+    videoRecording = false;
+    try { videoRecorder.stop(); } catch (_) {
+      videoRecorder = null;
+      updateRecordingUI(false);
+    }
+  }
+
+  function sendRecordingBlob(blob) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    blob.arrayBuffer().then(buf => {
+      const durationMs = Date.now() - videoRecordingStart;
+      const labelBytes = new TextEncoder().encode(videoRecordingLabel);
+      const header = new Uint8Array(1 + 4 + 2 + labelBytes.length);
+      header[0] = 0x09;
+      header[1] = (durationMs >> 24) & 0xFF;
+      header[2] = (durationMs >> 16) & 0xFF;
+      header[3] = (durationMs >> 8) & 0xFF;
+      header[4] = durationMs & 0xFF;
+      header[5] = (labelBytes.length >> 8) & 0xFF;
+      header[6] = labelBytes.length & 0xFF;
+      header.set(labelBytes, 7);
+      const payload = new Uint8Array(header.length + buf.byteLength);
+      payload.set(header, 0);
+      payload.set(new Uint8Array(buf), header.length);
+      ws.send(payload.buffer);
+    });
+  }
+
+  let recTimerInterval = null;
+  function updateRecordingUI(active) {
+    const indicator = document.getElementById('recording-indicator');
+    const timeEl = document.getElementById('recording-time');
+    if (!indicator) return;
+    if (active) {
+      indicator.classList.add('active');
+      const start = Date.now();
+      recTimerInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - start) / 1000);
+        const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+        const ss = String(elapsed % 60).padStart(2, '0');
+        if (timeEl) timeEl.textContent = `${mm}:${ss}`;
+      }, 500);
+    } else {
+      indicator.classList.remove('active');
+      if (recTimerInterval) { clearInterval(recTimerInterval); recTimerInterval = null; }
+      if (timeEl) timeEl.textContent = '00:00';
+    }
+  }
+
+  // -------- 음성 녹음 기능 --------
+  async function startAudioRecording(label) {
+    if (audioRecording) return;
+    audioChunks = [];
+    audioRecordingLabel = label;
+    try {
+      audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      flash('마이크 권한이 필요합니다.', 'error');
+      return;
+    }
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus' : 'audio/webm';
+    try {
+      audioRecorder = new MediaRecorder(audioStream, { mimeType });
+    } catch (e) {
+      flash('녹음을 시작할 수 없습니다: ' + e.message, 'error');
+      audioStream.getTracks().forEach(t => t.stop());
+      audioStream = null;
+      return;
+    }
+    audioRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) audioChunks.push(e.data);
+    };
+    audioRecorder.onstop = () => {
+      const blob = new Blob(audioChunks, { type: 'audio/webm' });
+      audioChunks = [];
+      audioRecording = false;
+      audioRecorder = null;
+      if (audioStream) {
+        audioStream.getTracks().forEach(t => t.stop());
+        audioStream = null;
+      }
+      flash('녹음 중지. 서버로 전송 중...', 'ok');
+      sendAudioRecordingBlob(blob);
+      updateAudioRecordingUI(false);
+    };
+    audioRecorder.start(1000);
+    audioRecording = true;
+    audioRecordingStart = Date.now();
+    updateAudioRecordingUI(true);
+    flash('🎙️ 음성 녹음을 시작했습니다.' + (label ? ` (${label})` : ''), 'ok');
+  }
+
+  function stopAudioRecording() {
+    if (!audioRecorder) return;
+    if (!audioRecording) return;
+    audioRecording = false;
+    try { audioRecorder.stop(); } catch (_) {
+      audioRecorder = null;
+      if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
+      updateAudioRecordingUI(false);
+    }
+  }
+
+  function sendAudioRecordingBlob(blob) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    blob.arrayBuffer().then(buf => {
+      const durationMs = Date.now() - audioRecordingStart;
+      const labelBytes = new TextEncoder().encode(audioRecordingLabel);
+      const header = new Uint8Array(1 + 4 + 2 + labelBytes.length);
+      header[0] = 0x0A;
+      header[1] = (durationMs >> 24) & 0xFF;
+      header[2] = (durationMs >> 16) & 0xFF;
+      header[3] = (durationMs >> 8) & 0xFF;
+      header[4] = durationMs & 0xFF;
+      header[5] = (labelBytes.length >> 8) & 0xFF;
+      header[6] = labelBytes.length & 0xFF;
+      header.set(labelBytes, 7);
+      const payload = new Uint8Array(header.length + buf.byteLength);
+      payload.set(header, 0);
+      payload.set(new Uint8Array(buf), header.length);
+      ws.send(payload.buffer);
+    });
+  }
+
+  let audioRecTimerInterval = null;
+  function updateAudioRecordingUI(active) {
+    const indicator = document.getElementById('audio-recording-indicator');
+    const timeEl = document.getElementById('audio-recording-time');
+    if (!indicator) return;
+    if (active) {
+      indicator.classList.add('active');
+      const start = Date.now();
+      audioRecTimerInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - start) / 1000);
+        const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+        const ss = String(elapsed % 60).padStart(2, '0');
+        if (timeEl) timeEl.textContent = `${mm}:${ss}`;
+      }, 500);
+    } else {
+      indicator.classList.remove('active');
+      if (audioRecTimerInterval) { clearInterval(audioRecTimerInterval); audioRecTimerInterval = null; }
+      if (timeEl) timeEl.textContent = '00:00';
+    }
+  }
 })();
 
 // ─────────────────────────────────────────────────────────────
@@ -3235,253 +3481,6 @@
     sendMsg({ type: "ha_kill_switch", on });
   });
   setTimeout(() => sendMsg({ type: "ha_growth_diary", limit: 10 }), 2000);
-
-  // -------- 녹화 기능 --------
-  function handleRecordingCmd(m) {
-    const kind = m.kind || 'video';
-    if (kind === 'audio') {
-      handleAudioRecordingCmd(m);
-      return;
-    }
-    if (m.action === 'start') {
-      startVideoRecording(m.label || '');
-    } else if (m.action === 'stop') {
-      stopVideoRecording();
-    }
-  }
-
-  function handleAudioRecordingCmd(m) {
-    if (m.action === 'start') {
-      startAudioRecording(m.label || '');
-    } else if (m.action === 'stop') {
-      stopAudioRecording();
-    }
-  }
-
-  function handleRecordingSaved(m) {
-    const label = m.label ? ` (${m.label})` : '';
-    if (m.kind === 'photo') {
-      const size = m.size_mb ? `${m.size_mb}MB` : '';
-      flash(`📷 사진 저장 완료${label} — ${size}`, 'ok');
-      return;
-    }
-    const dur = m.duration_s ? `${m.duration_s}초` : '';
-    const size = m.size_mb ? `${m.size_mb}MB` : '';
-    const kindLabel = (m.kind === 'audio') ? '녹음' : '녹화';
-    flash(`${kindLabel} 저장 완료${label} — ${dur}, ${size}`, 'ok');
-  }
-
-  function captureAndSendPhoto(label) {
-    if (!camStream || !camVideo || !camVideo.videoWidth) {
-      flash('카메라가 꺼져 있습니다.', 'error');
-      return;
-    }
-    const w = camVideo.videoWidth;
-    const h = camVideo.videoHeight;
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    c.getContext('2d').drawImage(camVideo, 0, 0, w, h);
-    c.toBlob((blob) => {
-      if (!blob) { flash('사진 캡처 실패', 'error'); return; }
-      blob.arrayBuffer().then((buf) => {
-        const jpegBytes = new Uint8Array(buf);
-        const labelBytes = new TextEncoder().encode(label);
-        const header = new Uint8Array(3 + labelBytes.length);
-        header[0] = 0x0B;
-        header[1] = (labelBytes.length >> 8) & 0xFF;
-        header[2] = labelBytes.length & 0xFF;
-        header.set(labelBytes, 3);
-        const packet = new Uint8Array(header.length + jpegBytes.length);
-        packet.set(header, 0);
-        packet.set(jpegBytes, header.length);
-        const ws = window.__ws || window.ws;
-        if (ws && ws.readyState === 1) {
-          ws.send(packet.buffer);
-        }
-      });
-    }, 'image/jpeg', 0.92);
-  }
-
-  function startVideoRecording(label) {
-    if (videoRecording) return;
-    if (!camStream) { flash('카메라가 꺼져 있습니다.', 'error'); return; }
-    videoChunks = [];
-    videoRecordingLabel = label;
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-      ? 'video/webm;codecs=vp9' : 'video/webm';
-    try {
-      videoRecorder = new MediaRecorder(camStream, { mimeType });
-    } catch (e) {
-      flash('녹화를 시작할 수 없습니다: ' + e.message, 'error');
-      return;
-    }
-    videoRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) videoChunks.push(e.data);
-    };
-    videoRecorder.onstop = () => {
-      const blob = new Blob(videoChunks, { type: 'video/webm' });
-      videoChunks = [];
-      videoRecording = false;
-      videoRecorder = null;
-      flash('녹화 중지. 서버로 전송 중...', 'ok');
-      sendRecordingBlob(blob);
-      updateRecordingUI(false);
-    };
-    videoRecorder.start(1000);
-    videoRecording = true;
-    videoRecordingStart = Date.now();
-    updateRecordingUI(true);
-    flash('🔴 영상 녹화를 시작했습니다.' + (label ? ` (${label})` : ''), 'ok');
-  }
-
-  function stopVideoRecording() {
-    if (!videoRecorder) return;
-    if (!videoRecording) return;
-    videoRecording = false;
-    try { videoRecorder.stop(); } catch (_) {
-      videoRecorder = null;
-      updateRecordingUI(false);
-    }
-  }
-
-  function sendRecordingBlob(blob) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    blob.arrayBuffer().then(buf => {
-      const durationMs = Date.now() - videoRecordingStart;
-      const labelBytes = new TextEncoder().encode(videoRecordingLabel);
-      const header = new Uint8Array(1 + 4 + 2 + labelBytes.length);
-      header[0] = 0x09;
-      header[1] = (durationMs >> 24) & 0xFF;
-      header[2] = (durationMs >> 16) & 0xFF;
-      header[3] = (durationMs >> 8) & 0xFF;
-      header[4] = durationMs & 0xFF;
-      header[5] = (labelBytes.length >> 8) & 0xFF;
-      header[6] = labelBytes.length & 0xFF;
-      header.set(labelBytes, 7);
-      const payload = new Uint8Array(header.length + buf.byteLength);
-      payload.set(header, 0);
-      payload.set(new Uint8Array(buf), header.length);
-      ws.send(payload.buffer);
-    });
-  }
-
-  let recTimerInterval = null;
-  function updateRecordingUI(active) {
-    const indicator = document.getElementById('recording-indicator');
-    const timeEl = document.getElementById('recording-time');
-    if (!indicator) return;
-    if (active) {
-      indicator.classList.add('active');
-      const start = Date.now();
-      recTimerInterval = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - start) / 1000);
-        const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
-        const ss = String(elapsed % 60).padStart(2, '0');
-        if (timeEl) timeEl.textContent = `${mm}:${ss}`;
-      }, 500);
-    } else {
-      indicator.classList.remove('active');
-      if (recTimerInterval) { clearInterval(recTimerInterval); recTimerInterval = null; }
-      if (timeEl) timeEl.textContent = '00:00';
-    }
-  }
-
-  // -------- 음성 녹음 기능 --------
-  async function startAudioRecording(label) {
-    if (audioRecording) return;
-    audioChunks = [];
-    audioRecordingLabel = label;
-    try {
-      audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e) {
-      flash('마이크 권한이 필요합니다.', 'error');
-      return;
-    }
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus' : 'audio/webm';
-    try {
-      audioRecorder = new MediaRecorder(audioStream, { mimeType });
-    } catch (e) {
-      flash('녹음을 시작할 수 없습니다: ' + e.message, 'error');
-      audioStream.getTracks().forEach(t => t.stop());
-      audioStream = null;
-      return;
-    }
-    audioRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) audioChunks.push(e.data);
-    };
-    audioRecorder.onstop = () => {
-      const blob = new Blob(audioChunks, { type: 'audio/webm' });
-      audioChunks = [];
-      audioRecording = false;
-      audioRecorder = null;
-      if (audioStream) {
-        audioStream.getTracks().forEach(t => t.stop());
-        audioStream = null;
-      }
-      flash('녹음 중지. 서버로 전송 중...', 'ok');
-      sendAudioRecordingBlob(blob);
-      updateAudioRecordingUI(false);
-    };
-    audioRecorder.start(1000);
-    audioRecording = true;
-    audioRecordingStart = Date.now();
-    updateAudioRecordingUI(true);
-    flash('🎙️ 음성 녹음을 시작했습니다.' + (label ? ` (${label})` : ''), 'ok');
-  }
-
-  function stopAudioRecording() {
-    if (!audioRecorder) return;
-    if (!audioRecording) return;
-    audioRecording = false;
-    try { audioRecorder.stop(); } catch (_) {
-      audioRecorder = null;
-      if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
-      updateAudioRecordingUI(false);
-    }
-  }
-
-  function sendAudioRecordingBlob(blob) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    blob.arrayBuffer().then(buf => {
-      const durationMs = Date.now() - audioRecordingStart;
-      const labelBytes = new TextEncoder().encode(audioRecordingLabel);
-      const header = new Uint8Array(1 + 4 + 2 + labelBytes.length);
-      header[0] = 0x0A;
-      header[1] = (durationMs >> 24) & 0xFF;
-      header[2] = (durationMs >> 16) & 0xFF;
-      header[3] = (durationMs >> 8) & 0xFF;
-      header[4] = durationMs & 0xFF;
-      header[5] = (labelBytes.length >> 8) & 0xFF;
-      header[6] = labelBytes.length & 0xFF;
-      header.set(labelBytes, 7);
-      const payload = new Uint8Array(header.length + buf.byteLength);
-      payload.set(header, 0);
-      payload.set(new Uint8Array(buf), header.length);
-      ws.send(payload.buffer);
-    });
-  }
-
-  let audioRecTimerInterval = null;
-  function updateAudioRecordingUI(active) {
-    const indicator = document.getElementById('audio-recording-indicator');
-    const timeEl = document.getElementById('audio-recording-time');
-    if (!indicator) return;
-    if (active) {
-      indicator.classList.add('active');
-      const start = Date.now();
-      audioRecTimerInterval = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - start) / 1000);
-        const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
-        const ss = String(elapsed % 60).padStart(2, '0');
-        if (timeEl) timeEl.textContent = `${mm}:${ss}`;
-      }, 500);
-    } else {
-      indicator.classList.remove('active');
-      if (audioRecTimerInterval) { clearInterval(audioRecTimerInterval); audioRecTimerInterval = null; }
-      if (timeEl) timeEl.textContent = '00:00';
-    }
-  }
 
   window.__reattachProdDockListener = attachWSListener;
   attachWSListener();
