@@ -1448,6 +1448,52 @@ async def websocket_endpoint(ws: WebSocket):
                         print(f"[WS 0x09 recording save] {e}")
                         await emit(type="error", message="녹화 파일을 저장하지 못했습니다.")
                     continue
+                elif kind == 0x0B:
+                    if OWNER_AUTH.is_enrolled() and not _is_authed():
+                        continue
+                    if not payload or len(payload) < 2:
+                        continue
+                    try:
+                        label_len = int.from_bytes(payload[:2], "big")
+                        label = payload[2:2 + label_len].decode("utf-8", errors="replace") if label_len else ""
+                        blob = payload[2 + label_len:]
+                        if not blob:
+                            continue
+                        ts = time.strftime("%Y%m%d_%H%M%S")
+                        ms = int(time.time() * 1000) % 1000
+                        safe_label = re.sub(r'[^\w가-힣-]', '_', label)[:30] if label else ""
+                        fname = f"photo_{ts}_{ms:03d}_{safe_label}.jpg" if safe_label else f"photo_{ts}_{ms:03d}.jpg"
+                        user_dir = os.path.join(RECORDINGS_DIR, session.memory_user_id)
+                        os.makedirs(user_dir, exist_ok=True)
+                        fpath = os.path.join(user_dir, fname)
+                        await asyncio.to_thread(_write_bytes, fpath, blob)
+                        rec_id = await asyncio.to_thread(
+                            functools.partial(
+                                session.memory.save_recording,
+                                user_id=session.memory_user_id,
+                                filename=fname,
+                                file_path=fpath,
+                                kind="photo",
+                                label=label,
+                                duration_ms=0,
+                                size_bytes=len(blob),
+                            )
+                        )
+                        size_kb = len(blob) / 1024
+                        await emit(
+                            type="recording_saved",
+                            id=rec_id,
+                            filename=fname,
+                            label=label,
+                            kind="photo",
+                            duration_s=0,
+                            size_mb=round(size_kb / 1024, 2),
+                        )
+                        print(f"[사진 저장] {fname} ({size_kb:.0f}KB)")
+                    except Exception as e:
+                        print(f"[WS 0x0B photo save] {e}")
+                        await emit(type="error", message="사진을 저장하지 못했습니다.")
+                    continue
                 elif kind == 0x0A:
                     if OWNER_AUTH.is_enrolled() and not _is_authed():
                         continue

@@ -421,6 +421,9 @@
           new Notification('⏰ ' + (m.label || '타이머'), { body: '타이머가 만료되었습니다.' });
         }
         break;
+      case 'sys_capture_photo':
+        captureAndSendPhoto(m.label || '');
+        break;
       case 'sys_open_url':
         if (m.url) { window.open(m.url, '_blank', 'noopener,noreferrer'); }
         flash(`🌐 ${m.url} 열기`);
@@ -2987,11 +2990,47 @@
   }
 
   function handleRecordingSaved(m) {
+    const label = m.label ? ` (${m.label})` : '';
+    if (m.kind === 'photo') {
+      const size = m.size_mb ? `${m.size_mb}MB` : '';
+      flash(`📷 사진 저장 완료${label} — ${size}`, 'ok');
+      return;
+    }
     const dur = m.duration_s ? `${m.duration_s}초` : '';
     const size = m.size_mb ? `${m.size_mb}MB` : '';
-    const label = m.label ? ` (${m.label})` : '';
     const kindLabel = (m.kind === 'audio') ? '녹음' : '녹화';
     flash(`${kindLabel} 저장 완료${label} — ${dur}, ${size}`, 'ok');
+  }
+
+  function captureAndSendPhoto(label) {
+    if (!camStream || !camVideo || !camVideo.videoWidth) {
+      flash('카메라가 꺼져 있습니다.', 'error');
+      return;
+    }
+    const w = camVideo.videoWidth;
+    const h = camVideo.videoHeight;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(camVideo, 0, 0, w, h);
+    c.toBlob((blob) => {
+      if (!blob) { flash('사진 캡처 실패', 'error'); return; }
+      blob.arrayBuffer().then((buf) => {
+        const jpegBytes = new Uint8Array(buf);
+        const labelBytes = new TextEncoder().encode(label);
+        const header = new Uint8Array(3 + labelBytes.length);
+        header[0] = 0x0B;
+        header[1] = (labelBytes.length >> 8) & 0xFF;
+        header[2] = labelBytes.length & 0xFF;
+        header.set(labelBytes, 3);
+        const packet = new Uint8Array(header.length + jpegBytes.length);
+        packet.set(header, 0);
+        packet.set(jpegBytes, header.length);
+        const ws = window.__ws || window.ws;
+        if (ws && ws.readyState === 1) {
+          ws.send(packet.buffer);
+        }
+      });
+    }, 'image/jpeg', 0.92);
   }
 
   function startVideoRecording(label) {

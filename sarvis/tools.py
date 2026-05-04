@@ -235,6 +235,25 @@ TOOL_DEFINITIONS = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "capture_photo",
+        "description": (
+            "Capture a photo from the camera and save it. Use when the user asks "
+            "'사진 찍어', '캡처해', '사진 찍어줘', '찍어줘', '화면 저장', "
+            "'사진 보관', '캡처 저장', 'take a photo', 'screenshot', '스크린샷'. "
+            "Saves the current camera frame as a JPEG file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Optional label for this photo (e.g. '풍경', '메모', '영수증')",
+                }
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "open_url",
         "description": (
             "Open a URL/website in the user's browser. Use when the user asks "
@@ -1333,6 +1352,18 @@ class ToolExecutor:
         if self.on_recording:
             self.on_recording("stop", label, "audio")
         return "음성 녹음을 중지했습니다. 파일을 저장하고 있습니다."
+
+    # -------- 사진 캡처 --------
+    def _t_capture_photo(self, label: str = "") -> str:
+        frame = self.vision.read()
+        if frame is None:
+            return "카메라가 켜져 있지 않습니다. 먼저 카메라를 시작해주세요."
+        if self.on_system_cmd:
+            self.on_system_cmd({"type": "sys_capture_photo", "label": label or ""})
+        msg = "사진을 찍었습니다."
+        if label:
+            msg += f" (라벨: {label})"
+        return msg
 
     # -------- 시스템 제어 도구 --------
     def _t_open_url(self, url: str) -> str:
