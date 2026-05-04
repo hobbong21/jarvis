@@ -426,6 +426,50 @@
       </div>
     </section>
 
+    <!-- 사이클 #30 — 개인화 프로필 -->
+    <section class="prod-card" id="profile-card">
+      <header class="prod-card-head">
+        <span class="prod-card-title">개인화 설정</span>
+        <span id="profile-status" class="prod-status">로드 중…</span>
+      </header>
+      <div class="profile-form">
+        <div class="profile-row">
+          <label class="profile-label" for="profile-nickname">닉네임</label>
+          <input id="profile-nickname" type="text" placeholder="사비스가 부를 이름"
+                 maxlength="100" class="prod-input">
+        </div>
+        <div class="profile-row">
+          <label class="profile-label" for="profile-email">이메일</label>
+          <input id="profile-email" type="email" placeholder="연락받을 이메일 주소"
+                 maxlength="200" class="prod-input">
+        </div>
+        <div class="profile-row">
+          <label class="profile-label" for="profile-tone">말투 성향</label>
+          <select id="profile-tone" class="prod-input">
+            <option value="friendly">친근한 (기본)</option>
+            <option value="formal">정중한</option>
+            <option value="casual">편한</option>
+            <option value="cute">귀여운</option>
+            <option value="professional">전문적인</option>
+          </select>
+        </div>
+        <div class="profile-row">
+          <label class="profile-label" for="profile-interests">관심사</label>
+          <input id="profile-interests" type="text" placeholder="예: 요리, 운동, 프로그래밍, 음악"
+                 maxlength="500" class="prod-input">
+        </div>
+        <div class="profile-row">
+          <label class="profile-label" for="profile-bio">자기소개</label>
+          <textarea id="profile-bio" placeholder="사비스에게 알려주고 싶은 나에 대한 정보"
+                    maxlength="1000" rows="3" class="prod-input prod-textarea"></textarea>
+        </div>
+        <div class="profile-row profile-actions">
+          <button id="profile-save-btn" class="prod-btn primary" type="button">저장</button>
+          <span id="profile-save-msg" class="profile-save-msg"></span>
+        </div>
+      </div>
+    </section>
+
     <!-- 사이클 #22 — My Sarvis (HARN-05 미니) -->
     <section class="prod-card" id="my-sarvis-card">
       <header class="prod-card-head">

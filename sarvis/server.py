@@ -2196,6 +2196,7 @@ async def websocket_endpoint(ws: WebSocket):
                 "meeting_list", "meeting_get",
                 "todo_list", "todo_add", "todo_done", "todo_remove", "todo_extract",
                 "feedback_submit", "my_sarvis_summary",  # 사이클 #22
+                "profile_get", "profile_save",  # 사이클 #30 개인화
                 "ha_run_observer", "ha_issues_list", "ha_kill_switch",
                 "ha_optout", "ha_growth_diary",          # 사이클 #23
                 "ha_run_diagnostician", "ha_diagnoses_for_issue",  # 사이클 #24
@@ -2236,6 +2237,37 @@ async def websocket_endpoint(ws: WebSocket):
                     print(f"[feedback_submit] 실패: {ex!r}")
                     await emit(type="feedback_result", ok=False,
                                message="피드백 저장 실패")
+
+            elif mtype == "profile_get":
+                try:
+                    profile = await asyncio.to_thread(
+                        session.memory.get_profile, session.memory_user_id
+                    )
+                    await emit(type="profile_data", **profile)
+                except Exception as ex:
+                    print(f"[profile_get] 실패: {ex!r}")
+                    await emit(type="error", message="프로필 로드 실패")
+
+            elif mtype == "profile_save":
+                try:
+                    _TONE_ALLOWED = {"friendly", "formal", "casual", "cute", "professional"}
+                    raw_tone = str(data.get("tone", "friendly"))[:30]
+                    tone = raw_tone if raw_tone in _TONE_ALLOWED else "friendly"
+                    profile = await asyncio.to_thread(
+                        functools.partial(
+                            session.memory.save_profile,
+                            user_id=session.memory_user_id,
+                            nickname=str(data.get("nickname", "")).strip()[:100],
+                            email=str(data.get("email", "")).strip()[:200],
+                            tone=tone,
+                            interests=str(data.get("interests", "")).strip()[:500],
+                            bio=str(data.get("bio", "")).strip()[:1000],
+                        )
+                    )
+                    await emit(type="profile_saved", **profile)
+                except Exception as ex:
+                    print(f"[profile_save] 실패: {ex!r}")
+                    await emit(type="error", message="프로필 저장 실패")
 
             elif mtype == "my_sarvis_summary":
                 # body: {window_days?: float, default 7}

@@ -2682,6 +2682,20 @@
         case "feedback_result":
           handleFeedbackResult(msg);
           break;
+        case "profile_data":
+          fillProfileForm(msg); break;
+        case "profile_saved":
+          fillProfileForm(msg);
+          if (pfSaveBtn) pfSaveBtn.disabled = false;
+          if (pfMsg) {
+            pfMsg.textContent = "저장 완료 ✓";
+            setTimeout(() => { pfMsg.textContent = ""; }, 3000);
+          }
+          break;
+        case "error":
+          if (pfSaveBtn) pfSaveBtn.disabled = false;
+          if (pfMsg) pfMsg.textContent = "";
+          break;
         case "ha_observer_result":
           haRenderObserver(msg); break;
         case "ha_issues_list":
@@ -2740,10 +2754,47 @@
           break;
       }
     });
-    // 초기 todo 목록 + My Sarvis 로드.
+    // 초기 todo 목록 + My Sarvis + 프로필 로드.
     setTimeout(() => sendMsg({ type: "todo_list" }), 1000);
     setTimeout(refreshMySarvis, 1500);
+    setTimeout(() => sendMsg({ type: "profile_get" }), 800);
   }
+
+  // ── 사이클 #30 — 개인화 프로필 카드 ────────────────────────
+  const pfNickname = $("profile-nickname");
+  const pfEmail = $("profile-email");
+  const pfTone = $("profile-tone");
+  const pfInterests = $("profile-interests");
+  const pfBio = $("profile-bio");
+  const pfSaveBtn = $("profile-save-btn");
+  const pfStatus = $("profile-status");
+  const pfMsg = $("profile-save-msg");
+
+  function fillProfileForm(p) {
+    if (!pfNickname) return;
+    pfNickname.value = p.nickname || "";
+    pfEmail.value = p.email || "";
+    pfTone.value = p.tone || "friendly";
+    pfInterests.value = p.interests || "";
+    pfBio.value = p.bio || "";
+    pfStatus.textContent = p.updated_at ? "저장됨" : "미설정";
+  }
+
+  if (pfSaveBtn) {
+    pfSaveBtn.addEventListener("click", () => {
+      sendMsg({
+        type: "profile_save",
+        nickname: pfNickname.value.trim(),
+        email: pfEmail.value.trim(),
+        tone: pfTone.value,
+        interests: pfInterests.value.trim(),
+        bio: pfBio.value.trim(),
+      });
+      pfSaveBtn.disabled = true;
+      pfMsg.textContent = "저장 중…";
+    });
+  }
+
   // ── 사이클 #23 — HA 성장 일기 카드 ────────────────────────
   const haObsBtn = $("ha-observer-btn");
   const haRefreshBtn = $("ha-refresh-btn");

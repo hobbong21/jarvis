@@ -2188,3 +2188,19 @@ input, select { outline: none; }
   from { opacity: 0; transform: scale(0.9); }
   to { opacity: 1; transform: scale(1); }
 }
+
+/* ===== 개인화 프로필 ===== */
+.profile-form { display: flex; flex-direction: column; gap: 8px; }
+.profile-row { display: flex; align-items: center; gap: 8px; }
+.profile-label {
+  min-width: 65px; font-size: 12px; font-weight: 600;
+  color: var(--text-mid); flex-shrink: 0;
+}
+.prod-textarea {
+  resize: vertical; min-height: 48px; font-family: inherit;
+  font-size: 13px; line-height: 1.5;
+}
+.profile-actions { justify-content: flex-end; gap: 10px; margin-top: 2px; }
+.profile-save-msg {
+  font-size: 11px; color: var(--accent); transition: opacity 0.3s;
+}

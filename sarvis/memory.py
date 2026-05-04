@@ -134,6 +134,18 @@ CREATE TABLE IF NOT EXISTS knowledge (
     updated_at    REAL    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id       TEXT    PRIMARY KEY,
+    nickname      TEXT    NOT NULL DEFAULT '',
+    email         TEXT    NOT NULL DEFAULT '',
+    tone          TEXT    NOT NULL DEFAULT 'friendly',
+    interests     TEXT    NOT NULL DEFAULT '',
+    bio           TEXT    NOT NULL DEFAULT '',
+    extra_json    TEXT    NOT NULL DEFAULT '{}',
+    created_at    REAL    NOT NULL,
+    updated_at    REAL    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS recordings (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id       TEXT    NOT NULL,
@@ -1113,6 +1125,45 @@ class Memory:
                 except OSError:
                     pass
         return True
+
+    # ── 사용자 프로필 ──
+    def get_profile(self, user_id: str) -> Dict[str, Any]:
+        with _conn_ctx(self.path) as conn:
+            row = conn.execute(
+                "SELECT * FROM user_profiles WHERE user_id=?", (user_id,)
+            ).fetchone()
+        if row:
+            return dict(row)
+        return {
+            "user_id": user_id, "nickname": "", "email": "",
+            "tone": "friendly", "interests": "", "bio": "",
+            "extra_json": "{}", "created_at": 0, "updated_at": 0,
+        }
+
+    def save_profile(
+        self,
+        user_id: str,
+        nickname: str = "",
+        email: str = "",
+        tone: str = "friendly",
+        interests: str = "",
+        bio: str = "",
+        extra_json: str = "{}",
+    ) -> Dict[str, Any]:
+        now = time.time()
+        with _conn_ctx(self.path) as conn:
+            conn.execute(
+                "INSERT INTO user_profiles "
+                "(user_id, nickname, email, tone, interests, bio, extra_json, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET "
+                "nickname=excluded.nickname, email=excluded.email, "
+                "tone=excluded.tone, interests=excluded.interests, "
+                "bio=excluded.bio, extra_json=excluded.extra_json, "
+                "updated_at=excluded.updated_at",
+                (user_id, nickname, email, tone, interests, bio, extra_json, now, now),
+            )
+        return self.get_profile(user_id)
 
     # ── 녹화 ──
     def save_recording(
@@ -2132,6 +2183,26 @@ class Memory:
         - 비어 있으면 빈 문자열 반환 (= 주입 안 함)
         """
         parts: List[str] = []
+        try:
+            profile = self.get_profile(user_id)
+            p_parts = []
+            if profile.get("nickname"):
+                p_parts.append(f"이름/닉네임: {profile['nickname']}")
+            if profile.get("tone"):
+                tone_labels = {
+                    "friendly": "친근한", "formal": "정중한", "casual": "편한",
+                    "cute": "귀여운", "professional": "전문적인",
+                }
+                p_parts.append(f"선호 말투: {tone_labels.get(profile['tone'], profile['tone'])}")
+            if profile.get("interests"):
+                p_parts.append(f"관심사: {profile['interests']}")
+            if profile.get("bio"):
+                p_parts.append(f"자기소개: {profile['bio']}")
+            if p_parts:
+                parts.append("사용자 프로필:")
+                parts.extend(f"- {p}" for p in p_parts)
+        except Exception:
+            pass
         facts = self.get_facts(user_id, limit=max_facts)
         if facts:
             parts.append("저장된 사실:")

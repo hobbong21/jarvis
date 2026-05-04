@@ -88,6 +88,16 @@ Validator).
 - UI: 영상=빨간 REC, 음성=파란 MIC 인디케이터 (동시 표시 가능).
 - **보안**: 인증 게이트 적용 (미인증 시 0x09/0x0A 무시). 파일명 밀리초 타임스탬프로 충돌 방지.
 
+**개인화 프로필**: 제어판(productivity-dock)에 개인화 설정 카드 추가.
+- `sarvis/memory.py`: `user_profiles` 테이블 (nickname, email, tone, interests, bio, extra_json) + `get_profile`/`save_profile` CRUD (UPSERT)
+- `sarvis/server.py`: `profile_get`/`profile_save` WS 핸들러 (인증 게이트 적용)
+- `sarvis/config.py`: system_prompt에 개인화 프로필 활용 안내 (닉네임 호칭, 말투 조절, 관심사 활용)
+- `sarvis/memory.py` `context_block()`: 사용자 프로필을 [기억] 블록에 자동 주입 (LLM이 매 답변마다 참조)
+- `web/index.html`: 개인화 설정 prod-card (닉네임, 이메일, 말투 성향 select, 관심사, 자기소개 textarea)
+- `web/app.js`: 프로필 폼 이벤트 + WS 통신 (profile_get/profile_save/profile_data/profile_saved)
+- `web/style.css`: 프로필 폼 스타일 (.profile-form, .profile-row, .profile-label, .prod-textarea)
+- 말투 성향 옵션: friendly(친근한), formal(정중한), casual(편한), cute(귀여운), professional(전문적인)
+
 **텍스트 읽기 (OCR)**: `read_text` 도구 추가.
 - "읽어줘", "뭐라고 써있어", "글자 읽어", "간판 읽어", "메뉴판 읽어" 등의 음성 명령.
 - Claude Vision을 OCR 전용 프롬프트로 호출, 위치별 텍스트 추출 + 불확실 부분 [?] 표시.
