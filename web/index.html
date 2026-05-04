@@ -69,15 +69,15 @@
         </svg>
         <span>연속</span>
       </button>
-      <a id="control-panel-btn" class="control-panel-btn" href="/harness/dashboard.html"
-         target="_blank" rel="noopener" title="Harness 진행 대시보드 (새 탭)">
+      <button id="control-panel-btn" type="button" class="control-panel-btn"
+              title="제어판 열기 (Harness · 저장공간 · 내 정보 · 설정)">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="3"></circle>
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
         </svg>
         <span>제어판</span>
-      </a>
+      </button>
     </div>
   </header>
 
@@ -261,6 +261,140 @@
       </div>
     </aside>
   </main>
+
+  <!-- 사이클 #31 — 통합 제어판. 4개 탭(내 정보 / 내 저장공간 / Harness / 설정) -->
+  <button id="controlpanel-toggle-btn" class="controlpanel-toggle-btn" hidden type="button"
+          aria-label="제어판 열기" title="제어판">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+    <span class="controlpanel-toggle-label">제어판</span>
+  </button>
+
+  <aside id="controlpanel-panel" class="controlpanel-panel" hidden aria-hidden="true" aria-label="제어판">
+    <header class="controlpanel-header">
+      <h2 id="controlpanel-title">제어판</h2>
+      <button id="controlpanel-close-btn" type="button" class="controlpanel-close-btn" aria-label="닫기">×</button>
+    </header>
+
+    <nav class="controlpanel-tabs" role="tablist" aria-label="제어판 탭">
+      <button type="button" class="cp-tab" role="tab" aria-selected="true"  aria-controls="cp-tab-info"     id="cp-tab-btn-info"     data-tab="info">내 정보</button>
+      <button type="button" class="cp-tab" role="tab" aria-selected="false" aria-controls="cp-tab-storage"  id="cp-tab-btn-storage"  data-tab="storage">저장공간</button>
+      <button type="button" class="cp-tab" role="tab" aria-selected="false" aria-controls="cp-tab-harness"  id="cp-tab-btn-harness"  data-tab="harness">Harness</button>
+      <button type="button" class="cp-tab" role="tab" aria-selected="false" aria-controls="cp-tab-settings" id="cp-tab-btn-settings" data-tab="settings">설정</button>
+    </nav>
+
+    <!-- 내 정보 탭 — face_name, 등록 시각, 재인증 카운트다운, 등록 리셋 -->
+    <section class="cp-tab-body" id="cp-tab-info" role="tabpanel" aria-labelledby="cp-tab-btn-info" data-tab="info">
+      <div class="cp-info">
+        <div class="cp-info-row">
+          <span class="label">이름</span>
+          <span class="value" id="cp-info-name">—</span>
+        </div>
+        <div class="cp-info-row">
+          <span class="label">등록 상태</span>
+          <span class="value" id="cp-info-enrolled">—</span>
+        </div>
+        <div class="cp-info-row">
+          <span class="label">얼굴 인코딩</span>
+          <span class="value" id="cp-info-face-encs">—</span>
+        </div>
+        <div class="cp-info-row">
+          <span class="label">등록 시각</span>
+          <span class="value" id="cp-info-created">—</span>
+        </div>
+        <div class="cp-info-divider"></div>
+        <div class="cp-info-row">
+          <span class="label">사용 용량</span>
+          <span class="value" id="cp-info-storage-used">—</span>
+        </div>
+        <div class="cp-info-row">
+          <span class="label">다음 재인증</span>
+          <span class="value" id="cp-info-reauth-in">—</span>
+        </div>
+        <div class="cp-info-divider"></div>
+        <div class="cp-info-actions">
+          <button id="cp-info-new-challenge" type="button" class="cp-btn ghost">챌린지 재발급</button>
+          <button id="cp-info-reset" type="button" class="cp-btn danger">주인 등록 초기화</button>
+        </div>
+        <div id="cp-info-msg" class="cp-harness-msg" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- 저장공간 탭 (Phase 3 의 userstorage 마크업 그대로 — 외과적 변경) -->
+    <section class="cp-tab-body" id="cp-tab-storage" role="tabpanel" aria-labelledby="cp-tab-btn-storage" data-tab="storage" hidden>
+      <section class="userstorage-quota">
+        <div class="userstorage-quota-label">
+          <span id="userstorage-used">0 B</span>
+          <span class="userstorage-quota-sep">/</span>
+          <span id="userstorage-limit">5 GB</span>
+        </div>
+        <div class="userstorage-quota-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="userstorage-bar-fill" class="userstorage-quota-bar-fill"></div>
+        </div>
+      </section>
+
+      <section id="userstorage-drop" class="userstorage-drop">
+        <p class="userstorage-drop-title">파일을 여기로 끌어다 놓으세요</p>
+        <button id="userstorage-upload-btn" type="button" class="userstorage-upload-btn">파일 선택</button>
+        <input id="userstorage-file-input" type="file" multiple hidden>
+        <p class="userstorage-drop-hint">단일 파일 100MB 이하 · AI는 기본적으로 이 파일에 접근 가능</p>
+      </section>
+
+      <div id="userstorage-msg" class="userstorage-msg" role="status" aria-live="polite"></div>
+
+      <ul id="userstorage-list" class="userstorage-list" role="list"></ul>
+    </section>
+
+    <!-- Harness 탭 — telemetry 요약 + 권장사항 -->
+    <section class="cp-tab-body" id="cp-tab-harness" role="tabpanel" aria-labelledby="cp-tab-btn-harness" data-tab="harness" hidden>
+      <div class="cp-harness">
+        <div class="cp-harness-toolbar">
+          <span id="cp-harness-status" class="cp-harness-status">대기</span>
+          <button id="cp-harness-refresh" type="button" class="cp-btn ghost">새로고침</button>
+          <button id="cp-harness-evolve" type="button" class="cp-btn primary">evolve 실행</button>
+        </div>
+        <div id="cp-harness-cards" class="cp-harness-cards"></div>
+        <h3 class="cp-harness-section-title">자가 개선 권장</h3>
+        <div id="cp-harness-actions" class="cp-harness-actions">
+          <div class="cp-placeholder">권장 사항을 불러오는 중...</div>
+        </div>
+        <div id="cp-harness-msg" class="cp-harness-msg" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- 설정 탭 — LLM 백엔드 / 음성 / 행동인식 토글 -->
+    <section class="cp-tab-body" id="cp-tab-settings" role="tabpanel" aria-labelledby="cp-tab-btn-settings" data-tab="settings" hidden>
+      <div class="cp-settings">
+        <section class="cp-settings-section">
+          <span class="cp-settings-label">LLM 백엔드</span>
+          <div class="cp-settings-row" id="cp-settings-backends">
+            <button type="button" class="cp-btn" data-backend="claude" aria-pressed="false">Claude</button>
+            <button type="button" class="cp-btn" data-backend="openai" aria-pressed="false">OpenAI</button>
+            <button type="button" class="cp-btn" data-backend="ollama" aria-pressed="false">Ollama</button>
+          </div>
+        </section>
+
+        <section class="cp-settings-section">
+          <span class="cp-settings-label">대화 히스토리</span>
+          <div class="cp-settings-row">
+            <button id="cp-settings-clear-history" type="button" class="cp-btn ghost">초기화</button>
+          </div>
+        </section>
+
+        <section class="cp-settings-section">
+          <span class="cp-settings-label">정보</span>
+          <div id="cp-settings-info" class="cp-info-row cp-info-row-single">
+            <span class="value" id="cp-settings-version">SARVIS · 사이클 #31</span>
+          </div>
+        </section>
+
+        <div id="cp-settings-msg" class="cp-harness-msg" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+  </aside>
 
   <!-- Mobile: 하단 통합 입력바 (마이크 + 텍스트 + 전송) -->
   <form id="mobile-text-form" class="mobile-input-bar">

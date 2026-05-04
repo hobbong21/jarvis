@@ -76,6 +76,12 @@ EAR_CLOSE_THRESHOLD = 0.18     # 이 값 이하면 눈 감음.
 BLINK_WINDOW_SECONDS = 6.0     # 깜빡임 검출 윈도우 (초).
 BLINK_MIN_FRAMES = 4           # 윈도우 내 최소 EAR 측정 프레임.
 
+# 주기적 재인증 (사이클 #29). 마지막 인증 통과 후 일정 시간이 지나면
+# face_ok/voice_ok 를 리셋해 사용자에게 다시 인증을 요구한다. 재인증 트리거 후
+# REAUTH_GRACE_SECONDS 안에 통과하지 못하면 자동 로그아웃.
+REAUTH_INTERVAL_SECONDS = 3600.0   # 1시간.
+REAUTH_GRACE_SECONDS = 60.0        # 자리비움 허용 시간.
+
 
 _PUNCT_RE = re.compile(
     r"[\s\.,!?\-_/\\\(\)\[\]\{\}<>:;\"'`~@#$%^&*+=|·…！？。、，：；「」『』]+"
@@ -441,3 +447,27 @@ def detect_blink_in_window(
             "span": window[-1][0] - window[0][0],
         },
     )
+
+
+# ============================================================
+# 주기적 재인증 — stateless 시간 헬퍼 (사이클 #29)
+# ============================================================
+def is_reauth_due(last_authed_at: float, now: float) -> bool:
+    """마지막 인증 통과 시각 기준으로 재인증이 필요한지 판정.
+
+    `last_authed_at` 이 0(미인증) 이면 False — 첫 인증 자체는 별도 게이트가 처리.
+    그 외엔 (now - last_authed_at) 이 REAUTH_INTERVAL_SECONDS 이상이면 True.
+    """
+    if last_authed_at <= 0.0:
+        return False
+    return (now - last_authed_at) >= REAUTH_INTERVAL_SECONDS
+
+
+def is_grace_expired(reauth_pending_since: float, now: float) -> bool:
+    """재인증 트리거 시각 기준으로 grace 윈도우가 만료됐는지 판정.
+
+    `reauth_pending_since` 이 0(트리거 안 됨) 이면 False.
+    """
+    if reauth_pending_since <= 0.0:
+        return False
+    return (now - reauth_pending_since) >= REAUTH_GRACE_SECONDS

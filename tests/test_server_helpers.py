@@ -127,6 +127,89 @@ class HarnessWsAuthOkTests(unittest.TestCase):
             self.assertFalse(server._harness_ws_auth_ok(ws, ""))
 
 
+class HarnessAuthStorageTokenFallbackTests(unittest.TestCase):
+    """사이클 #31 — storage_token 통합 fallback.
+
+    owner_auth 통과 시 발급된 storage_token 으로도 Harness API 인증되어야 함.
+    """
+
+    def setUp(self):
+        # 테스트 격리: 모듈 글로벌 STORAGE_TOKENS 를 임시로 비우고 이후 복원.
+        self._saved_tokens = dict(server.STORAGE_TOKENS)
+        server.STORAGE_TOKENS.clear()
+
+    def tearDown(self):
+        server.STORAGE_TOKENS.clear()
+        server.STORAGE_TOKENS.update(self._saved_tokens)
+
+    def _issue_token(self, face_name: str = "테스터") -> str:
+        """fake UserStorage 를 토큰 dict 에 직접 주입 (정식 _new_storage_token 우회)."""
+        token = "ut_" + "x" * 32
+        server.STORAGE_TOKENS[token] = {
+            "face_name": face_name,
+            "storage": MagicMock(),
+            "expires_at": 9999999999.0,
+        }
+        return token
+
+    def test_storage_token_accepted_via_query_when_no_env(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HARNESS_TELEMETRY_TOKEN", None)
+            tok = self._issue_token()
+            req = _mock_request(host="10.0.0.1")  # 비 loopback
+            # 환경변수 없어도 storage_token 만으로 통과해야 함.
+            server._harness_auth_check(req, tok)
+
+    def test_storage_token_accepted_via_bearer(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HARNESS_TELEMETRY_TOKEN", None)
+            tok = self._issue_token()
+            req = _mock_request(host="10.0.0.1", auth_header=f"Bearer {tok}")
+            server._harness_auth_check(req, None)
+
+    def test_storage_token_accepted_alongside_env_token(self):
+        # 환경변수도 설정돼 있을 때 storage_token 이 우선 검증되지 않더라도
+        # 두 번째 단계에서 통과해야 함.
+        with patch.dict(os.environ, {"HARNESS_TELEMETRY_TOKEN": "different"}):
+            tok = self._issue_token()
+            req = _mock_request(host="10.0.0.1")
+            server._harness_auth_check(req, tok)
+
+    def test_expired_storage_token_rejected(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HARNESS_TELEMETRY_TOKEN", None)
+            token = "ut_expired_" + "y" * 24
+            server.STORAGE_TOKENS[token] = {
+                "face_name": "x",
+                "storage": MagicMock(),
+                "expires_at": 0.0,  # 이미 만료
+            }
+            req = _mock_request(host="10.0.0.1")
+            with self.assertRaises(HTTPException) as ctx:
+                server._harness_auth_check(req, token)
+            self.assertEqual(ctx.exception.status_code, 403)  # 환경변수 미설정 + 비 loopback
+
+    def test_random_token_still_rejected(self):
+        with patch.dict(os.environ, {"HARNESS_TELEMETRY_TOKEN": "real-secret"}):
+            req = _mock_request(host="10.0.0.1")
+            with self.assertRaises(HTTPException) as ctx:
+                server._harness_auth_check(req, "totally-fake")
+            self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_ws_storage_token_accepted_when_no_env(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HARNESS_TELEMETRY_TOKEN", None)
+            tok = self._issue_token()
+            ws = _mock_ws(host="10.0.0.1")
+            self.assertTrue(server._harness_ws_auth_ok(ws, tok))
+
+    def test_ws_storage_token_accepted_alongside_env(self):
+        with patch.dict(os.environ, {"HARNESS_TELEMETRY_TOKEN": "different"}):
+            tok = self._issue_token()
+            ws = _mock_ws(host="10.0.0.1")
+            self.assertTrue(server._harness_ws_auth_ok(ws, tok))
+
+
 class HealthEndpointTests(unittest.TestCase):
     """async health 엔드포인트 — dict 반환 형태 검증."""
 

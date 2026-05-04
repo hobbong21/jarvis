@@ -60,8 +60,17 @@ for _ext, _mt in _STATIC_MIME_FALLBACKS.items():
         except Exception:
             pass
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .audio_io import EdgeTTS, make_stt
@@ -84,7 +93,10 @@ from .owner_auth import (
     ENROLL_FACE_ANGLES,
     ENROLL_FACE_LABELS_KO,
     BLINK_WINDOW_SECONDS,
+    is_reauth_due,
+    is_grace_expired,
 )
+from .user_storage import QuotaExceeded, UserStorage
 
 # Harness Phase 4 — Fan-out 분석 + Evolution 텔레메트리
 from .analysis import parallel_analyze, analysis_to_context
@@ -249,6 +261,8 @@ class UserSession:
         self.brain = Brain()
         self.vision = WebVision()
         self.tools: Optional[ToolExecutor] = None
+        # 사이클 #30 — 인증 통과 후 _mark_authed 에서 주입.
+        self.user_storage: Optional[UserStorage] = None
         self.observing = False
         self._observe_thread: Optional[threading.Thread] = None
         self._observe_stop = threading.Event()
@@ -315,7 +329,11 @@ class UserSession:
                 face_registry=FACE_REGISTRY,
                 on_recording=self._on_recording,
                 on_system_cmd=self._on_system_cmd,
+                user_storage=self.user_storage,
             )
+        else:
+            # 사이클 #30 — tools 가 이미 있으면 storage 만 갱신.
+            self.tools.set_user_storage(self.user_storage)
         self.brain.tools = self.tools
 
     def _on_recording(self, action: str, label: str, kind: str = "video"):
@@ -392,6 +410,51 @@ class UserSession:
 
 # 세션 토큰 → UserSession
 ACTIVE: Dict[str, UserSession] = {}
+
+
+# ============================================================
+# 사용자 저장공간 토큰 (사이클 #30)
+# ============================================================
+# WS 인증 통과 시 발급 → 클라이언트가 HTTP 업로드/다운로드 호출 시 ?t=<token>.
+# 만료(STORAGE_TOKEN_TTL) 또는 WS 종료 시 폐기. 모듈 글로벌 dict — 단일 프로세스 가정.
+STORAGE_TOKENS: Dict[str, Dict[str, Any]] = {}
+STORAGE_TOKEN_TTL = 12 * 3600.0   # 12 시간 — 1시간 재인증 + 충분한 마진.
+# HTTP 단일 업로드 최대 — 메모리 보호. 5GB 누적 한도와 별개.
+STORAGE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+_storage_lock = threading.Lock()
+
+
+def _new_storage_token(face_name: str, storage: UserStorage) -> str:
+    """저장공간 액세스 토큰 발급. WS 인증 통과 시 호출."""
+    token = secrets.token_urlsafe(24)
+    with _storage_lock:
+        STORAGE_TOKENS[token] = {
+            "face_name": face_name,
+            "storage": storage,
+            "expires_at": time.time() + STORAGE_TOKEN_TTL,
+        }
+    return token
+
+
+def _resolve_storage_token(token: str) -> Optional[UserStorage]:
+    """토큰 검증 후 UserStorage 반환. 만료/없음 시 None."""
+    if not token:
+        return None
+    with _storage_lock:
+        info = STORAGE_TOKENS.get(token)
+        if not info:
+            return None
+        if time.time() > info["expires_at"]:
+            STORAGE_TOKENS.pop(token, None)
+            return None
+        return info["storage"]
+
+
+def _purge_storage_token(token: Optional[str]) -> None:
+    if not token:
+        return
+    with _storage_lock:
+        STORAGE_TOKENS.pop(token, None)
 
 
 # ============================================================
@@ -488,6 +551,95 @@ async def download_recording(rec_id: int):
 
 
 # ============================================================
+# 사용자 저장공간 HTTP 엔드포인트 (사이클 #30)
+# ============================================================
+# 인증: WS 세션이 발급한 단명 토큰을 ?t=<token> 쿼리로 검증.
+# 업로드 단일 파일 100MB 제한 (메모리 보호) — 5GB 누적 한도와 별개.
+
+@app.post("/api/storage/upload")
+async def storage_upload_endpoint(
+    t: str = Query(..., description="WS 인증 통과 시 받은 storage_token"),
+    file: UploadFile = File(...),
+    ai_access: bool = Form(True),
+):
+    """사용자 파일 업로드. multipart/form-data 로 file + ai_access 폼 필드."""
+    storage = _resolve_storage_token(t)
+    if storage is None:
+        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
+
+    contents = await file.read()
+    size = len(contents)
+    if size <= 0:
+        return JSONResponse({"error": "empty file"}, status_code=400)
+    if size > STORAGE_UPLOAD_MAX_BYTES:
+        max_mb = STORAGE_UPLOAD_MAX_BYTES // (1024 * 1024)
+        return JSONResponse(
+            {"error": f"단일 파일은 최대 {max_mb}MB 까지 업로드할 수 있습니다."},
+            status_code=413,
+        )
+
+    try:
+        file_id = storage.save_file(
+            file.filename or "upload",
+            contents,
+            kind="upload",
+            ai_access=bool(ai_access),
+        )
+    except QuotaExceeded as qe:
+        return JSONResponse({"error": str(qe)}, status_code=413)
+    except (ValueError, TypeError) as ve:
+        return JSONResponse({"error": str(ve)}, status_code=400)
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+
+    meta = storage.get_metadata(file_id) or {}
+    return JSONResponse({
+        "ok": True,
+        "file_id": file_id,
+        "name": meta.get("name", ""),
+        "size": meta.get("size", 0),
+        "ai_access": meta.get("ai_access", True),
+        "uploaded_at": meta.get("uploaded_at", 0.0),
+        "kind": meta.get("kind", "upload"),
+        "used_bytes": storage.used_bytes,
+        "limit_bytes": storage.limit_bytes,
+    })
+
+
+@app.get("/api/storage/file/{file_id}")
+async def storage_download_endpoint(file_id: str, t: str = Query(...)):
+    """사용자 파일 다운로드. AI 토글과 무관하게 사용자 본인은 항상 다운로드 가능."""
+    from urllib.parse import quote
+
+    storage = _resolve_storage_token(t)
+    if storage is None:
+        return JSONResponse({"error": "invalid or expired token"}, status_code=401)
+
+    meta = storage.get_metadata(file_id)
+    if not meta:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    try:
+        data = storage.read_file(file_id, ai_call=False)
+    except FileNotFoundError:
+        return JSONResponse({"error": "file missing on disk"}, status_code=404)
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+
+    # 한글 파일명을 위한 RFC 5987 인코딩.
+    filename_q = quote(meta.get("name", file_id))
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename_q}",
+        },
+    )
+
+
+# ============================================================
 # WebSocket — 메인 대화 채널 (인증 없음)
 # ============================================================
 @app.websocket("/ws")
@@ -552,7 +704,40 @@ async def websocket_endpoint(ws: WebSocket):
         "blink_required": _enrolled and _landmarks_supported,
         # 현재 챌린지 — 로그인 시작 시 발급, 검증 후 폐기. 미등록이면 None.
         "current_challenge": (random_challenge() if _enrolled else None),
+        # ── 사이클 #29 — 주기적 재인증 ──
+        # 마지막 _is_authed() 통과 시각. 0 이면 한번도 통과 안 됨 — 재인증 트리거 안 함.
+        "last_authed_at": 0.0,
+        # 재인증 트리거 시각 (0 = 비활성). REAUTH_GRACE_SECONDS 이내 통과 못 하면 logout.
+        "reauth_pending_since": 0.0,
+        # 재인증 진행 중 얼굴이 한 번이라도 감지됐는지 — 자리비움 vs imposter 분기용.
+        "face_seen_during_reauth": False,
+        # 자동 로그아웃 메시지 한 번만 emit 하기 위한 가드.
+        "reauth_revoked_emitted": False,
     }
+
+    # ── 사이클 #30 — 사용자 저장공간 ──
+    # 인증 통과 시 face_name 으로 UserStorage + 토큰 발급. WS 종료 시 토큰 폐기.
+    storage_state: Dict[str, Any] = {
+        "storage": None,
+        "token": None,
+    }
+
+    def _register_recording_in_storage(
+        name: str, file_path: str, kind: str = "media",
+    ) -> Optional[str]:
+        """사이클 #32 — 녹화/녹음/사진을 사용자 저장공간에 외부 참조로 등록.
+
+        실패는 무음(녹화 자체는 이미 디스크에 성공) — 5GB 한도 초과 시 제어판에는
+        안 보이지만 RECORDINGS_DIR 의 원본 파일은 유지된다.
+        """
+        storage = storage_state.get("storage")
+        if storage is None:
+            return None
+        try:
+            return storage.register_external(name, file_path, kind=kind)
+        except Exception as e:
+            print(f"[storage] 녹화 등록 실패 ({name}): {type(e).__name__}: {e}")
+            return None
 
     def _is_authed() -> bool:
         return bool(
@@ -569,6 +754,104 @@ async def websocket_endpoint(ws: WebSocket):
         c = random_challenge()
         auth_state["current_challenge"] = c
         return c
+
+    async def _mark_authed(face_name: str) -> None:
+        """인증 통과 시점 처리 — auth_complete emit + welcome 시작 + 재인증 타임스탬프.
+
+        세 곳(얼굴 통과, 음성 통과, 등록 직후)에서 동일 패턴이라 헬퍼로 묶음.
+        completed_emitted idempotent guard 도 여기서 처리.
+        """
+        if auth_state["completed_emitted"]:
+            return
+        auth_state["completed_emitted"] = True
+        auth_state["last_authed_at"] = time.time()
+        # 재인증 진행 중이었다면 깔끔히 종료.
+        auth_state["reauth_pending_since"] = 0.0
+        auth_state["face_seen_during_reauth"] = False
+        auth_state["reauth_revoked_emitted"] = False
+        await emit(type="auth_complete", face_name=face_name)
+        _start_welcome_if_authed()
+
+        # 사이클 #30 — UserStorage 초기화 + HTTP 액세스 토큰 발급. 저장공간 초기화
+        # 실패는 인증 흐름을 막지 않음 (보조 기능). 재인증 통과 시 같은 인스턴스를
+        # 재사용하므로 storage_state["storage"] 가 이미 있으면 스킵.
+        if storage_state["storage"] is None and face_name:
+            try:
+                storage = UserStorage(
+                    face_name,
+                    root=cfg.user_storage_root,
+                    limit_bytes=cfg.user_storage_limit_bytes,
+                )
+                token = _new_storage_token(face_name, storage)
+                storage_state["storage"] = storage
+                storage_state["token"] = token
+                # 사이클 #30 — UserSession + ToolExecutor 에 같은 인스턴스 공유.
+                # _attach_tools 가 이미 호출됐으면 setter, 아니면 다음 attach 시 자동.
+                session.user_storage = storage
+                if session.tools is not None:
+                    session.tools.set_user_storage(storage)
+                await emit(
+                    type="storage_ready",
+                    token=token,
+                    used_bytes=storage.used_bytes,
+                    limit_bytes=storage.limit_bytes,
+                )
+            except Exception as e:
+                print(f"[storage] 초기화 실패: {e}")
+
+    async def _check_reauth_state() -> None:
+        """매 프레임 호출 — 1시간 경과 시 재인증 트리거 + grace 만료 시 logout.
+
+        사이클 #29. 두 가지 상태 전이를 다룸:
+            (1) 인증 통과 후 REAUTH_INTERVAL_SECONDS 경과 → face_ok/voice_ok/blink_ok
+                리셋 → 클라이언트는 _emit_auth_status() 의 authed=False 를 보고 오버레이
+                재표시. 동시에 auth_required (reason=reauth_due) 메시지로 안내.
+            (2) 재인증 트리거 후 REAUTH_GRACE_SECONDS 안에 통과 못 하면 auth_revoked
+                emit. 얼굴이 한 번도 안 보였으면 reason=absent (자리비움), 보였는데
+                매칭 실패면 reason=imposter (다른 사람). reauth_revoked_emitted 플래그로
+                매 프레임 spam 방지 — 재인증 통과 시점(_mark_authed)에 자동 리셋됨.
+        """
+        if not OWNER_AUTH.is_enrolled():
+            return
+        now = time.time()
+
+        # (1) 1시간 트리거.
+        if (
+            auth_state["reauth_pending_since"] == 0.0
+            and is_reauth_due(auth_state["last_authed_at"], now)
+        ):
+            auth_state["face_ok"] = False
+            auth_state["voice_ok"] = False
+            auth_state["blink_ok"] = not auth_state["blink_required"]
+            auth_state["completed_emitted"] = False
+            auth_state["reauth_pending_since"] = now
+            auth_state["face_seen_during_reauth"] = False
+            auth_state["reauth_revoked_emitted"] = False
+            auth_state["ear_samples"] = []
+            _refresh_challenge()
+            await _emit_auth_status()
+            await emit(
+                type="auth_required",
+                reason="reauth_due",
+                message="1시간이 경과하여 재인증이 필요합니다. 얼굴과 음성으로 다시 인증해주세요.",
+            )
+            return
+
+        # (2) Grace 만료 검사.
+        if (
+            auth_state["reauth_pending_since"] > 0.0
+            and not auth_state["completed_emitted"]
+            and not auth_state["reauth_revoked_emitted"]
+            and is_grace_expired(auth_state["reauth_pending_since"], now)
+        ):
+            auth_state["reauth_revoked_emitted"] = True
+            if auth_state["face_seen_during_reauth"]:
+                reason = "imposter"
+                message = "등록된 얼굴과 일치하지 않아 자동 로그아웃되었습니다."
+            else:
+                reason = "absent"
+                message = "자리를 비우신 것 같아 자동 로그아웃되었습니다."
+            await emit(type="auth_revoked", reason=reason, message=message)
 
     async def _emit_auth_status():
         info = OWNER_AUTH.info()
@@ -1213,10 +1496,8 @@ async def websocket_endpoint(ws: WebSocket):
                 challenge=auth_state.get("current_challenge"),
                 message=msg,
             )
-            if _is_authed() and not auth_state["completed_emitted"]:
-                auth_state["completed_emitted"] = True
-                await emit(type="auth_complete", face_name=OWNER_AUTH.face_name)
-                _start_welcome_if_authed()
+            if _is_authed():
+                await _mark_authed(OWNER_AUTH.face_name)
         finally:
             try:
                 os.unlink(path)
@@ -1304,10 +1585,8 @@ async def websocket_endpoint(ws: WebSocket):
                 + " · " + blink_msg
             ),
         )
-        if _is_authed() and not auth_state["completed_emitted"]:
-            auth_state["completed_emitted"] = True
-            await emit(type="auth_complete", face_name=OWNER_AUTH.face_name)
-            _start_welcome_if_authed()
+        if _is_authed():
+            await _mark_authed(OWNER_AUTH.face_name)
 
     try:
         while True:
@@ -1347,6 +1626,14 @@ async def websocket_endpoint(ws: WebSocket):
                         fw, fh = session.vision.get_frame_size()
                         boxes = [list(b) for b in session.vision.face_boxes]
                         await emit(type="faces", boxes=boxes, fw=fw, fh=fh)
+                    # 사이클 #29 — 1시간 만료 / grace 검사. 미등록이면 no-op.
+                    await _check_reauth_state()
+                    # 재인증 진행 중 얼굴이 한 번이라도 보였는지 — 자리비움 vs imposter 분기용.
+                    if (
+                        auth_state["reauth_pending_since"] > 0.0
+                        and session.vision.face_boxes
+                    ):
+                        auth_state["face_seen_during_reauth"] = True
                     # 사이클 #18 — 미인증 상태면 매 프레임을 얼굴 매치에 사용.
                     if OWNER_AUTH.is_enrolled() and not auth_state["face_ok"]:
                         await _try_face_login(payload)
@@ -1502,6 +1789,10 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         size_mb = len(blob) / (1024 * 1024)
                         dur_s = duration_ms / 1000
+                        # 사이클 #32 — 사용자 저장공간에도 외부 참조로 등록.
+                        storage_file_id = _register_recording_in_storage(
+                            fname, fpath, kind="media",
+                        )
                         await emit(
                             type="recording_saved",
                             id=rec_id,
@@ -1510,6 +1801,7 @@ async def websocket_endpoint(ws: WebSocket):
                             kind="video",
                             duration_s=round(dur_s, 1),
                             size_mb=round(size_mb, 2),
+                            storage_file_id=storage_file_id,
                         )
                         print(f"[녹화 저장] {fname} ({size_mb:.1f}MB, {dur_s:.1f}s)")
                     except Exception as e:
@@ -1548,6 +1840,10 @@ async def websocket_endpoint(ws: WebSocket):
                             )
                         )
                         size_kb = len(blob) / 1024
+                        # 사이클 #32 — 사용자 저장공간에도 외부 참조로 등록.
+                        storage_file_id = _register_recording_in_storage(
+                            fname, fpath, kind="media",
+                        )
                         await emit(
                             type="recording_saved",
                             id=rec_id,
@@ -1556,6 +1852,7 @@ async def websocket_endpoint(ws: WebSocket):
                             kind="photo",
                             duration_s=0,
                             size_mb=round(size_kb / 1024, 2),
+                            storage_file_id=storage_file_id,
                         )
                         print(f"[사진 저장] {fname} ({size_kb:.0f}KB)")
                     except Exception as e:
@@ -1596,6 +1893,10 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         size_mb = len(blob) / (1024 * 1024)
                         dur_s = duration_ms / 1000
+                        # 사이클 #32 — 사용자 저장공간에도 외부 참조로 등록.
+                        storage_file_id = _register_recording_in_storage(
+                            fname, fpath, kind="media",
+                        )
                         await emit(
                             type="recording_saved",
                             id=rec_id,
@@ -1604,6 +1905,7 @@ async def websocket_endpoint(ws: WebSocket):
                             kind="audio",
                             duration_s=round(dur_s, 1),
                             size_mb=round(size_mb, 2),
+                            storage_file_id=storage_file_id,
                         )
                         print(f"[녹음 저장] {fname} ({size_mb:.1f}MB, {dur_s:.1f}s)")
                     except Exception as e:
@@ -1831,10 +2133,7 @@ async def websocket_endpoint(ws: WebSocket):
                         faces=FACE_REGISTRY.list_people(),
                     )
                     await _emit_auth_status()
-                    if not auth_state["completed_emitted"]:
-                        auth_state["completed_emitted"] = True
-                        await emit(type="auth_complete", face_name=face_name)
-                        _start_welcome_if_authed()
+                    await _mark_authed(face_name)
                 except ValueError as ve:
                     await emit(type="enroll_owner_result", ok=False, message=str(ve))
                 except Exception as e:
@@ -2950,6 +3249,79 @@ async def websocket_endpoint(ws: WebSocket):
             elif mtype == "ping":
                 await emit(type="pong")
 
+            # ── 사이클 #30 — 사용자 저장공간 (가벼운 작업만 WS) ──────────────
+            # 업로드/다운로드는 HTTP 엔드포인트(/api/storage/...) 를 사용한다.
+            elif mtype in (
+                "storage_list",
+                "storage_delete",
+                "storage_rename",
+                "storage_set_ai_access",
+            ):
+                storage: Optional[UserStorage] = storage_state.get("storage")
+                if storage is None:
+                    await emit(
+                        type=f"{mtype}_result",
+                        ok=False,
+                        message="저장공간이 초기화되지 않았습니다 (인증 필요).",
+                    )
+                    continue
+                try:
+                    if mtype == "storage_list":
+                        kind = data.get("kind")
+                        ai_only = bool(data.get("ai_only", False))
+                        files = storage.list_files(kind=kind, ai_only=ai_only)
+                        await emit(
+                            type="storage_list_result",
+                            ok=True,
+                            files=files,
+                            used_bytes=storage.used_bytes,
+                            limit_bytes=storage.limit_bytes,
+                        )
+                    elif mtype == "storage_delete":
+                        fid = str(data.get("file_id") or "")
+                        ok = storage.delete_file(fid)
+                        await emit(
+                            type="storage_delete_result",
+                            ok=ok,
+                            file_id=fid,
+                            used_bytes=storage.used_bytes,
+                            message=("삭제됨" if ok else "파일을 찾을 수 없습니다."),
+                        )
+                    elif mtype == "storage_rename":
+                        fid = str(data.get("file_id") or "")
+                        new_name = str(data.get("new_name") or "").strip()
+                        if not new_name:
+                            await emit(
+                                type="storage_rename_result",
+                                ok=False, file_id=fid,
+                                message="새 이름이 비어있습니다.",
+                            )
+                        else:
+                            ok = storage.rename(fid, new_name)
+                            await emit(
+                                type="storage_rename_result",
+                                ok=ok, file_id=fid, name=new_name,
+                                message=("이름 변경됨" if ok else "파일을 찾을 수 없습니다."),
+                            )
+                    elif mtype == "storage_set_ai_access":
+                        fid = str(data.get("file_id") or "")
+                        allow = bool(data.get("allow", True))
+                        ok = storage.set_ai_access(fid, allow)
+                        await emit(
+                            type="storage_set_ai_access_result",
+                            ok=ok, file_id=fid, ai_access=allow,
+                            message=(
+                                f"AI 접근 {'허용' if allow else '차단'}"
+                                if ok else "파일을 찾을 수 없습니다."
+                            ),
+                        )
+                except Exception as e:
+                    traceback.print_exc()
+                    await emit(
+                        type=f"{mtype}_result", ok=False,
+                        message=f"오류: {type(e).__name__}: {e}",
+                    )
+
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -2965,6 +3337,8 @@ async def websocket_endpoint(ws: WebSocket):
                 pass
         session.stop_observing()
         ACTIVE.pop(conn_id, None)
+        # 사이클 #30 — 저장공간 토큰 폐기. 같은 face_name 으로 재로그인 시 새 토큰 발급.
+        _purge_storage_token(storage_state.get("token"))
 
 
 async def handle_audio(payload: bytes, emit, emit_bytes, session: UserSession, build_context, learn_and_signal=None):
@@ -3159,29 +3533,55 @@ async def favicon():
 # ============================================================
 # Harness Evolution — 텔레메트리 요약 + Evolve 엔드포인트
 # ============================================================
-def _harness_auth_check(request: Request, token: Optional[str]) -> None:
-    """공통 인증 게이트 — telemetry/evolve 양쪽에서 사용.
+def _extract_bearer_or_query_token(request: Request, token: Optional[str]) -> str:
+    """query token 또는 Authorization: Bearer 헤더에서 토큰 문자열을 추출."""
+    if token:
+        return token.strip()
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
 
-    HARNESS_TELEMETRY_TOKEN 설정 시: 토큰 검증 (query 또는 Bearer)
-    미설정 시: loopback 만 허용 (개발 모드)
+
+def _harness_auth_check(request: Request, token: Optional[str]) -> None:
+    """공통 인증 게이트 — telemetry/evolve/actions 모두 사용.
+
+    사이클 #31 — 인증 시스템 통합. 다음 셋 중 하나가 통과하면 OK:
+      1. ``HARNESS_TELEMETRY_TOKEN`` 환경변수와 일치 (운영 환경의 정적 토큰)
+      2. owner_auth 통과 시 발급된 storage_token (사이클 #30) — 같은 본인 가족
+      3. 환경변수 미설정 + loopback (127.0.0.1) — 개발 모드
+
+    셋 다 실패하면 401. 클라이언트(제어판)는 storage_ready 메시지의 토큰을 그대로
+    보내면 되므로 별도 토큰 입력 UI 가 필요 없다.
     """
     from fastapi import HTTPException
+
+    provided = _extract_bearer_or_query_token(request, token)
     expected = os.environ.get("HARNESS_TELEMETRY_TOKEN", "").strip()
-    if expected:
-        provided = token or ""
-        if not provided:
-            auth = request.headers.get("authorization", "")
-            if auth.lower().startswith("bearer "):
-                provided = auth[7:].strip()
-        if not secrets.compare_digest(provided, expected):
-            raise HTTPException(status_code=401, detail="invalid token")
-    else:
+
+    # 1) 정적 환경변수 토큰 일치
+    if expected and provided and secrets.compare_digest(provided, expected):
+        return
+
+    # 2) storage_token 일치 (owner_auth 통과한 활성 세션)
+    if provided and _resolve_storage_token(provided) is not None:
+        return
+
+    # 3) 환경변수 미설정 + loopback fallback (개발 모드)
+    if not expected:
         client_host = (request.client.host if request.client else "") or ""
-        if client_host not in ("127.0.0.1", "::1", "localhost"):
-            raise HTTPException(
-                status_code=403,
-                detail="HARNESS_TELEMETRY_TOKEN 미설정 — loopback 외 접근 차단. 환경변수를 설정하세요.",
-            )
+        if client_host in ("127.0.0.1", "::1", "localhost"):
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "HARNESS_TELEMETRY_TOKEN 미설정 — loopback 외 접근은 owner_auth 통과 후 "
+                "발급되는 storage_token 또는 환경변수 토큰이 필요합니다."
+            ),
+        )
+
+    # 그 외 — 토큰 잘못됨/만료
+    raise HTTPException(status_code=401, detail="invalid token")
 
 
 @app.get("/api/harness/telemetry")
@@ -3397,22 +3797,25 @@ async def harness_evolve_export_endpoint(
 # 사이클 #4 T002 — Harness 텔레메트리 실시간 WebSocket 스트림
 # ============================================================
 def _harness_ws_auth_ok(ws: WebSocket, token: Optional[str]) -> bool:
-    """WebSocket 용 인증 게이트 — telemetry/evolve 와 동일 정책.
+    """WebSocket 용 인증 게이트 — _harness_auth_check 와 동일 3단계 정책.
 
-    HARNESS_TELEMETRY_TOKEN 설정 시: query token 또는 Authorization Bearer 검증.
-    미설정 시: loopback 에서만 허용 (개발 모드).
+    사이클 #31: storage_token fallback 추가로 owner_auth 통과한 세션이면 자동 인정.
     """
+    provided = (token or "").strip()
+    if not provided:
+        auth = ws.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            provided = auth[7:].strip()
+
     expected = os.environ.get("HARNESS_TELEMETRY_TOKEN", "").strip()
-    if expected:
-        provided = (token or "").strip()
-        if not provided:
-            auth = ws.headers.get("authorization", "")
-            if auth.lower().startswith("bearer "):
-                provided = auth[7:].strip()
-        return bool(provided) and secrets.compare_digest(provided, expected)
-    # loopback only
-    client_host = (ws.client.host if ws.client else "") or ""
-    return client_host in ("127.0.0.1", "::1", "localhost")
+    if expected and provided and secrets.compare_digest(provided, expected):
+        return True
+    if provided and _resolve_storage_token(provided) is not None:
+        return True
+    if not expected:
+        client_host = (ws.client.host if ws.client else "") or ""
+        return client_host in ("127.0.0.1", "::1", "localhost")
+    return False
 
 
 @app.websocket("/api/harness/ws")

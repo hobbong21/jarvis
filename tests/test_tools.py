@@ -528,5 +528,417 @@ class SeeAndIdentifyTests(unittest.TestCase):
         self.assertIn("등록된 얼굴이 없습니다", out)
 
 
+# ============================================================
+# 사이클 #30 — 사용자 저장공간 도구 (_t_storage_*)
+# ============================================================
+class StorageToolsTests(unittest.TestCase):
+    """list_files / read_file / search_files — UserStorage 와 통합."""
+
+    def setUp(self):
+        from sarvis.user_storage import UserStorage
+        self._tmp = tempfile.TemporaryDirectory()
+        self.storage = UserStorage("u", root=self._tmp.name, limit_bytes=10 ** 6)
+        self.exec = _make_executor(self._tmp.name, user_storage=self.storage)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        os.environ.pop("SARVIS_TOOL_MEMORY", None)
+
+    # ---------- 인증 가드 ----------
+    def test_no_storage_attached_returns_friendly_message(self):
+        ex = _make_executor(self._tmp.name)  # user_storage 없음
+        for name in ("storage_list_files", "storage_read_file", "storage_search_files"):
+            args = {"file_id": "x"} if name == "storage_read_file" else {"query": "x"} if name == "storage_search_files" else {}
+            out = ex.execute(name, args)
+            self.assertIn("활성화되지 않았습니다", out)
+
+    def test_set_user_storage_setter_works(self):
+        ex = _make_executor(self._tmp.name)
+        self.assertIsNone(ex.user_storage)
+        ex.set_user_storage(self.storage)
+        self.assertIs(ex.user_storage, self.storage)
+
+    # ---------- list ----------
+    def test_list_empty_storage(self):
+        out = self.exec.execute("storage_list_files", {})
+        self.assertIn("없습니다", out)
+
+    def test_list_shows_only_ai_allowed(self):
+        on = self.storage.save_file("public.md", b"hi", ai_access=True)
+        off = self.storage.save_file("secret.md", b"hi", ai_access=False)
+        out = self.exec.execute("storage_list_files", {})
+        self.assertIn("public.md", out)
+        self.assertNotIn("secret.md", out)
+        self.assertIn(on, out)
+        self.assertNotIn(off, out)
+
+    def test_list_kind_filter(self):
+        self.storage.save_file("a.md", b"x", kind="upload")
+        self.storage.save_file("b.md", b"x", kind="conversation")
+        out = self.exec.execute("storage_list_files", {"kind": "conversation"})
+        self.assertIn("b.md", out)
+        self.assertNotIn("a.md", out)
+
+    # ---------- read ----------
+    def test_read_empty_id_helps(self):
+        out = self.exec.execute("storage_read_file", {"file_id": ""})
+        self.assertIn("storage_list_files", out)
+
+    def test_read_unknown_id(self):
+        out = self.exec.execute("storage_read_file", {"file_id": "nosuch"})
+        self.assertIn("찾을 수 없습니다", out)
+
+    def test_read_text_file_returns_body(self):
+        fid = self.storage.save_file("note.md", "회의록 내용".encode("utf-8"))
+        out = self.exec.execute("storage_read_file", {"file_id": fid})
+        self.assertIn("note.md", out)
+        self.assertIn("회의록 내용", out)
+
+    def test_read_blocked_when_ai_access_off(self):
+        fid = self.storage.save_file("private.md", b"shh", ai_access=False)
+        out = self.exec.execute("storage_read_file", {"file_id": fid})
+        self.assertIn("AI 접근을 차단", out)
+
+    def test_read_too_large_returns_metadata(self):
+        big = b"x" * (300 * 1024)  # 300KB > 256KB max_inline
+        fid = self.storage.save_file("big.bin", big)
+        out = self.exec.execute("storage_read_file", {"file_id": fid})
+        self.assertIn("너무 커서", out)
+        self.assertIn("big.bin", out)
+
+    def test_read_binary_returns_meta(self):
+        # 0x80 같은 단독 바이트는 UTF-8 디코드 실패.
+        fid = self.storage.save_file("img.bin", b"\x80\x81\x82\x83")
+        out = self.exec.execute("storage_read_file", {"file_id": fid})
+        self.assertIn("바이너리", out)
+
+    # ---------- search ----------
+    def test_search_empty_query(self):
+        out = self.exec.execute("storage_search_files", {"query": ""})
+        self.assertIn("비어있습니다", out)
+
+    def test_search_no_match(self):
+        self.storage.save_file("a.md", b"hello world")
+        out = self.exec.execute("storage_search_files", {"query": "xyzzy"})
+        self.assertIn("일치하는 파일이 없습니다", out)
+
+    def test_search_finds_in_filename_and_body(self):
+        self.storage.save_file("project.md", b"unrelated body")
+        self.storage.save_file("notes.md", "프로젝트 회의 내용".encode("utf-8"))
+        out = self.exec.execute("storage_search_files", {"query": "project"})
+        self.assertIn("project.md", out)
+        out2 = self.exec.execute("storage_search_files", {"query": "프로젝트"})
+        self.assertIn("notes.md", out2)
+
+    def test_search_excludes_ai_off_files(self):
+        self.storage.save_file("hidden.md", b"keyword", ai_access=False)
+        out = self.exec.execute("storage_search_files", {"query": "keyword"})
+        self.assertIn("일치하는 파일이 없습니다", out)
+
+    # ---------- save_conversation (Phase 3d) ----------
+    def test_save_conversation_no_storage(self):
+        ex = _make_executor(self._tmp.name)  # storage 없음
+        out = ex.execute("save_conversation", {"content": "# 회의\n내용"})
+        self.assertIn("활성화되지 않았습니다", out)
+
+    def test_save_conversation_empty_body(self):
+        out = self.exec.execute("save_conversation", {"content": "   "})
+        self.assertIn("비어있습니다", out)
+
+    def test_save_conversation_creates_file(self):
+        out = self.exec.execute(
+            "save_conversation",
+            {"content": "# 오늘 회의\n- 결론: 진행", "title": "2026-05-04 회의"},
+        )
+        self.assertIn("저장했습니다", out)
+        self.assertIn("file_id=", out)
+        files = self.storage.list_files(kind="conversation")
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0]["name"].endswith(".md"))
+
+    def test_save_conversation_quota_exceeded(self):
+        from sarvis.user_storage import UserStorage
+        small = UserStorage("u2", root=self._tmp.name, limit_bytes=10)
+        ex = _make_executor(self._tmp.name, user_storage=small)
+        big_body = "x" * 50
+        out = ex.execute("save_conversation", {"content": big_body})
+        self.assertIn("공간 부족", out)
+
+    def test_save_conversation_respects_ai_access(self):
+        out = self.exec.execute(
+            "save_conversation",
+            {"content": "# 비밀 메모\n조용히", "ai_access": False},
+        )
+        self.assertIn("저장했습니다", out)
+        files = self.storage.list_files()
+        self.assertFalse(files[0]["ai_access"])
+
+
+# ============================================================
+# 사이클 #32 — translate_text (양방향 번역 wrapper)
+# ============================================================
+class TranslateTextTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        os.environ.pop("SARVIS_TOOL_MEMORY", None)
+
+    def _executor_with_client(self, claude_response_text: str):
+        # Claude messages.create 응답을 mock.
+        client = MagicMock()
+        msg = MagicMock()
+        msg.content = [MagicMock(text=claude_response_text)]
+        client.messages.create.return_value = msg
+        return _make_executor(self._tmp.name, client=client), client
+
+    def test_empty_text_returns_helpful_message(self):
+        ex = _make_executor(self._tmp.name)
+        out = ex.execute("translate_text", {"text": "  "})
+        self.assertIn("비어있습니다", out)
+
+    def test_no_client_returns_message(self):
+        ex = _make_executor(self._tmp.name, client=None)
+        out = ex.execute("translate_text", {"text": "Hello"})
+        self.assertIn("연결되지 않았습니다", out)
+
+    def test_translation_with_src_label(self):
+        ex, _client = self._executor_with_client("[SRC: English]\n안녕하세요")
+        out = ex.execute("translate_text", {"text": "Hello", "target_lang": "ko"})
+        self.assertIn("English", out)
+        self.assertIn("Korean", out)
+        self.assertIn("안녕하세요", out)
+
+    def test_translation_without_src_label_still_works(self):
+        ex, _client = self._executor_with_client("こんにちは")
+        out = ex.execute("translate_text", {"text": "안녕", "target_lang": "ja"})
+        self.assertIn("Japanese", out)
+        self.assertIn("こんにちは", out)
+
+    def test_korean_alias_normalized(self):
+        ex, client = self._executor_with_client("[SRC: Korean]\nHello")
+        ex.execute("translate_text", {"text": "안녕", "target_lang": "영어"})
+        # client.messages.create 가 호출됐고 prompt 안에 English 가 있어야 함.
+        call_args = client.messages.create.call_args
+        prompt_text = call_args.kwargs["messages"][0]["content"]
+        self.assertIn("English", prompt_text)
+
+    def test_default_target_is_korean(self):
+        ex, client = self._executor_with_client("[SRC: English]\n안녕")
+        ex.execute("translate_text", {"text": "Hi"})
+        call_args = client.messages.create.call_args
+        prompt_text = call_args.kwargs["messages"][0]["content"]
+        self.assertIn("Korean", prompt_text)
+
+    def test_api_failure_caught(self):
+        client = MagicMock()
+        client.messages.create.side_effect = RuntimeError("network down")
+        ex = _make_executor(self._tmp.name, client=client)
+        out = ex.execute("translate_text", {"text": "Hello"})
+        self.assertIn("번역 실패", out)
+        self.assertIn("network down", out)
+
+
+# ============================================================
+# 사이클 #32 — Phase 5b: count_objects, read_emotion
+# 비전 도구는 Claude API 응답을 mock 하고 _get_vision_b64 를 패치한다.
+# ============================================================
+class CountObjectsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        os.environ.pop("SARVIS_TOOL_MEMORY", None)
+
+    def _executor_with_vision(self, claude_text: str = "사람 2명이 보입니다."):
+        client = MagicMock()
+        msg = MagicMock()
+        msg.content = [MagicMock(text=claude_text)]
+        client.messages.create.return_value = msg
+        ex = _make_executor(self._tmp.name, client=client)
+        # 카메라 프레임 mock — 임의 b64 반환.
+        ex._get_vision_b64 = lambda: "ZmFrZWltYWdl"
+        return ex, client
+
+    def test_empty_target_helpful(self):
+        ex, _ = self._executor_with_vision()
+        out = ex.execute("count_objects", {"target": ""})
+        self.assertIn("비어있습니다", out)
+
+    def test_no_camera_frame(self):
+        ex = _make_executor(self._tmp.name)
+        ex._get_vision_b64 = lambda: None
+        out = ex.execute("count_objects", {"target": "사람"})
+        self.assertIn("카메라 프레임", out)
+
+    def test_no_client(self):
+        ex = _make_executor(self._tmp.name, client=None)
+        ex._get_vision_b64 = lambda: "ZmFrZQ=="
+        out = ex.execute("count_objects", {"target": "사람"})
+        self.assertIn("연결되지 않았습니다", out)
+
+    def test_returns_claude_text(self):
+        ex, _ = self._executor_with_vision("사람 2명이 보입니다.")
+        out = ex.execute("count_objects", {"target": "사람"})
+        self.assertEqual(out, "사람 2명이 보입니다.")
+
+    def test_target_passed_in_prompt(self):
+        ex, client = self._executor_with_vision()
+        ex.execute("count_objects", {"target": "의자"})
+        call_args = client.messages.create.call_args
+        prompt_text = call_args.kwargs["messages"][0]["content"][1]["text"]
+        self.assertIn("의자", prompt_text)
+
+
+class ReadEmotionTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        os.environ.pop("SARVIS_TOOL_MEMORY", None)
+
+    def _executor_with_vision(self, claude_text: str = "차분한 표정. 눈이 살짝 처져 있어."):
+        client = MagicMock()
+        msg = MagicMock()
+        msg.content = [MagicMock(text=claude_text)]
+        client.messages.create.return_value = msg
+        ex = _make_executor(self._tmp.name, client=client)
+        ex._get_vision_b64 = lambda: "ZmFrZQ=="
+        return ex, client
+
+    def test_no_frame(self):
+        ex = _make_executor(self._tmp.name)
+        ex._get_vision_b64 = lambda: None
+        out = ex.execute("read_emotion", {})
+        self.assertIn("카메라 프레임", out)
+
+    def test_no_client(self):
+        ex = _make_executor(self._tmp.name, client=None)
+        ex._get_vision_b64 = lambda: "ZmFrZQ=="
+        out = ex.execute("read_emotion", {})
+        self.assertIn("연결되지 않았습니다", out)
+
+    def test_returns_claude_text(self):
+        ex, _ = self._executor_with_vision("차분한 표정.")
+        out = ex.execute("read_emotion", {})
+        self.assertEqual(out, "차분한 표정.")
+
+    def test_api_failure(self):
+        client = MagicMock()
+        client.messages.create.side_effect = RuntimeError("oops")
+        ex = _make_executor(self._tmp.name, client=client)
+        ex._get_vision_b64 = lambda: "ZmFrZQ=="
+        out = ex.execute("read_emotion", {})
+        self.assertIn("표정 분석 실패", out)
+
+
+# ============================================================
+# 사이클 #32 — Phase 5c: check_posture, compare_photos
+# ============================================================
+class CheckPostureTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        os.environ.pop("SARVIS_TOOL_MEMORY", None)
+
+    def _make(self, claude_text: str = "허리는 곧지만 어깨가 약간 굽었어요."):
+        client = MagicMock()
+        msg = MagicMock()
+        msg.content = [MagicMock(text=claude_text)]
+        client.messages.create.return_value = msg
+        ex = _make_executor(self._tmp.name, client=client)
+        ex._get_vision_b64 = lambda: "ZmFrZQ=="
+        return ex, client
+
+    def test_no_frame(self):
+        ex = _make_executor(self._tmp.name)
+        ex._get_vision_b64 = lambda: None
+        out = ex.execute("check_posture", {})
+        self.assertIn("카메라 프레임", out)
+
+    def test_no_client(self):
+        ex = _make_executor(self._tmp.name, client=None)
+        ex._get_vision_b64 = lambda: "ZmFrZQ=="
+        out = ex.execute("check_posture", {})
+        self.assertIn("연결되지 않았습니다", out)
+
+    def test_context_passed_in_prompt(self):
+        ex, client = self._make()
+        ex.execute("check_posture", {"context": "desk_work"})
+        prompt = client.messages.create.call_args.kwargs["messages"][0]["content"][1]["text"]
+        self.assertIn("desk_work", prompt)
+
+    def test_returns_claude_text(self):
+        ex, _ = self._make("좋은 자세입니다.")
+        out = ex.execute("check_posture", {})
+        self.assertEqual(out, "좋은 자세입니다.")
+
+
+class ComparePhotosTests(unittest.TestCase):
+    def setUp(self):
+        from sarvis.user_storage import UserStorage
+        self._tmp = tempfile.TemporaryDirectory()
+        self.storage = UserStorage("u", root=self._tmp.name, limit_bytes=10 ** 6)
+        # 두 가짜 이미지 저장 (실제 JPEG 안 만들어도 됨 — Claude API 는 mock).
+        self.fid_a = self.storage.save_file("before.jpg", b"\xff\xd8\xff\xe0fake_a", kind="media")
+        self.fid_b = self.storage.save_file("after.jpg", b"\xff\xd8\xff\xe0fake_b", kind="media")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        os.environ.pop("SARVIS_TOOL_MEMORY", None)
+
+    def _make_executor(self, claude_text: str = "두 사진의 차이는 ..."):
+        client = MagicMock()
+        msg = MagicMock()
+        msg.content = [MagicMock(text=claude_text)]
+        client.messages.create.return_value = msg
+        ex = _make_executor(self._tmp.name, client=client, user_storage=self.storage)
+        return ex, client
+
+    def test_no_storage(self):
+        ex = _make_executor(self._tmp.name)
+        out = ex.execute("compare_photos", {"file_id_a": "x", "file_id_b": "y"})
+        self.assertIn("활성화되지 않았습니다", out)
+
+    def test_empty_ids(self):
+        ex, _ = self._make_executor()
+        out = ex.execute("compare_photos", {"file_id_a": "", "file_id_b": ""})
+        self.assertIn("file_id", out)
+
+    def test_same_id_rejected(self):
+        ex, _ = self._make_executor()
+        out = ex.execute("compare_photos", {"file_id_a": self.fid_a, "file_id_b": self.fid_a})
+        self.assertIn("같은 file_id", out)
+
+    def test_unknown_id(self):
+        ex, _ = self._make_executor()
+        out = ex.execute("compare_photos", {"file_id_a": "nope", "file_id_b": self.fid_b})
+        self.assertIn("찾을 수 없습니다", out)
+
+    def test_ai_blocked(self):
+        self.storage.set_ai_access(self.fid_a, False)
+        ex, _ = self._make_executor()
+        out = ex.execute("compare_photos", {"file_id_a": self.fid_a, "file_id_b": self.fid_b})
+        self.assertIn("AI 접근 차단", out)
+
+    def test_returns_claude_text(self):
+        ex, _ = self._make_executor("두 사진의 차이: 조명이 더 밝아졌습니다.")
+        out = ex.execute("compare_photos", {"file_id_a": self.fid_a, "file_id_b": self.fid_b})
+        self.assertEqual(out, "두 사진의 차이: 조명이 더 밝아졌습니다.")
+
+    def test_both_images_passed_to_api(self):
+        ex, client = self._make_executor()
+        ex.execute("compare_photos", {"file_id_a": self.fid_a, "file_id_b": self.fid_b})
+        content = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        # 첫 두 항목이 image 여야 함.
+        self.assertEqual(content[0]["type"], "image")
+        self.assertEqual(content[1]["type"], "image")
+
+
 if __name__ == "__main__":
     unittest.main()

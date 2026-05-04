@@ -462,6 +462,7 @@
       // ── 사이클 #18: 주인 인증 ────────────────────────────
       case 'auth_status':
         applyAuthStatus(m);
+        if (window.__sarvis_onAuthStatus) window.__sarvis_onAuthStatus(m);
         break;
       case 'auth_progress':
         applyAuthProgress(m);
@@ -471,8 +472,34 @@
         break;
       case 'auth_required':
         // 서버가 미인증 상태에서 명령을 거부 — 오버레이 다시 표시.
-        if (authState && !authState.authed) showAuthOverlay();
+        // 사이클 #29 — reason="reauth_due" 면 1시간 만료로 재인증 요청.
+        if (authState) authState.authed = false;
+        showAuthOverlay();
         if (m.message) flash(`🔒 ${m.message}`, 'error');
+        break;
+      case 'auth_revoked':
+        // 사이클 #29 — 재인증 grace 만료. reason: "absent" | "imposter".
+        if (authState) authState.authed = false;
+        showAuthOverlay();
+        if (m.message) flash(`🚪 ${m.message}`, 'error');
+        break;
+      // 사이클 #30/31 — 사용자 저장공간 + 제어판
+      case 'storage_ready':
+        userStorage.activate(m.token, m.used_bytes, m.limit_bytes);
+        controlPanel.activate();
+        if (window.__sarvis_onStorageReady) window.__sarvis_onStorageReady(m);
+        break;
+      case 'storage_list_result':
+        userStorage.handleListResult(m);
+        break;
+      case 'storage_delete_result':
+        userStorage.handleDeleteResult(m);
+        break;
+      case 'storage_set_ai_access_result':
+        userStorage.handleAiAccessResult(m);
+        break;
+      case 'storage_rename_result':
+        if (m.ok) userStorage.refreshList();
         break;
       case 'auth_reset_ok':
         // 서버가 등록을 지웠음 → 등록 폼으로 전환.
@@ -2684,6 +2711,613 @@
       if (timeEl) timeEl.textContent = '00:00';
     }
   }
+
+  // ─────────────────────────────────────────────────────────────
+  // 사이클 #30 (사이클 #31 정리) — 사용자 저장공간 컨텐츠 모듈
+  // 패널/토글/탭 전환은 controlPanel 모듈이 담당. 이 모듈은 저장공간 탭의
+  // 컨텐츠(quota/upload/list)만 책임진다.
+  // 업로드/다운로드는 HTTP (/api/storage/*), 메타 작업은 WS.
+  // ─────────────────────────────────────────────────────────────
+  const userStorage = (() => {
+    let token = null;
+    let used = 0;
+    let limit = 5 * 1024 ** 3;
+
+    const elDrop = $('userstorage-drop');
+    const elUploadBtn = $('userstorage-upload-btn');
+    const elFileInput = $('userstorage-file-input');
+    const elList = $('userstorage-list');
+    const elMsg = $('userstorage-msg');
+    const elUsed = $('userstorage-used');
+    const elLimit = $('userstorage-limit');
+    const elBarFill = $('userstorage-bar-fill');
+    const elBar = elBarFill ? elBarFill.parentElement : null;
+
+    function fmtBytes(b) {
+      if (!b || b <= 0) return '0 B';
+      if (b < 1024) return b + ' B';
+      if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+      if (b < 1024 ** 3) return (b / (1024 * 1024)).toFixed(1) + ' MB';
+      return (b / (1024 ** 3)).toFixed(2) + ' GB';
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '';
+      const d = new Date(ts * 1000);
+      try {
+        return d.toLocaleString('ko-KR', {
+          month: 'short', day: 'numeric',
+          hour: '2-digit', minute: '2-digit',
+        });
+      } catch (e) { return d.toISOString().slice(0, 16); }
+    }
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    function setMsg(text, level) {
+      if (!elMsg) return;
+      elMsg.textContent = text || '';
+      elMsg.className = 'userstorage-msg' + (level ? ' ' + level : '');
+    }
+
+    function updateQuota() {
+      if (elUsed) elUsed.textContent = fmtBytes(used);
+      if (elLimit) elLimit.textContent = fmtBytes(limit);
+      if (elBarFill) {
+        const pct = Math.min(100, limit > 0 ? (used / limit) * 100 : 0);
+        elBarFill.style.width = pct.toFixed(1) + '%';
+        elBarFill.classList.toggle('warn', pct >= 80 && pct < 95);
+        elBarFill.classList.toggle('full', pct >= 95);
+        if (elBar) elBar.setAttribute('aria-valuenow', String(Math.round(pct)));
+      }
+    }
+
+    function refreshList() {
+      if (!token) return;
+      send({ type: 'storage_list' });
+    }
+
+    function renderList(files) {
+      if (!elList) return;
+      elList.innerHTML = '';
+      if (!files || files.length === 0) {
+        const li = document.createElement('li');
+        li.className = 'userstorage-empty';
+        li.textContent = '아직 저장된 파일이 없습니다. 위에 끌어다 놓거나 파일 선택을 누르세요.';
+        elList.appendChild(li);
+        return;
+      }
+      for (const f of files) {
+        const li = document.createElement('li');
+        li.className = 'userstorage-item';
+        li.dataset.fileId = f.file_id;
+        const dlUrl = `/api/storage/file/${encodeURIComponent(f.file_id)}?t=${encodeURIComponent(token)}`;
+        li.innerHTML = `
+          <div class="userstorage-item-main">
+            <span class="userstorage-item-kind" data-kind="${escapeHtml(f.kind)}"></span>
+            <span class="userstorage-item-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+          </div>
+          <div class="userstorage-item-meta">
+            <span>${fmtBytes(f.size)}</span>
+            <time>${escapeHtml(fmtTime(f.uploaded_at))}</time>
+          </div>
+          <div class="userstorage-item-actions">
+            <label class="userstorage-ai-toggle" title="AI 접근 허용">
+              <input type="checkbox" ${f.ai_access ? 'checked' : ''} data-toggle-id="${escapeHtml(f.file_id)}">
+              <span>AI</span>
+            </label>
+            <a class="userstorage-action-btn" href="${dlUrl}" download="${escapeHtml(f.name)}" title="다운로드">⤓</a>
+            <button class="userstorage-action-btn" type="button" data-delete-id="${escapeHtml(f.file_id)}" title="삭제">×</button>
+          </div>
+        `;
+        elList.appendChild(li);
+      }
+
+      elList.querySelectorAll('input[data-toggle-id]').forEach((el) => {
+        el.addEventListener('change', () => {
+          send({
+            type: 'storage_set_ai_access',
+            file_id: el.dataset.toggleId,
+            allow: el.checked,
+          });
+        });
+      });
+      elList.querySelectorAll('button[data-delete-id]').forEach((el) => {
+        el.addEventListener('click', () => {
+          if (!confirm('정말 이 파일을 삭제하시겠습니까?')) return;
+          send({ type: 'storage_delete', file_id: el.dataset.deleteId });
+        });
+      });
+    }
+
+    async function uploadFile(file) {
+      if (!token) {
+        setMsg('인증이 완료되어야 업로드할 수 있습니다.', 'error');
+        return;
+      }
+      const MAX = 100 * 1024 * 1024;
+      if (file.size > MAX) {
+        setMsg(`${file.name}: 100MB 초과 (현재 ${fmtBytes(file.size)})`, 'error');
+        return;
+      }
+      setMsg(`업로드 중: ${file.name} ...`, '');
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('ai_access', 'true');
+      try {
+        const res = await fetch(
+          `/api/storage/upload?t=${encodeURIComponent(token)}`,
+          { method: 'POST', body: fd },
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setMsg(`업로드 실패: ${data.error || res.statusText}`, 'error');
+          return;
+        }
+        setMsg(`업로드 완료: ${data.name}`, 'ok');
+        if (typeof data.used_bytes === 'number') {
+          used = data.used_bytes;
+          updateQuota();
+        }
+        refreshList();
+      } catch (e) {
+        setMsg(`네트워크 오류: ${e.message}`, 'error');
+      }
+    }
+
+    function bind() {
+      if (elUploadBtn) elUploadBtn.addEventListener('click', () => elFileInput && elFileInput.click());
+      if (elFileInput) {
+        elFileInput.addEventListener('change', (e) => {
+          const files = Array.from(e.target.files || []);
+          files.forEach(uploadFile);
+          e.target.value = '';
+        });
+      }
+      if (elDrop) {
+        ['dragenter', 'dragover'].forEach((ev) => {
+          elDrop.addEventListener(ev, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            elDrop.classList.add('dragging');
+          });
+        });
+        elDrop.addEventListener('dragleave', (e) => {
+          e.preventDefault();
+          if (!elDrop.contains(e.relatedTarget)) {
+            elDrop.classList.remove('dragging');
+          }
+        });
+        elDrop.addEventListener('drop', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          elDrop.classList.remove('dragging');
+          const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+          files.forEach(uploadFile);
+        });
+      }
+    }
+
+    bind();
+
+    return {
+      activate(t, u, l) {
+        token = t;
+        used = u || 0;
+        limit = l || (5 * 1024 ** 3);
+        updateQuota();
+      },
+      getToken() { return token; },
+      handleListResult(m) {
+        if (!m.ok) return;
+        renderList(m.files || []);
+        if (typeof m.used_bytes === 'number') used = m.used_bytes;
+        if (typeof m.limit_bytes === 'number') limit = m.limit_bytes;
+        updateQuota();
+      },
+      handleDeleteResult(m) {
+        if (m.ok) {
+          setMsg('삭제됨', 'ok');
+          if (typeof m.used_bytes === 'number') {
+            used = m.used_bytes;
+            updateQuota();
+          }
+          refreshList();
+        } else {
+          setMsg(m.message || '삭제 실패', 'error');
+        }
+      },
+      handleAiAccessResult(m) {
+        if (m.ok) {
+          setMsg(m.message || 'AI 접근 변경됨', 'ok');
+        } else {
+          setMsg(m.message || 'AI 접근 변경 실패', 'error');
+          refreshList();
+        }
+      },
+      refreshList,
+    };
+  })();
+
+  // ─────────────────────────────────────────────────────────────
+  // 사이클 #31 — 통합 제어판 (4 탭: 내 정보 / 저장공간 / Harness / 설정)
+  // userStorage / harness / userInfo / settings 컨텐츠 모듈을 묶고,
+  // 패널 토글과 탭 전환만 책임진다. 각 탭이 활성화될 때 onShow 콜백 호출.
+  // ─────────────────────────────────────────────────────────────
+  const controlPanel = (() => {
+    const elToggle = $('controlpanel-toggle-btn');
+    const elPanel = $('controlpanel-panel');
+    const elClose = $('controlpanel-close-btn');
+    const tabBtns = Array.from(document.querySelectorAll('.controlpanel-tabs .cp-tab'));
+    const tabBodies = Array.from(document.querySelectorAll('.cp-tab-body'));
+
+    let activeTab = 'info';
+    const onShowHandlers = {};   // tab name -> () => void
+
+    function open() {
+      if (!elPanel) return;
+      elPanel.hidden = false;
+      elPanel.setAttribute('aria-hidden', 'false');
+      requestAnimationFrame(() => elPanel.classList.add('open'));
+      // 현재 활성 탭의 onShow 호출 (열 때마다 갱신).
+      const handler = onShowHandlers[activeTab];
+      if (typeof handler === 'function') handler();
+    }
+
+    function close() {
+      if (!elPanel) return;
+      elPanel.classList.remove('open');
+      elPanel.setAttribute('aria-hidden', 'true');
+      setTimeout(() => { elPanel.hidden = true; }, 280);
+    }
+
+    function selectTab(name) {
+      activeTab = name;
+      tabBtns.forEach((b) => {
+        const sel = b.dataset.tab === name;
+        b.setAttribute('aria-selected', sel ? 'true' : 'false');
+      });
+      tabBodies.forEach((body) => {
+        const sel = body.dataset.tab === name;
+        body.hidden = !sel;
+      });
+      const handler = onShowHandlers[name];
+      if (typeof handler === 'function') handler();
+    }
+
+    function bind() {
+      if (!elPanel || !elToggle) return;
+      elToggle.addEventListener('click', open);
+      // 사이클 #31 — 헤더의 기존 "제어판" 버튼도 같은 패널을 열도록 연결.
+      const headerBtn = $('control-panel-btn');
+      if (headerBtn) headerBtn.addEventListener('click', open);
+      if (elClose) elClose.addEventListener('click', close);
+      tabBtns.forEach((b) => {
+        b.addEventListener('click', () => selectTab(b.dataset.tab));
+      });
+    }
+
+    bind();
+
+    return {
+      activate() {
+        if (elToggle) elToggle.hidden = false;
+      },
+      open,
+      close,
+      selectTab,
+      registerOnShow(tab, fn) {
+        onShowHandlers[tab] = fn;
+      },
+    };
+  })();
+
+  // ─────────────────────────────────────────────────────────────
+  // 사이클 #31 — Harness 탭 (telemetry summary + 권장 actions)
+  // 인증: storage_token 을 Authorization: Bearer 헤더로 전달.
+  // dashboard.html 의 별도 토큰 입력 폐기 — owner_auth 통과로 자동 인증.
+  // ─────────────────────────────────────────────────────────────
+  const harnessTab = (() => {
+    const elCards = $('cp-harness-cards');
+    const elActions = $('cp-harness-actions');
+    const elStatus = $('cp-harness-status');
+    const elMsg = $('cp-harness-msg');
+    const elRefresh = $('cp-harness-refresh');
+    const elEvolve = $('cp-harness-evolve');
+
+    function fmtPct(x) { return ((x || 0) * 100).toFixed(1) + '%'; }
+    function fmtMs(x) { return x ? x.toFixed(1) + 'ms' : '0ms'; }
+    function fmtTs(x) { return x ? new Date(x * 1000).toLocaleTimeString('ko-KR') : '-'; }
+
+    function setStatus(text, level) {
+      if (!elStatus) return;
+      elStatus.textContent = text;
+      elStatus.className = 'cp-harness-status' + (level ? ' ' + level : '');
+    }
+    function setMsg(text, level) {
+      if (!elMsg) return;
+      elMsg.textContent = text || '';
+      elMsg.className = 'cp-harness-msg' + (level ? ' ' + level : '');
+    }
+
+    async function fetchJSON(url, opts) {
+      const tok = userStorage.getToken();
+      const headers = (opts && opts.headers) ? { ...opts.headers } : {};
+      if (tok) headers['Authorization'] = 'Bearer ' + tok;
+      const res = await fetch(url, { ...(opts || {}), headers });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(res.status + ' ' + body.slice(0, 200));
+      }
+      return res.json();
+    }
+
+    function renderCards(s) {
+      if (!elCards) return;
+      const cards = [
+        { label: '총 턴', value: s.total || 0 },
+        { label: '폴백률', value: fmtPct(s.fallback_rate), cls: (s.fallback_rate || 0) > 0.1 ? 'warn' : 'ok' },
+        { label: 'TTS 실패율', value: fmtPct(s.tts_failure_rate), cls: (s.tts_failure_rate || 0) > 0.05 ? 'err' : 'ok' },
+        { label: 'TTS 재생성률', value: fmtPct(s.tts_regen_rate), cls: (s.tts_regen_rate || 0) > 0 ? 'warn' : 'ok' },
+        { label: '평균 Fan-out', value: fmtMs(s.avg_fanout_ms) },
+        { label: '평균 LLM', value: fmtMs(s.avg_llm_ms) },
+        { label: '평균 TTS', value: fmtMs(s.avg_tts_ms) },
+        { label: '마지막 턴', value: fmtTs(s.last_ts) },
+      ];
+      elCards.innerHTML = cards.map((c) =>
+        `<div class="cp-harness-card"><div class="label">${escapeHtml(c.label)}</div><div class="value ${c.cls || ''}">${escapeHtml(c.value)}</div></div>`,
+      ).join('');
+    }
+
+    function renderActions(actions) {
+      if (!elActions) return;
+      if (!actions || actions.length === 0) {
+        elActions.innerHTML = '<div class="cp-placeholder">현재 권장 사항이 없습니다.</div>';
+        return;
+      }
+      elActions.innerHTML = actions.slice(0, 6).map((a) => `
+        <div class="cp-action-row">
+          <div>
+            <div class="desc">${escapeHtml(a.title || a.id || '권장')}</div>
+            <div class="meta">${escapeHtml(a.summary || a.detail || '')}</div>
+          </div>
+          <button type="button" class="cp-btn primary" data-apply="${escapeHtml(a.id || '')}">적용</button>
+        </div>
+      `).join('');
+
+      elActions.querySelectorAll('button[data-apply]').forEach((btn) => {
+        btn.addEventListener('click', () => applyAction(btn.dataset.apply));
+      });
+    }
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    async function refresh() {
+      setStatus('불러오는 중...', '');
+      setMsg('');
+      try {
+        const summary = await fetchJSON('/api/harness/telemetry');
+        renderCards(summary);
+        setStatus(`마지막 갱신: ${new Date().toLocaleTimeString('ko-KR')}`, 'live');
+      } catch (e) {
+        setStatus('텔레메트리 불러오기 실패', 'error');
+        setMsg(`오류: ${e.message}`, 'error');
+        return;
+      }
+      try {
+        const r = await fetchJSON('/api/harness/actions');
+        renderActions((r && r.actions) || r || []);
+      } catch (e) {
+        // actions 엔드포인트 실패는 부드럽게 — 카드만 표시.
+        elActions.innerHTML = `<div class="cp-placeholder">권장 사항을 불러올 수 없습니다 (${escapeHtml(e.message)})</div>`;
+      }
+    }
+
+    async function applyAction(actionId) {
+      if (!actionId) return;
+      if (!confirm('이 권장 사항을 적용할까요?')) return;
+      setMsg('적용 중...', '');
+      try {
+        await fetchJSON('/api/harness/actions/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action_id: actionId }),
+        });
+        setMsg('적용 완료. 텔레메트리 갱신.', 'ok');
+        refresh();
+      } catch (e) {
+        setMsg(`적용 실패: ${e.message}`, 'error');
+      }
+    }
+
+    async function runEvolve() {
+      if (!confirm('/harness:evolve 를 실행할까요? (LLM API 호출 발생)')) return;
+      setMsg('evolve 실행 중... (수십 초 소요 가능)', '');
+      try {
+        const r = await fetchJSON('/api/harness/evolve', { method: 'POST' });
+        setMsg(`완료: ${escapeHtml(r.message || r.summary || '저장됨')}`, 'ok');
+      } catch (e) {
+        setMsg(`evolve 실패: ${e.message}`, 'error');
+      }
+    }
+
+    if (elRefresh) elRefresh.addEventListener('click', refresh);
+    if (elEvolve) elEvolve.addEventListener('click', runEvolve);
+
+    return { refresh };
+  })();
+  controlPanel.registerOnShow('harness', () => harnessTab.refresh());
+
+  // 저장공간 탭 활성화 시 list 갱신.
+  controlPanel.registerOnShow('storage', () => userStorage.refreshList());
+
+  // ─────────────────────────────────────────────────────────────
+  // 사이클 #31 — 내 정보 탭
+  // owner_auth 의 auth_status / auth_complete 메시지에서 데이터 받음.
+  // last_authed_at 은 클라이언트 시각으로 추정 (auth_complete 수신 시각 = 인증 통과 시각).
+  // ─────────────────────────────────────────────────────────────
+  const infoTab = (() => {
+    const elName = $('cp-info-name');
+    const elEnrolled = $('cp-info-enrolled');
+    const elFaceEncs = $('cp-info-face-encs');
+    const elCreated = $('cp-info-created');
+    const elStorageUsed = $('cp-info-storage-used');
+    const elReauthIn = $('cp-info-reauth-in');
+    const elNewChallenge = $('cp-info-new-challenge');
+    const elReset = $('cp-info-reset');
+    const elMsg = $('cp-info-msg');
+
+    let lastAuthedAt = 0;        // 클라이언트 epoch ms
+    const REAUTH_INTERVAL_MS = 60 * 60 * 1000;
+    let countdownTimer = null;
+
+    function fmtDate(epochSec) {
+      if (!epochSec) return '—';
+      try {
+        return new Date(epochSec * 1000).toLocaleString('ko-KR');
+      } catch (e) { return new Date(epochSec * 1000).toISOString(); }
+    }
+
+    function setMsg(text, level) {
+      if (!elMsg) return;
+      elMsg.textContent = text || '';
+      elMsg.className = 'cp-harness-msg' + (level ? ' ' + level : '');
+    }
+
+    function applyAuthInfo(m) {
+      if (!m) return;
+      if (elName) elName.textContent = m.face_name || '—';
+      if (elEnrolled) {
+        elEnrolled.textContent = m.enrolled
+          ? (m.authed ? '인증 완료' : '등록됨 (인증 대기)')
+          : '미등록';
+      }
+      if (elFaceEncs) {
+        const n = m.face_encoding_count || (m.has_face_encoding ? 1 : 0);
+        elFaceEncs.textContent = n > 0 ? `${n}개 각도` : '없음';
+      }
+      if (elCreated) elCreated.textContent = fmtDate(m.created_at);
+    }
+
+    function updateCountdown() {
+      if (!elReauthIn) return;
+      if (lastAuthedAt <= 0) {
+        elReauthIn.textContent = '—';
+        return;
+      }
+      const remaining = (lastAuthedAt + REAUTH_INTERVAL_MS) - Date.now();
+      if (remaining <= 0) {
+        elReauthIn.textContent = '곧 (재인증 트리거 예정)';
+        return;
+      }
+      const min = Math.floor(remaining / 60000);
+      const sec = Math.floor((remaining % 60000) / 1000);
+      elReauthIn.textContent = `${min}분 ${String(sec).padStart(2, '0')}초 후`;
+    }
+
+    function markAuthed() {
+      lastAuthedAt = Date.now();
+      if (countdownTimer) clearInterval(countdownTimer);
+      countdownTimer = setInterval(updateCountdown, 1000);
+      updateCountdown();
+    }
+
+    function applyStorageInfo(used, limit) {
+      if (!elStorageUsed) return;
+      if (typeof used !== 'number' || typeof limit !== 'number') return;
+      const usedMb = (used / (1024 * 1024)).toFixed(1);
+      const limitGb = (limit / (1024 ** 3)).toFixed(1);
+      elStorageUsed.textContent = `${usedMb} MB / ${limitGb} GB`;
+    }
+
+    if (elNewChallenge) {
+      elNewChallenge.addEventListener('click', () => {
+        send({ type: 'auth_new_challenge' });
+        setMsg('새 챌린지 발급 요청', 'ok');
+      });
+    }
+    if (elReset) {
+      elReset.addEventListener('click', () => {
+        if (!confirm('주인 등록을 초기화합니다. 다음 부팅 시 5각도+음성+이름 재등록이 필요합니다. 계속할까요?')) return;
+        send({ type: 'auth_reset' });
+        setMsg('등록 초기화 요청', 'ok');
+      });
+    }
+
+    return { applyAuthInfo, applyStorageInfo, markAuthed };
+  })();
+  controlPanel.registerOnShow('info', () => {
+    // 가장 최근 auth_status 가 있으면 그대로, 없으면 요청.
+    send({ type: 'auth_status_request' });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // 사이클 #31 — 설정 탭
+  // 백엔드 전환은 기존 switch_backend 메시지를 그대로 사용. 히스토리 초기화는 reset_history.
+  // ─────────────────────────────────────────────────────────────
+  const settingsTab = (() => {
+    const elBackends = document.querySelectorAll('#cp-settings-backends [data-backend]');
+    const elClearHist = $('cp-settings-clear-history');
+    const elMsg = $('cp-settings-msg');
+
+    function setMsg(text, level) {
+      if (!elMsg) return;
+      elMsg.textContent = text || '';
+      elMsg.className = 'cp-harness-msg' + (level ? ' ' + level : '');
+    }
+
+    function setActiveBackend(name) {
+      elBackends.forEach((b) => {
+        b.setAttribute('aria-pressed', b.dataset.backend === name ? 'true' : 'false');
+      });
+    }
+
+    elBackends.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const name = btn.dataset.backend;
+        send({ type: 'switch_backend', backend: name });
+        setMsg(`${name} 로 전환 요청`, 'ok');
+        setActiveBackend(name);
+      });
+    });
+
+    if (elClearHist) {
+      elClearHist.addEventListener('click', () => {
+        if (!confirm('현재 대화 히스토리를 초기화할까요?')) return;
+        send({ type: 'reset_history' });
+        setMsg('히스토리 초기화 요청', 'ok');
+      });
+    }
+
+    return { setActiveBackend };
+  })();
+
+  // auth_status / auth_complete / settings_changed 메시지를 정보·설정 탭에 라우팅.
+  // 추가 case 가 메인 switch 위쪽에 이미 있으므로, 여기서는 마지막 m 을 후크로 받는다.
+  // 가장 단순하게: window 레벨 이벤트 대신, 기존 switch case 에서 직접 호출하도록
+  // 두 도우미를 노출. (아래에서 case 'auth_status' 등을 패치하지 않고, 글로벌
+  // 노출만 — 호출은 향후 직접 case 에 한 줄 추가로 가능. 현재는 storage_ready
+  // / auth_complete 시점에 자동 호출 트리거.)
+  // — 단순화: storage_ready 시 markAuthed() 호출 (이미 인증 통과한 상태).
+  const _origStorageReadyHook = (m) => {
+    infoTab.markAuthed();
+    infoTab.applyStorageInfo(m.used_bytes, m.limit_bytes);
+  };
+  // 메인 switch 에서 storage_ready 직후 자동 트리거되도록 글로벌 등록.
+  window.__sarvis_onStorageReady = _origStorageReadyHook;
+  window.__sarvis_onAuthStatus = (m) => infoTab.applyAuthInfo(m);
+  window.__sarvis_onSettingsChanged = (m) => {
+    if (m.setting === 'backend') settingsTab.setActiveBackend(m.value);
+  };
+
 })();
 
 // ─────────────────────────────────────────────────────────────

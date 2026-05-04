@@ -27,6 +27,19 @@ def _get_cv2():
 from .config import cfg
 
 
+def _human_bytes(b: int) -> str:
+    """사이클 #30 — LLM 도구 결과에 표시할 사람이 읽기 쉬운 크기 문자열."""
+    if not b or b <= 0:
+        return "0 B"
+    if b < 1024:
+        return f"{b} B"
+    if b < 1024 * 1024:
+        return f"{b / 1024:.1f} KB"
+    if b < 1024 ** 3:
+        return f"{b / (1024 * 1024):.1f} MB"
+    return f"{b / (1024 ** 3):.2f} GB"
+
+
 # ============================================================
 # Anthropic Tool Use 형식의 도구 스펙
 # ============================================================
@@ -35,8 +48,19 @@ TOOL_DEFINITIONS = [
         "name": "see",
         "description": (
             "Take a snapshot from the camera and describe what's visible. "
-            "Use this when the user asks about their physical surroundings, "
-            "what they're holding, their appearance, or anything visual."
+            "Use for any general visual question:\n"
+            "  · 주변/배경 묘사: '지금 어디야?', '주변 설명해줘', '배경 뭐야?', "
+            "    '여기가 어디?', '내 방 어떻게 보여?', '주변 정리됐어?', "
+            "    'what's around me'\n"
+            "  · 들고 있거나 보고 있는 사물: '이게 뭐야?', '내가 들고 있는 게 뭐야?', "
+            "    '저거 뭐야?'\n"
+            "  · 외양/패션: '내 옷 어때?', '내 머리 어때?', '나 어때 보여?'\n"
+            "  · 일반 시각: '뭐가 보여?', 'what do you see?'\n\n"
+            "When the question is about background/scene/surroundings, describe the "
+            "space comprehensively: room type, lighting and ambient mood, visible "
+            "objects with their relative positions (left/right/foreground/background), "
+            "color palette, and what kind of activity the space appears suited for. "
+            "Be specific enough that someone who can't see could picture it."
         ),
         "input_schema": {
             "type": "object",
@@ -384,6 +408,211 @@ TOOL_DEFINITIONS = [
             "required": [],
         },
     },
+    # 사이클 #30 — 사용자 개인 저장공간. AI 접근 토글이 OFF 인 파일은 자동 제외.
+    {
+        "name": "storage_list_files",
+        "description": (
+            "List files in the user's personal storage that the user has allowed AI access to. "
+            "Use when the user references their saved files (e.g. '내 저장공간 뭐 있어?', "
+            "'내가 저장한 파일 보여줘', '내가 올린 파일 목록'). Returns name, size, kind, "
+            "uploaded_at, and file_id for each file. Files where the user disabled AI access "
+            "are silently excluded — do not mention them."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["upload", "conversation", "media", "ai_artifact"],
+                    "description": "Optional filter by file type. Omit to list all kinds.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "storage_read_file",
+        "description": (
+            "Read a text file from the user's personal storage by file_id. Use when the user "
+            "asks about content of a specific saved file (e.g. '그 메모 읽어줘', "
+            "'어제 저장한 회의록 내용 알려줘'). Call storage_list_files or storage_search_files "
+            "first to obtain the file_id. Only files with AI access enabled are accessible. "
+            "Binary files or files larger than 256KB return metadata instead of full content."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "The file_id from storage_list_files / storage_search_files.",
+                },
+            },
+            "required": ["file_id"],
+        },
+    },
+    {
+        "name": "storage_search_files",
+        "description": (
+            "Search the user's personal storage by filename or text body. Use when the user asks "
+            "to find a specific file (e.g. '회의 관련 파일 찾아줘', '프로젝트 노트 어딨지?'). "
+            "Only files with AI access enabled are searched. Returns up to 20 hits with file_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search keyword. Korean or English.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    # 사이클 #32 — 자세 코칭
+    {
+        "name": "check_posture",
+        "description": (
+            "Analyze the user's body posture from the camera. Use when the user asks "
+            "'내 자세 봐줘', '허리 펴졌어?', '자세 어때?', '구부정해 보여?'. Returns specific, "
+            "actionable feedback (head/neck/shoulders/back/sitting position). If only the "
+            "face is visible, say full posture is not assessable and suggest stepping back."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "context": {
+                    "type": "string",
+                    "description": "Optional context: 'sitting', 'standing', 'desk_work', '운동', etc.",
+                },
+            },
+            "required": [],
+        },
+    },
+    # 사이클 #32 — 사진 비교 (저장공간의 두 이미지 차이)
+    {
+        "name": "compare_photos",
+        "description": (
+            "Compare two photos already in the user's personal storage and describe the "
+            "differences. Use when the user asks '어제 사진과 비교', '예전 거랑 뭐가 달라', "
+            "'before/after 비교'. Pass two file_id values from storage_list_files or "
+            "storage_search_files. Both files must be image kind (photo/media) and have "
+            "AI access enabled. Returns a 2-3 sentence diff: what's the same, what changed, "
+            "and which photo looks like the 'before' if obvious."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_id_a": {
+                    "type": "string",
+                    "description": "First photo's file_id (older / 'before' if applicable).",
+                },
+                "file_id_b": {
+                    "type": "string",
+                    "description": "Second photo's file_id (newer / 'after' if applicable).",
+                },
+            },
+            "required": ["file_id_a", "file_id_b"],
+        },
+    },
+    # 사이클 #32 — 카메라 객체 카운팅
+    {
+        "name": "count_objects",
+        "description": (
+            "Count specific objects or people in the camera view. Use when the user asks "
+            "'몇 개야?', '몇 명?', '사람 몇 명?', '의자 몇 개?', 'how many ___'. "
+            "Returns an integer count plus a brief description of where they are. "
+            "Use a specific target — vague targets like '물건' return 0 with a request to clarify."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "What to count, in Korean (e.g. '사람', '의자', '책', '컵').",
+                },
+            },
+            "required": ["target"],
+        },
+    },
+    # 사이클 #32 — 표정/감정 인식
+    {
+        "name": "read_emotion",
+        "description": (
+            "Analyze the facial expression of the visible person in the camera view. "
+            "Use when the user asks '내 표정 어때?', '내가 피곤해 보여?', '내 기분 어때?', "
+            "'내 표정 읽어줘'. Returns the dominant emotion(s) and observable cues "
+            "(eye openness, mouth corner direction, brow tension). Be honest but kind. "
+            "If no face is detected, say so plainly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    # 사이클 #32 — 양방향 텍스트 번역 (외국어↔한국어)
+    {
+        "name": "translate_text",
+        "description": (
+            "Translate text between Korean and another language. Use when:\n"
+            "  · 외국어 → 한국어: '이거 한국어로 번역', '뭔 뜻이야', "
+            "    '영어 번역해줘', '일본어 번역', 'translate to Korean'\n"
+            "  · 한국어 → 외국어: '영어로 번역해줘', '일본어로 어떻게 말해', "
+            "    'translate to English', '중국어로 변환'\n\n"
+            "Pass the source text as `text`. If translating user's spoken words, use "
+            "the most recent user utterance verbatim. Set `target_lang` to the desired "
+            "target ISO 639-1 code or Korean name (e.g. 'en', 'ja', 'zh', '영어', "
+            "'일본어'). Default is 'ko'. The tool returns the translated text and the "
+            "detected source language. Note: read_text(translate=true) covers text "
+            "visible on the camera; this tool covers free-form spoken or quoted text."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Text to translate. Required.",
+                },
+                "target_lang": {
+                    "type": "string",
+                    "description": "Target language code or Korean name. Default 'ko'.",
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "save_conversation",
+        "description": (
+            "Save the current conversation (or a portion of it) as a markdown file in the user's "
+            "personal storage. Call ONLY when the user explicitly asks to save the conversation "
+            "(e.g. '이 대화 저장해줘', '지금까지 얘기 메모로 남겨', '회의 내용 저장'). "
+            "Compose a clean markdown body before calling: include a short title heading, the topic, "
+            "key user requests, your answers, decisions, and action items. Use the actual conversation "
+            "context — do not fabricate. Default ai_access=true so you can recall it later via "
+            "storage_read_file unless the user asks to keep it private."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Markdown body to save. Should reflect the actual conversation.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Short title (Korean OK). Used as filename. Omit for auto timestamp."
+                    ),
+                },
+                "ai_access": {
+                    "type": "boolean",
+                    "description": "Whether AI can read this file later (default true).",
+                },
+            },
+            "required": ["content"],
+        },
+    },
 ]
 
 
@@ -400,6 +629,7 @@ class ToolExecutor:
         face_registry=None,
         on_recording: Optional[Callable[[str, str], None]] = None,
         on_system_cmd: Optional[Callable[[dict], None]] = None,
+        user_storage=None,
     ):
         self.vision = vision_system
         self.client = anthropic_client  # Claude Vision 호출용
@@ -408,6 +638,8 @@ class ToolExecutor:
         self.face_registry = face_registry  # FaceRegistry (선택)
         self.on_recording = on_recording   # callback(action, label, kind) — "start"|"stop"
         self.on_system_cmd = on_system_cmd  # callback(cmd_dict) — 시스템 제어 명령
+        # 사이클 #30 — 사용자 개인 저장공간. 인증 통과 후 set_user_storage 로 주입.
+        self.user_storage = user_storage
         self.is_recording = False
         self._recording_label = ""
         self.is_audio_recording = False
@@ -416,6 +648,10 @@ class ToolExecutor:
         # 사이클 #9 정비: 도구의 영속 메모리도 data/ 아래로 통일.
         self.memory_path = Path(os.environ.get("SARVIS_TOOL_MEMORY", "data/memory.json"))
         self.memory: dict = self._load_memory()
+
+    def set_user_storage(self, storage) -> None:
+        """사이클 #30 — 인증 통과 후 UserStorage 인스턴스 주입."""
+        self.user_storage = storage
 
     def definitions(self) -> List[dict]:
         return TOOL_DEFINITIONS
@@ -1422,6 +1658,387 @@ class ToolExecutor:
             self.on_system_cmd({"type": "sys_change_setting", "setting": setting, "value": value})
         labels = {"backend": "AI 백엔드", "voice": "음성", "model": "모델"}
         return f"{labels.get(setting, setting)}을(를) '{value}'(으)로 변경 요청했습니다."
+
+    # -------- 사이클 #30: 사용자 개인 저장공간 --------
+    def _t_storage_list_files(self, kind: str = "") -> str:
+        """AI 접근이 허용된 파일 목록. kind 빈 문자열이면 전체."""
+        if self.user_storage is None:
+            return "사용자 저장공간이 활성화되지 않았습니다 (인증 필요)."
+        kind_filter = (kind or "").strip() or None
+        files = self.user_storage.list_files(kind=kind_filter, ai_only=True)
+        if not files:
+            scope = f"'{kind_filter}' 종류의 " if kind_filter else ""
+            return f"AI 접근이 허용된 {scope}파일이 없습니다."
+        lines = []
+        for f in files[:50]:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(f["uploaded_at"]))
+            lines.append(
+                f"- [{f['kind']}] {f['name']} "
+                f"({_human_bytes(f['size'])}, {ts}, file_id={f['file_id']})"
+            )
+        if len(files) > 50:
+            lines.append(f"... 외 {len(files) - 50}개 더 (필터를 좁혀주세요)")
+        return "\n".join(lines)
+
+    def _t_storage_read_file(self, file_id: str) -> str:
+        """파일 텍스트 본문 반환. 너무 크거나 바이너리면 메타만 반환."""
+        if self.user_storage is None:
+            return "사용자 저장공간이 활성화되지 않았습니다 (인증 필요)."
+        fid = (file_id or "").strip()
+        if not fid:
+            return (
+                "file_id 가 비어있습니다. "
+                "storage_list_files 또는 storage_search_files 로 먼저 file_id 를 받아오세요."
+            )
+        meta = self.user_storage.get_metadata(fid)
+        if not meta:
+            return f"파일을 찾을 수 없습니다: {fid}"
+
+        max_inline = 256 * 1024
+        if meta["size"] > max_inline:
+            return (
+                f"파일이 너무 커서 본문을 직접 보여줄 수 없습니다. "
+                f"이름: {meta['name']}, 크기: {_human_bytes(meta['size'])}, "
+                f"종류: {meta['kind']} — 사용자에게 직접 다운로드해서 확인하시라고 안내하세요."
+            )
+
+        try:
+            data = self.user_storage.read_file(fid, ai_call=True)
+        except PermissionError:
+            return (
+                f"이 파일은 사용자가 AI 접근을 차단했습니다: {meta['name']}. "
+                f"필요하면 사용자에게 저장공간 패널에서 AI 토글을 켜달라고 요청하세요."
+            )
+        except FileNotFoundError:
+            return f"디스크에서 파일이 사라졌습니다: {meta['name']}"
+
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return (
+                f"바이너리 파일이라 텍스트로 읽을 수 없습니다. "
+                f"이름: {meta['name']}, 크기: {_human_bytes(meta['size'])}, 종류: {meta['kind']}"
+            )
+        return f"# {meta['name']}\n\n{text}"
+
+    def _t_storage_search_files(self, query: str) -> str:
+        """파일명/본문에서 query 매칭. AI 접근 허용된 파일만."""
+        if self.user_storage is None:
+            return "사용자 저장공간이 활성화되지 않았습니다 (인증 필요)."
+        q = (query or "").strip()
+        if not q:
+            return "검색어가 비어있습니다."
+        hits = self.user_storage.search_files(q, ai_only=True, max_results=20)
+        if not hits:
+            return f"'{q}' 와 일치하는 파일이 없습니다."
+        lines = []
+        for f in hits:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(f["uploaded_at"]))
+            lines.append(
+                f"- [{f['kind']}] {f['name']} "
+                f"({_human_bytes(f['size'])}, {ts}, file_id={f['file_id']})"
+            )
+        return "\n".join(lines)
+
+    def _t_save_conversation(
+        self,
+        content: str,
+        title: str = "",
+        ai_access: bool = True,
+    ) -> str:
+        """LLM 이 직접 정리한 마크다운을 사용자 저장공간에 보관 (kind=conversation)."""
+        if self.user_storage is None:
+            return "사용자 저장공간이 활성화되지 않았습니다 (인증 필요)."
+        from .user_storage import QuotaExceeded
+        body = (content or "").strip()
+        if not body:
+            return "저장할 내용이 비어있습니다 — content 인자에 마크다운 본문을 채워주세요."
+        title_clean = (title or "").strip() or None
+        try:
+            fid = self.user_storage.save_conversation(
+                body, title=title_clean, ai_access=bool(ai_access),
+            )
+        except QuotaExceeded as qe:
+            return f"저장 실패 — 공간 부족: {qe}"
+        except ValueError as ve:
+            return f"저장 실패: {ve}"
+        except Exception as e:
+            return f"저장 실패: {type(e).__name__}: {e}"
+        meta = self.user_storage.get_metadata(fid) or {}
+        return (
+            f"대화를 저장했습니다 — "
+            f"이름: {meta.get('name', '')}, 크기: {_human_bytes(meta.get('size', 0))}, "
+            f"file_id={fid}"
+        )
+
+    # -------- 사이클 #32: 객체 카운팅 / 표정 인식 --------
+    def _t_count_objects(self, target: str) -> str:
+        """카메라에서 특정 대상의 개수 + 위치를 Claude Vision 으로 산출."""
+        target = (target or "").strip()
+        if not target:
+            return "셀 대상이 비어있습니다 — 무엇을 셀지 알려주세요 (예: '사람', '의자')."
+        b64 = self._get_vision_b64()
+        if b64 is None:
+            return "카메라 프레임을 가져올 수 없습니다."
+        if self.client is None:
+            return "비전 백엔드(Claude)가 연결되지 않았습니다."
+
+        try:
+            msg = self.client.messages.create(
+                model=cfg.vision_model,
+                max_tokens=200,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"이 카메라 사진에서 '{target}' 의 개수를 세어줘. "
+                                    f"한국어로 1-2문장: 정확한 개수와 어디에 있는지 (왼쪽/오른쪽/앞/뒤). "
+                                    f"애매하거나 안 보이면 '안 보입니다' 또는 '확실하지 않습니다'."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            return f"카운팅 실패: {type(e).__name__}: {e}"
+
+    def _t_read_emotion(self) -> str:
+        """카메라 속 인물의 표정/감정을 Claude Vision 으로 분석."""
+        b64 = self._get_vision_b64()
+        if b64 is None:
+            return "카메라 프레임을 가져올 수 없습니다."
+        if self.client is None:
+            return "비전 백엔드(Claude)가 연결되지 않았습니다."
+
+        try:
+            msg = self.client.messages.create(
+                model=cfg.vision_model,
+                max_tokens=250,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    "이 사진의 사람 표정을 분석해줘. 한국어 2-3문장:\n"
+                                    "  · 주된 감정 (예: 행복, 피곤, 집중, 무표정, 놀람)\n"
+                                    "  · 관찰 단서 (눈 상태, 입꼬리, 눈썹)\n"
+                                    "  · 얼굴이 안 보이면 '얼굴이 보이지 않습니다' 라고만.\n"
+                                    "정직하되 부드럽게."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            return f"표정 분석 실패: {type(e).__name__}: {e}"
+
+    # -------- 사이클 #32: 자세 코칭 --------
+    def _t_check_posture(self, context: str = "") -> str:
+        """카메라 속 자세를 Claude Vision 으로 분석 + 구체적 코칭."""
+        b64 = self._get_vision_b64()
+        if b64 is None:
+            return "카메라 프레임을 가져올 수 없습니다."
+        if self.client is None:
+            return "비전 백엔드(Claude)가 연결되지 않았습니다."
+
+        ctx_hint = f" 상황: {context.strip()}." if context and context.strip() else ""
+        try:
+            msg = self.client.messages.create(
+                model=cfg.vision_model,
+                max_tokens=300,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"이 사진의 사람 자세를 분석해줘.{ctx_hint} "
+                                    "한국어 2-3문장으로:\n"
+                                    "  · 머리/목, 어깨, 허리, 앉은(또는 선) 자세를 짚고\n"
+                                    "  · 좋은 점 1가지 + 개선할 점 1-2가지를 구체 행동으로\n"
+                                    "  · 얼굴만 보이면 '전신이 안 보여 자세 평가 어려움 — 카메라에서 한 발 물러나주세요'."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            return f"자세 분석 실패: {type(e).__name__}: {e}"
+
+    # -------- 사이클 #32: 사진 비교 --------
+    def _t_compare_photos(self, file_id_a: str, file_id_b: str) -> str:
+        """저장공간 안의 두 이미지를 Claude Vision 으로 비교."""
+        if self.user_storage is None:
+            return "사용자 저장공간이 활성화되지 않았습니다 (인증 필요)."
+        if self.client is None:
+            return "비전 백엔드(Claude)가 연결되지 않았습니다."
+
+        a = (file_id_a or "").strip()
+        b = (file_id_b or "").strip()
+        if not a or not b:
+            return "두 파일의 file_id 가 모두 필요합니다 — storage_list_files 로 먼저 확인하세요."
+        if a == b:
+            return "같은 file_id 입니다 — 비교하려면 서로 다른 두 사진을 골라주세요."
+
+        def _load(fid: str) -> Tuple[Optional[bytes], Optional[Dict[str, Any]], str]:
+            meta = self.user_storage.get_metadata(fid)
+            if not meta:
+                return None, None, f"파일을 찾을 수 없습니다: {fid}"
+            try:
+                data = self.user_storage.read_file(fid, ai_call=True)
+            except PermissionError:
+                return None, None, f"AI 접근 차단된 파일입니다: {meta.get('name', fid)}"
+            except FileNotFoundError:
+                return None, None, f"디스크에서 파일이 사라졌습니다: {meta.get('name', fid)}"
+            return data, meta, ""
+
+        data_a, meta_a, err_a = _load(a)
+        if err_a:
+            return err_a
+        data_b, meta_b, err_b = _load(b)
+        if err_b:
+            return err_b
+
+        b64_a = base64.standard_b64encode(data_a).decode("utf-8")
+        b64_b = base64.standard_b64encode(data_b).decode("utf-8")
+
+        try:
+            msg = self.client.messages.create(
+                model=cfg.vision_model,
+                max_tokens=350,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": b64_a,
+                                },
+                            },
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": b64_b,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"두 사진을 비교해. 첫 번째: '{meta_a.get('name', '')}', "
+                                    f"두 번째: '{meta_b.get('name', '')}'. 한국어 2-3문장:\n"
+                                    "  · 공통점 1가지\n"
+                                    "  · 가장 두드러진 차이 1-2가지\n"
+                                    "  · 어느 쪽이 'before' 같은지 단서가 있으면 짧게 (없으면 생략)."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            return f"사진 비교 실패: {type(e).__name__}: {e}"
+
+    # -------- 사이클 #32: 양방향 텍스트 번역 --------
+    def _t_translate_text(self, text: str, target_lang: str = "ko") -> str:
+        """Claude API 로 텍스트 번역. 외국어↔한국어 양방향 지원.
+
+        Claude 가 자체 번역 능력을 가지고 있으므로 이 도구는 가벼운 wrapper:
+        명시적 의도(번역만)를 LLM 라우터에게 알리고, 결과 형식을 일관되게 만든다.
+        """
+        text = (text or "").strip()
+        if not text:
+            return "번역할 텍스트가 비어있습니다."
+
+        target = (target_lang or "ko").strip()
+        # 한국어 별칭을 ISO 코드로 정규화 (LLM 이 한국어로 인자 전달하는 경우 대응).
+        alias = {
+            "한국어": "Korean", "ko": "Korean", "kor": "Korean",
+            "영어": "English", "en": "English", "eng": "English",
+            "일본어": "Japanese", "ja": "Japanese", "jp": "Japanese",
+            "중국어": "Chinese", "zh": "Chinese", "cn": "Chinese",
+            "스페인어": "Spanish", "es": "Spanish",
+            "프랑스어": "French", "fr": "French",
+            "독일어": "German", "de": "German",
+            "러시아어": "Russian", "ru": "Russian",
+            "베트남어": "Vietnamese", "vi": "Vietnamese",
+            "태국어": "Thai", "th": "Thai",
+        }
+        target_label = alias.get(target.lower(), target)
+
+        if self.client is None:
+            return "번역 백엔드(Claude)가 연결되지 않았습니다."
+
+        prompt = (
+            f"Translate the following text into {target_label}. "
+            f"Output ONLY the translation, no explanation, no quotes, no prefix. "
+            f"Also detect the source language and prepend it on a separate first line "
+            f"in the format `[SRC: <language>]`.\n\n"
+            f"---\n{text}\n---"
+        )
+        try:
+            msg = self.client.messages.create(
+                model=cfg.claude_model,
+                max_tokens=600,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = msg.content[0].text.strip()
+        except Exception as e:
+            return f"번역 실패: {type(e).__name__}: {e}"
+
+        # 첫 줄이 [SRC: ...] 면 분리, 아니면 통째.
+        src_label = ""
+        body = raw
+        first_nl = raw.find("\n")
+        if first_nl > 0:
+            head = raw[:first_nl].strip()
+            if head.startswith("[SRC:") and head.endswith("]"):
+                src_label = head[5:-1].strip()
+                body = raw[first_nl + 1:].strip()
+        if src_label:
+            return f"[{src_label} → {target_label}]\n{body}"
+        return f"[→ {target_label}]\n{body}"
 
     # -------- 메모리 입출력 --------
     def _load_memory(self) -> dict:

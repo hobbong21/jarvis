@@ -168,6 +168,15 @@ class Config:
 
     # ============ 인증 ============
     users_file: str = os.getenv("SARVIS_USERS_FILE", "data/users.json")
+    # 사이클 #29 — 데스크톱 모드 owner_auth 통합. 웹 모드와 동일한 owner.json 공유.
+    owner_file: str = os.getenv("SARVIS_OWNER_FILE", "data/owner.json")
+
+    # ============ 사용자 개인 저장공간 (사이클 #30) ============
+    # data/users/<face_name>/{files,conversations}/ + metadata.json. 5GB/사용자.
+    user_storage_root: str = os.getenv("SARVIS_USER_STORAGE_ROOT", "data/users")
+    user_storage_limit_bytes: int = int(
+        os.getenv("SARVIS_USER_STORAGE_LIMIT", str(5 * 1024 ** 3))
+    )
 
     # ============ 페르소나 + 도구 사용 가이드 ============
     system_prompt: str = """너는 사비스(SARVIS). 사용자의 개인 AI 비서이자 친구.

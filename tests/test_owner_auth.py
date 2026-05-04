@@ -7,9 +7,13 @@ from pathlib import Path
 
 from sarvis.owner_auth import (
     FACE_DISTANCE_THRESHOLD,
+    REAUTH_GRACE_SECONDS,
+    REAUTH_INTERVAL_SECONDS,
     VOICE_MATCH_THRESHOLD,
     OwnerAuth,
     face_distance,
+    is_grace_expired,
+    is_reauth_due,
     normalize_voice,
     voice_similarity,
 )
@@ -168,6 +172,52 @@ class OwnerAuthTests(unittest.TestCase):
         self.path.write_text("{not json", encoding="utf-8")
         auth = OwnerAuth(str(self.path))
         self.assertFalse(auth.is_enrolled())
+
+
+class IsReauthDueTests(unittest.TestCase):
+    """사이클 #29 — 1시간 만료 헬퍼."""
+
+    def test_zero_last_authed_returns_false(self):
+        # 한 번도 인증 안 된 상태에선 재인증 트리거 안 함.
+        self.assertFalse(is_reauth_due(0.0, 99999.0))
+
+    def test_just_below_interval_false(self):
+        now = 100_000.0
+        last = now - (REAUTH_INTERVAL_SECONDS - 1.0)
+        self.assertFalse(is_reauth_due(last, now))
+
+    def test_exactly_interval_true(self):
+        now = 100_000.0
+        last = now - REAUTH_INTERVAL_SECONDS
+        self.assertTrue(is_reauth_due(last, now))
+
+    def test_well_past_interval_true(self):
+        now = 100_000.0
+        last = now - (REAUTH_INTERVAL_SECONDS * 2)
+        self.assertTrue(is_reauth_due(last, now))
+
+
+class IsGraceExpiredTests(unittest.TestCase):
+    """사이클 #29 — grace 만료 헬퍼."""
+
+    def test_zero_pending_returns_false(self):
+        # 재인증 트리거 안 된 상태에선 grace 만료 검사 무의미.
+        self.assertFalse(is_grace_expired(0.0, 99999.0))
+
+    def test_just_below_grace_false(self):
+        now = 100_000.0
+        triggered = now - (REAUTH_GRACE_SECONDS - 1.0)
+        self.assertFalse(is_grace_expired(triggered, now))
+
+    def test_exactly_grace_true(self):
+        now = 100_000.0
+        triggered = now - REAUTH_GRACE_SECONDS
+        self.assertTrue(is_grace_expired(triggered, now))
+
+    def test_well_past_grace_true(self):
+        now = 100_000.0
+        triggered = now - (REAUTH_GRACE_SECONDS * 3)
+        self.assertTrue(is_grace_expired(triggered, now))
 
 
 if __name__ == "__main__":

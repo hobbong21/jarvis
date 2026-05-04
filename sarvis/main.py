@@ -1,33 +1,47 @@
-"""사비스 메인 — 로그인 → 코어(도구 포함) → Pygame UI 루프"""
+"""사비스 메인 — owner_auth 로그인 → 코어(도구 포함) → Pygame UI 루프
+
+사이클 #29 — 데스크톱 모드도 owner_auth (얼굴 5각도 + 음성 패스프레이즈 + 이름)
+사용. 기존 auth.py(username/password) 는 더 이상 호출하지 않음 (모듈은 보존).
+"""
 import threading
 import time
 from typing import List, Optional
 
+import cv2
 import pygame
 
-from .auth import AuthSystem
 from .audio_io import EdgeTTS, SpeechRecorder, WakeWordListener, WhisperSTT
 from .brain import Brain
 from .config import cfg
 from .emotion import Emotion
+from .owner_auth import OwnerAuth, is_grace_expired, is_reauth_due
 from .tools import ToolExecutor
 from .ui import SarvisUI
-from .vision import VisionSystem
+from .vision import VisionSystem, compute_face_encoding_from_jpeg
 from .action import ActionEvent, ActionLoop, ActionRecognizer
 
 
 class SarvisCore:
     """오디오/뇌/비전/도구를 묶는 코어"""
 
-    def __init__(self, logged_in_user: str):
+    def __init__(
+        self,
+        logged_in_user: str,
+        vision: Optional[VisionSystem] = None,
+        recorder: Optional[SpeechRecorder] = None,
+        stt: Optional[WhisperSTT] = None,
+    ):
         print("=" * 60)
         print("  S . A . R . V . I . S   초기화")
         print("=" * 60)
 
         self.logged_in_user = logged_in_user
 
+        # 사이클 #29 — owner_auth 로그인 단계에서 이미 cv2.VideoCapture / 오디오 / Whisper
+        # 가 초기화되므로 main 에서 만들어 그대로 주입한다. cv2.VideoCapture 는 동시에
+        # 두 인스턴스를 못 열기 때문에 재사용은 선택이 아닌 필수.
         print("[1/6] 비전 시스템 ...")
-        self.vision = VisionSystem()
+        self.vision = vision if vision is not None else VisionSystem()
 
         print("[2/6] 두뇌 (LLM) ...")
         self.brain = Brain()
@@ -43,8 +57,8 @@ class SarvisCore:
             print("      Ollama 백엔드 — 도구 사용 불가")
 
         print("[4/6] STT (Whisper) ...")
-        self.stt = WhisperSTT()
-        self.recorder = SpeechRecorder()
+        self.stt = stt if stt is not None else WhisperSTT()
+        self.recorder = recorder if recorder is not None else SpeechRecorder()
 
         print("[5/6] TTS (Edge-TTS) ...")
         self.tts = EdgeTTS()
@@ -266,80 +280,171 @@ class SarvisCore:
 # ============================================================
 def main():
     ui = SarvisUI()
-    auth = AuthSystem(cfg.users_file)
+    owner = OwnerAuth(cfg.owner_file)
 
-    # 로그인
-    user = ui.run_login(auth)
-    if not user:
-        ui.quit()
-        print("로그인 취소. 종료합니다.")
-        return
-
-    print(f"\n[Auth] '{user}'님 로그인 성공.\n")
-
+    # 사이클 #29 — owner_auth 인증 단계에서 카메라/마이크/STT 가 필요. SarvisCore 가
+    # 같은 인스턴스를 재사용하도록 main 에서 만들어 주입.
+    print("[Auth] 비전/오디오/STT 초기화 ...")
     try:
-        core = SarvisCore(logged_in_user=user)
+        vision = VisionSystem()
+        recorder = SpeechRecorder()
+        stt = WhisperSTT()
     except Exception as e:
-        print(f"[초기화 오류] {e}")
+        print(f"[Auth] 초기화 실패: {e}")
         ui.quit()
         return
 
-    core.start()
+    if not owner.is_enrolled():
+        print("[Auth] 등록된 주인이 없습니다 — 초기 등록 시작.")
+        ok = ui.run_owner_enroll(vision, recorder, stt, owner)
+        if not ok:
+            print("[Auth] 등록 취소. 종료합니다.")
+            vision.release()
+            ui.quit()
+            return
 
-    running = True
+    # 사이클 #29 — 자동 로그아웃 후 재로그인을 위한 외부 루프.
+    # exit_reason="reauth_failed" 면 같은 vision/recorder/stt 로 다시 로그인 화면 진입.
+    # exit_reason="quit" 또는 사용자가 로그인 자체를 취소하면 루프 종료.
+    banner = ""
     try:
-        while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                elif event.type == pygame.KEYDOWN:
-                    if event.key in (pygame.K_q, pygame.K_ESCAPE):
-                        running = False
-                    elif event.key == pygame.K_1:
-                        try:
-                            core.brain.switch_backend("claude")
-                            core.reconnect_tools()
-                            print("→ Claude 백엔드로 전환 (도구 활성화)")
-                        except Exception as e:
-                            print(f"전환 실패: {e}")
-                    elif event.key == pygame.K_2:
-                        try:
-                            core.brain.switch_backend("ollama")
-                            core.detach_tools()
-                            print("→ Ollama 백엔드로 전환 (도구 비활성화)")
-                        except Exception as e:
-                            print(f"전환 실패: {e}")
-                    elif event.key == pygame.K_r:
-                        core.brain.reset_history()
-                        core.chat_log.clear()
-                        print("→ 대화 히스토리 초기화")
+        while True:
+            user = ui.run_owner_login(vision, recorder, stt, owner)
+            if not user:
+                print("[Auth] 로그인 취소. 종료합니다.")
+                break
 
-            frame = core.vision.read()
-            if frame is not None:
-                core.vision.update_face_recognition(frame)
-                core.maybe_auto_greet()
-                if core.action_loop is not None:
-                    core._action_skip_i = (core._action_skip_i + 1) % core._action_skip_n
-                    if core._action_skip_i == 0:
-                        core.action_loop.submit(frame)
+            print(f"\n[Auth] '{user}'님 로그인 성공.\n")
 
-            ui.render_main(
-                frame=frame,
-                state=core.state,
-                emotion=core.emotion,
-                logged_user=core.logged_in_user,
-                camera_user=core.vision.current_user,
-                chat_log=core.chat_log,
-                backend=cfg.llm_backend,
-                current_tool=core.current_tool,
+            try:
+                core = SarvisCore(
+                    logged_in_user=user,
+                    vision=vision,
+                    recorder=recorder,
+                    stt=stt,
+                )
+            except Exception as e:
+                print(f"[초기화 오류] {e}")
+                break
+
+            core.start()
+            try:
+                exit_reason = _run_main_loop(core, ui, owner)
+            finally:
+                print("\n사비스 종료 중...")
+                core.shutdown()
+
+            if exit_reason == "quit":
+                break
+
+            # reauth_failed — 사용자에게 알리고 다시 로그인 화면 진입.
+            ui._show_blocking_message(
+                title="AUTO LOGOUT",
+                message=(
+                    "1시간이 경과한 뒤 얼굴 재인증에 실패하여 자동 로그아웃되었습니다. "
+                    "다시 인증해주세요."
+                ),
             )
-
-            pygame.display.flip()
-            ui.tick(60)
     finally:
-        print("\n사비스 종료 중...")
-        core.shutdown()
+        vision.release()
         ui.quit()
+
+
+def _extract_face_encoding(frame_bgr) -> Optional[List[float]]:
+    """BGR numpy frame 에서 얼굴 인코딩(128 floats)을 추출. 실패 시 None.
+
+    재인증 모니터가 매 0.5초마다 호출. ui.SarvisUI 의 _extract_encoding_bgr 와 같은
+    동작이지만 main 루프가 ui 인스턴스의 비공개 메서드에 의존하지 않게 분리.
+    """
+    if frame_bgr is None:
+        return None
+    ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        return None
+    return compute_face_encoding_from_jpeg(buf.tobytes())
+
+
+def _run_main_loop(core: "SarvisCore", ui: SarvisUI, owner: OwnerAuth) -> str:
+    """메인 60fps 루프. 사이클 #29 — 1시간 후 자동 얼굴 재인증.
+
+    Returns:
+        "quit": 사용자가 Q/ESC/창 닫기로 종료.
+        "reauth_failed": 1시간 경과 후 grace 안에 등록된 얼굴이 잡히지 않아 자동 로그아웃.
+
+    재인증은 D4=A 정책에 따라 **얼굴만** 자동 확인. 통과 시 사용자 무방해 (last_authed_at 갱신).
+    Grace 만료 시 메인 루프 종료 → 호출자가 로그인 화면으로 복귀.
+    """
+    last_authed_at = time.time()
+    reauth_pending_since = 0.0
+    last_reauth_face_check = 0.0
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return "quit"
+            elif event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_q, pygame.K_ESCAPE):
+                    return "quit"
+                elif event.key == pygame.K_1:
+                    try:
+                        core.brain.switch_backend("claude")
+                        core.reconnect_tools()
+                        print("→ Claude 백엔드로 전환 (도구 활성화)")
+                    except Exception as e:
+                        print(f"전환 실패: {e}")
+                elif event.key == pygame.K_2:
+                    try:
+                        core.brain.switch_backend("ollama")
+                        core.detach_tools()
+                        print("→ Ollama 백엔드로 전환 (도구 비활성화)")
+                    except Exception as e:
+                        print(f"전환 실패: {e}")
+                elif event.key == pygame.K_r:
+                    core.brain.reset_history()
+                    core.chat_log.clear()
+                    print("→ 대화 히스토리 초기화")
+
+        frame = core.vision.read()
+        if frame is not None:
+            core.vision.update_face_recognition(frame)
+            core.maybe_auto_greet()
+            if core.action_loop is not None:
+                core._action_skip_i = (core._action_skip_i + 1) % core._action_skip_n
+                if core._action_skip_i == 0:
+                    core.action_loop.submit(frame)
+
+        # ── 사이클 #29 — 주기적 얼굴 재인증 ────────────────────────────
+        now = time.time()
+        if reauth_pending_since == 0.0:
+            if is_reauth_due(last_authed_at, now):
+                reauth_pending_since = now
+                last_reauth_face_check = 0.0
+                print("[Reauth] 1시간 경과 — 백그라운드 얼굴 재인증 시작")
+        else:
+            if frame is not None and now - last_reauth_face_check >= 0.5:
+                last_reauth_face_check = now
+                enc = _extract_face_encoding(frame)
+                if enc is not None and owner.verify_face_encoding(enc):
+                    last_authed_at = now
+                    reauth_pending_since = 0.0
+                    print("[Reauth] 얼굴 재인증 통과 (무음)")
+            if reauth_pending_since > 0.0 and is_grace_expired(reauth_pending_since, now):
+                print("[Reauth] Grace 만료 — 자동 로그아웃")
+                return "reauth_failed"
+
+        ui.render_main(
+            frame=frame,
+            state=core.state,
+            emotion=core.emotion,
+            logged_user=core.logged_in_user,
+            camera_user=core.vision.current_user,
+            chat_log=core.chat_log,
+            backend=cfg.llm_backend,
+            current_tool=core.current_tool,
+        )
+
+        pygame.display.flip()
+        ui.tick(60)
 
 
 if __name__ == "__main__":

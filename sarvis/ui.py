@@ -1,7 +1,9 @@
 """Pygame UI — 로그인 화면 + 메인 화면 (감정 오브 + 카메라 피드)"""
 import math
 import random
+import threading
 import time
+from queue import Empty, Queue
 from typing import List, Optional
 
 import cv2
@@ -9,6 +11,12 @@ import numpy as np
 import pygame
 
 from .emotion import Emotion, PALETTES
+from .owner_auth import (
+    ENROLL_FACE_ANGLES,
+    ENROLL_FACE_LABELS_KO,
+    random_challenge,
+)
+from .vision import compute_face_encoding_from_jpeg
 
 
 # ============ Colors ============
@@ -362,6 +370,411 @@ class SarvisUI:
             self.clock.tick(60)
 
         return None
+
+    # ============ Owner 인증 (사이클 #29 — 데스크톱 통합) ============
+    # 데스크톱 모드는 single-user. 5각도 얼굴 + 음성 패스프레이즈 + 이름으로 등록,
+    # 이후 얼굴 매칭 + 음성 패스프레이즈/챌린지로 로그인. 1시간 후 백그라운드 재인증
+    # (자리비움 시 자동 로그아웃) 은 main.py 에서 처리한다.
+
+    def _extract_encoding_bgr(self, frame_bgr) -> Optional[List[float]]:
+        """BGR numpy frame 에서 얼굴 인코딩(128 floats)을 추출. 실패 시 None."""
+        if frame_bgr is None:
+            return None
+        ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not ok:
+            return None
+        return compute_face_encoding_from_jpeg(buf.tobytes())
+
+    def _draw_auth_header(self, title: str, subtitle: str, cx: int):
+        """인증 화면 공통 상단 — 그리드 배경 + 작은 오브 + 타이틀."""
+        self._draw_grid_bg()
+        self._draw_orb(self.screen, cx, 100, 38, Emotion.NEUTRAL, alpha_mult=0.6)
+        title_surf = self.font_xl.render(title, True, ACCENT)
+        self.screen.blit(title_surf, title_surf.get_rect(center=(cx, 180)))
+        sub_surf = self.font_sm.render(subtitle, True, TEXT_DIM)
+        self.screen.blit(sub_surf, sub_surf.get_rect(center=(cx, 220)))
+
+    def _draw_message(self, text: str, cx: int, y: int, color=AMBER):
+        if not text:
+            return
+        msg_surf = self.font_sm.render(text, True, color)
+        self.screen.blit(msg_surf, msg_surf.get_rect(center=(cx, y)))
+
+    def _draw_hint(self, text: str, cx: int):
+        hint = self.font_xs.render(text, True, TEXT_DIM)
+        self.screen.blit(hint, hint.get_rect(center=(cx, self.HEIGHT - 40)))
+
+    def _capture_face_for_angle(
+        self,
+        vision,
+        title: str,
+        angle_label: str,
+        progress: str,
+    ) -> Optional[List[float]]:
+        """카메라 라이브뷰 + SPACE/캡처 버튼 → 얼굴 인코딩 반환. ESC 면 None.
+
+        사용자가 해당 방향을 보고 SPACE 를 누르면 그 프레임에서 인코딩을 시도.
+        실패하면 메시지 갱신 후 재시도. ESC 또는 창 닫기는 전체 등록 취소.
+        """
+        cx = self.WIDTH // 2
+        cam_x, cam_y, cam_w, cam_h = cx - 320, 280, 640, 360
+        capture_btn = Button(
+            (cx - 120, cam_y + cam_h + 32, 240, 46),
+            "CAPTURE  (SPACE)", self.font_md,
+        )
+
+        msg = ""
+        msg_color = AMBER
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return None
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        return None
+                    if event.key == pygame.K_SPACE:
+                        enc = self._extract_encoding_bgr(vision.read())
+                        if enc is None:
+                            msg = "얼굴이 인식되지 않습니다. 카메라 정면을 보고 다시 시도하세요."
+                            msg_color = RED
+                            continue
+                        return enc
+                if capture_btn.handle_event(event):
+                    enc = self._extract_encoding_bgr(vision.read())
+                    if enc is None:
+                        msg = "얼굴이 인식되지 않습니다. 카메라 정면을 보고 다시 시도하세요."
+                        msg_color = RED
+                        continue
+                    return enc
+
+            frame = vision.read()
+            self._draw_auth_header(title, progress, cx)
+            instr = f"{angle_label}을(를) 봐주세요"
+            instr_surf = self.font_lg.render(instr, True, TEXT)
+            self.screen.blit(instr_surf, instr_surf.get_rect(center=(cx, 254)))
+            self._draw_camera(frame, cam_x, cam_y, cam_w, cam_h)
+            capture_btn.draw(self.screen)
+            self._draw_message(msg, cx, cam_y + cam_h + 100, msg_color)
+            self._draw_hint("SPACE: 캡처   ESC: 취소", cx)
+            pygame.display.flip()
+            self.clock.tick(60)
+
+    def _record_voice_text(
+        self,
+        recorder,
+        stt,
+        vision,
+        title: str,
+        instruction: str,
+        min_chars: int,
+        password: bool = False,
+        challenge_text: Optional[str] = None,
+    ) -> Optional[str]:
+        """SPACE → 마이크 녹음 → STT → 텍스트 편집/확정.
+
+        challenge_text 가 있으면 사용자에게 따라 말할 문장으로 표시 (로그인 챌린지).
+        ESC 면 None 반환 → 호출자가 흐름 중단.
+        """
+        cx = self.WIDTH // 2
+        cam_x, cam_y, cam_w, cam_h = cx - 320, 280, 640, 240
+        text_input = TextInput(
+            (cx - 220, cam_y + cam_h + 36, 440, 46),
+            self.font_md, "STT 결과 (수정 가능)", password=password,
+        )
+        confirm_btn = Button(
+            (cx - 220, cam_y + cam_h + 96, 210, 42),
+            "CONFIRM  (ENTER)", self.font_md,
+        )
+        retry_btn = Button(
+            (cx + 10, cam_y + cam_h + 96, 210, 42),
+            "RE-RECORD  (F2)", self.font_md,
+        )
+
+        state = "idle"   # idle | recording | recording_done
+        result_q: "Queue[tuple]" = Queue()
+        msg = ""
+        msg_color = AMBER
+
+        def _start_record():
+            def _worker():
+                try:
+                    audio = recorder.record()
+                    text = stt.transcribe(audio).strip()
+                    result_q.put(("ok", text))
+                except Exception as e:
+                    result_q.put(("err", f"{type(e).__name__}: {e}"))
+            threading.Thread(target=_worker, daemon=True).start()
+
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return None
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    return None
+
+                if state == "idle":
+                    if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+                        msg = ""
+                        state = "recording"
+                        _start_record()
+                elif state == "recording_done":
+                    if event.type == pygame.KEYDOWN and event.key == pygame.K_F2:
+                        msg = ""
+                        state = "recording"
+                        _start_record()
+                        continue
+                    if retry_btn.handle_event(event):
+                        msg = ""
+                        state = "recording"
+                        _start_record()
+                        continue
+                    action = text_input.handle_event(event)
+                    if action == "submit":
+                        if len(text_input.text.strip()) >= min_chars:
+                            return text_input.text.strip()
+                        msg = f"{min_chars}자 이상 입력해주세요."
+                        msg_color = RED
+                    if confirm_btn.handle_event(event):
+                        if len(text_input.text.strip()) >= min_chars:
+                            return text_input.text.strip()
+                        msg = f"{min_chars}자 이상 입력해주세요."
+                        msg_color = RED
+
+            if state == "recording":
+                try:
+                    kind, payload = result_q.get_nowait()
+                except Empty:
+                    pass
+                else:
+                    if kind == "ok":
+                        text_input.text = payload
+                        text_input.active = True
+                        if not payload:
+                            msg = "음성을 인식하지 못했습니다. 다시 시도하세요."
+                            msg_color = RED
+                            state = "idle"
+                        else:
+                            state = "recording_done"
+                    else:
+                        msg = f"녹음 실패 — {payload}"
+                        msg_color = RED
+                        state = "idle"
+
+            self._draw_auth_header(title, instruction, cx)
+            if challenge_text:
+                cl_surf = self.font_lg.render(f"“{challenge_text}”", True, AMBER)
+                self.screen.blit(cl_surf, cl_surf.get_rect(center=(cx, 254)))
+
+            self._draw_camera(vision.read(), cam_x, cam_y, cam_w, cam_h)
+            self._draw_state_indicator(state, cx, cam_y - 12)
+
+            if state == "idle":
+                hint_surf = self.font_md.render(
+                    "SPACE 를 눌러 녹음 시작 (말씀하신 후 잠시 침묵하면 자동 종료)",
+                    True, TEXT,
+                )
+                self.screen.blit(hint_surf, hint_surf.get_rect(center=(cx, cam_y + cam_h + 56)))
+            else:
+                text_input.draw(self.screen)
+                if state == "recording_done":
+                    confirm_btn.draw(self.screen)
+                    retry_btn.draw(self.screen)
+
+            self._draw_message(msg, cx, cam_y + cam_h + 160, msg_color)
+            self._draw_hint(
+                "SPACE: 녹음   ENTER: 확정   F2: 재녹음   ESC: 취소",
+                cx,
+            )
+            pygame.display.flip()
+            self.clock.tick(60)
+
+    def _draw_state_indicator(self, state: str, cx: int, y: int):
+        """녹음 상태를 카메라 위에 점멸 표시."""
+        if state == "recording":
+            pulse = 0.5 + 0.5 * math.sin(self.t * 6)
+            color = (int(255 * pulse), 60, 80)
+            text = "● RECORDING — 말씀해주세요"
+        elif state == "recording_done":
+            color = (100, 240, 180)
+            text = "● 녹음 완료 — 결과를 확인하고 확정하세요"
+        else:
+            color = TEXT_DIM
+            text = "○ 대기 중"
+        surf = self.font_sm.render(text, True, color)
+        self.screen.blit(surf, surf.get_rect(center=(cx, y)))
+
+    def run_owner_enroll(self, vision, recorder, stt, owner) -> bool:
+        """주인 등록 — 5각도 얼굴 + 음성 패스프레이즈 + 이름. 성공 시 True.
+
+        사용자가 ESC 누르거나 창을 닫으면 False (취소). 음성 인식이 실패하면
+        호출자가 다시 시도할 수 있도록 한 단계만 포기하지 않고 _record_voice_text
+        내부에서 재녹음을 지원한다.
+        """
+        cx = self.WIDTH // 2
+        angles = list(ENROLL_FACE_ANGLES)
+        encs: List[List[float]] = []
+
+        # 1) 5각도 얼굴 캡처 — 각 단계마다 사용자가 자세를 바꾸도록 안내.
+        for idx, angle in enumerate(angles):
+            label = ENROLL_FACE_LABELS_KO.get(angle, angle)
+            progress = f"얼굴 등록 ({idx + 1}/{len(angles)}): {label}"
+            enc = self._capture_face_for_angle(
+                vision,
+                title="INITIAL ENROLLMENT",
+                angle_label=label,
+                progress=progress,
+            )
+            if enc is None:
+                return False
+            encs.append(enc)
+
+        # 2) 음성 패스프레이즈 — 정규화 후 4자 이상.
+        passphrase = self._record_voice_text(
+            recorder, stt, vision,
+            title="VOICE PASSPHRASE",
+            instruction="기억할 패스프레이즈를 4자 이상 또렷하게 말씀해주세요",
+            min_chars=4,
+            password=True,
+        )
+        if passphrase is None:
+            return False
+
+        # 3) 이름 — 음성으로 받고 사용자가 STT 결과를 검토/수정.
+        name = self._record_voice_text(
+            recorder, stt, vision,
+            title="YOUR NAME",
+            instruction="이름을 말씀해주세요 (필요하면 결과를 수정하고 확정)",
+            min_chars=1,
+            password=False,
+        )
+        if name is None:
+            return False
+
+        # 4) 저장 — 실패 시 사용자에게 알리고 호출자에 False 반환.
+        try:
+            owner.enroll(
+                face_name=name,
+                voice_passphrase=passphrase,
+                face_encodings=encs,
+                face_angles=angles,
+            )
+        except ValueError as ve:
+            self._show_blocking_message(
+                title="ENROLLMENT FAILED",
+                message=str(ve),
+                color=RED,
+            )
+            return False
+        return True
+
+    def run_owner_login(self, vision, recorder, stt, owner) -> Optional[str]:
+        """주인 로그인 — 카메라에서 얼굴 매칭 → 음성 패스프레이즈/챌린지.
+
+        통과 시 owner.face_name 반환. 사용자가 취소하면 None.
+        """
+        cx = self.WIDTH // 2
+        cam_x, cam_y, cam_w, cam_h = cx - 320, 280, 640, 360
+        retry_btn = Button(
+            (cx - 120, cam_y + cam_h + 32, 240, 46),
+            "RE-CHECK FACE  (R)", self.font_md,
+        )
+
+        # 1) 얼굴 매칭 — 매 프레임 인코딩 추출 시도. 자동 통과 (사용자 수동 트리거 불필요).
+        msg = "카메라를 정면으로 바라봐 주세요."
+        msg_color = TEXT
+        last_attempt = 0.0
+        face_matched = False
+        while not face_matched:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return None
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    return None
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+                    last_attempt = 0.0  # 즉시 재시도
+                if retry_btn.handle_event(event):
+                    last_attempt = 0.0
+
+            now = time.time()
+            if now - last_attempt >= 0.5:
+                last_attempt = now
+                enc = self._extract_encoding_bgr(vision.read())
+                if enc is not None:
+                    if owner.verify_face_encoding(enc):
+                        face_matched = True
+                        msg = "얼굴 인증 통과 — 음성 인증으로 진행합니다."
+                        msg_color = (100, 240, 180)
+                    else:
+                        dist = owner.face_distance_min(enc)
+                        msg = f"등록된 얼굴과 일치하지 않습니다 (거리 {dist:.2f})."
+                        msg_color = RED
+
+            self._draw_auth_header(
+                "AUTHENTICATION",
+                f"환영합니다, {owner.face_name} 님 — 얼굴 확인 중",
+                cx,
+            )
+            self._draw_camera(vision.read(), cam_x, cam_y, cam_w, cam_h)
+            retry_btn.draw(self.screen)
+            self._draw_message(msg, cx, cam_y + cam_h + 100, msg_color)
+            self._draw_hint("R: 재시도   ESC: 취소", cx)
+            pygame.display.flip()
+            self.clock.tick(60)
+
+            if face_matched:
+                # 통과 메시지를 잠시 보여주기 위한 짧은 지연.
+                pygame.time.wait(450)
+
+        # 2) 음성 패스프레이즈/챌린지 — 챌린지를 함께 발급해 녹음 재생 공격 차단.
+        challenge = random_challenge()
+        spoken = self._record_voice_text(
+            recorder, stt, vision,
+            title="VOICE AUTHENTICATION",
+            instruction="패스프레이즈 또는 아래 문장 중 하나를 말씀해주세요",
+            min_chars=1,
+            password=False,
+            challenge_text=challenge,
+        )
+        if spoken is None:
+            return None
+
+        ok, sim, matched_against = owner.verify_voice(spoken, challenge_text=challenge)
+        if not ok:
+            self._show_blocking_message(
+                title="VOICE AUTH FAILED",
+                message=(
+                    f"음성이 일치하지 않습니다 (유사도 {sim:.2f}). "
+                    "ESC 로 종료하거나 창을 닫고 다시 시도해주세요."
+                ),
+                color=RED,
+            )
+            return None
+
+        return owner.face_name
+
+    def _show_blocking_message(self, title: str, message: str, color=AMBER):
+        """결과 메시지 화면 — 사용자가 ENTER/SPACE/ESC 누를 때까지 대기."""
+        cx = self.WIDTH // 2
+        cy = self.HEIGHT // 2
+        ok_btn = Button((cx - 80, cy + 40, 160, 42), "OK  (ENTER)", self.font_md)
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return
+                if event.type == pygame.KEYDOWN and event.key in (
+                    pygame.K_RETURN, pygame.K_SPACE, pygame.K_ESCAPE,
+                ):
+                    return
+                if ok_btn.handle_event(event):
+                    return
+            self._draw_grid_bg()
+            title_surf = self.font_xl.render(title, True, color)
+            self.screen.blit(title_surf, title_surf.get_rect(center=(cx, cy - 80)))
+            msg_surf = self.font_md.render(message, True, TEXT)
+            self.screen.blit(msg_surf, msg_surf.get_rect(center=(cx, cy - 20)))
+            ok_btn.draw(self.screen)
+            pygame.display.flip()
+            self.clock.tick(60)
 
     # ============ 메인 화면 ============
     def render_main(
