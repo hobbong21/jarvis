@@ -47,14 +47,18 @@ try:
     _mimetypes.init()
 except Exception:
     pass
-if not _mimetypes.inited:
+if getattr(_mimetypes, "_db", None) is None:
     _mimetypes.inited = True
     _mimetypes._db = _mimetypes.MimeTypes()
 for _ext, _mt in _STATIC_MIME_FALLBACKS.items():
     try:
         _mimetypes.add_type(_mt, _ext)
     except Exception:
-        _mimetypes._db.types_map[0][_ext] = _mt
+        try:
+            _mimetypes._db.types_map[True][_ext] = _mt
+            _mimetypes._db.types_map_inv[True][_mt] = _ext
+        except Exception:
+            pass
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
