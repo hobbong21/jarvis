@@ -97,18 +97,24 @@ Validator).
 - UI: 영상=빨간 REC, 음성=파란 MIC 인디케이터 (동시 표시 가능).
 - **보안**: 인증 게이트 적용 (미인증 시 0x09/0x0A 무시). 파일명 밀리초 타임스탬프로 충돌 방지.
 
-**마이페이지 + 저장 공간**: 제어판(productivity-dock)에 마이페이지 카드 추가. 탭 UI로 프로필/저장 공간 분리.
-- **프로필 탭**: 닉네임, 이메일, 말투 성향, 관심사, 자기소개 설정. `profile_get`/`profile_save` WS 핸들러.
-- **저장 공간 탭**: 사진/영상/음성 파일 목록 조회 + 삭제 + 다운로드. `storage_list`/`storage_delete` WS 핸들러.
-  - 사진은 썸네일 미리보기 표시 (48×36px). 종류별 필터(전체/사진/영상/음성) 지원.
-  - `/api/recordings/{id}` REST 엔드포인트로 파일 서빙 (JPEG/WebM 미디어 타입 자동 판별).
-  - 삭제 시 DB 레코드 + 파일 동시 제거. 삭제 애니메이션(슬라이드 아웃) 적용.
-  - 녹화/녹음/사진 저장 완료 시 저장 공간 탭이 열려있으면 자동 갱신.
+**마이페이지**: 제어판(productivity-dock)에 마이페이지 카드 추가. 프로필 전용.
+- **프로필**: 닉네임, 이메일, 말투 성향, 관심사, 자기소개 설정. `profile_get`/`profile_save` WS 핸들러.
+- 말투 성향 옵션: friendly(친근한), formal(정중한), casual(편한), cute(귀여운), professional(전문적인)
+
+**저장 공간 (독립 카드)**: 마이페이지에서 분리된 별도 prod-card. 파일 미리보기 모달 포함.
+- 사진/영상/음성 파일 목록 조회 + 삭제 + 다운로드. `storage_list`/`storage_delete` WS 핸들러.
+- **파일 미리보기 모달**: 항목 클릭 시 전체화면 모달로 내용 확인 가능.
+  - 사진: 이미지 원본 표시. 영상: `<video>` 플레이어 (재생/일시정지/탐색).
+  - 음성: `<audio>` 플레이어. 모달 내 다운로드/삭제 버튼.
+  - ESC 키 또는 배경 클릭으로 닫기. 삭제 시 모달 자동 닫힘.
+- 사진은 썸네일 미리보기 표시 (56×42px). 종류별 필터(전체/사진/영상/음성) 지원.
+- `/api/recordings/{id}` REST 엔드포인트로 파일 서빙 (JPEG/WebM 미디어 타입 자동 판별).
+- 삭제 시 DB 레코드 + 파일 동시 제거. 삭제 애니메이션(슬라이드 아웃) 적용.
+- 패널 열기 시 + 녹화/녹음/사진 저장 완료 시 자동 갱신.
 - `sarvis/memory.py`: `user_profiles` 테이블 + `recordings` 테이블 CRUD
 - `sarvis/config.py`: system_prompt에 개인화 프로필 활용 안내
-- `web/index.html`: 마이페이지 prod-card (mypage-tabs: 프로필 / 저장 공간)
-- `web/style.css`: 탭 UI (.mypage-tabs, .mypage-tab) + 저장 공간 (.storage-item, .storage-thumb, .storage-actions)
-- 말투 성향 옵션: friendly(친근한), formal(정중한), casual(편한), cute(귀여운), professional(전문적인)
+- `web/index.html`: 마이페이지 prod-card (프로필) + 저장 공간 prod-card (독립) + 미리보기 모달
+- `web/style.css`: 저장 공간 (.storage-item, .storage-thumb) + 미리보기 모달 (.storage-modal-*)
 
 **사진 캡처**: `capture_photo` 도구 — 카메라 현재 프레임을 JPEG로 캡처, 저장.
 - 바이너리 프로토콜 0x0B: `[1B kind=0x0B][2B label_len BE][label UTF-8][JPEG blob]`

@@ -434,7 +434,6 @@
       </header>
       <div class="mypage-tabs">
         <button class="mypage-tab active" data-tab="profile-tab" type="button">프로필</button>
-        <button class="mypage-tab" data-tab="storage-tab" type="button">저장 공간</button>
       </div>
 
       <!-- 프로필 탭 -->
@@ -477,21 +476,43 @@
         </div>
       </div>
 
-      <!-- 저장 공간 탭 -->
-      <div id="storage-tab" class="mypage-tab-content">
-        <div class="storage-toolbar">
-          <select id="storage-filter" class="prod-input prod-input-sm">
-            <option value="">전체</option>
-            <option value="photo">사진</option>
-            <option value="video">영상</option>
-            <option value="audio">음성</option>
-          </select>
-          <button id="storage-refresh-btn" class="prod-btn ghost mini" type="button">새로고침</button>
-          <span id="storage-count" class="storage-count"></span>
-        </div>
-        <div id="storage-list" class="storage-list"></div>
-      </div>
     </section>
+
+    <!-- ===== 저장 공간 (독립 카드) ===== -->
+    <section class="prod-card" id="storage-card">
+      <header class="prod-card-head">
+        <span class="prod-card-title">저장 공간</span>
+        <span id="storage-count" class="storage-count"></span>
+      </header>
+      <div class="storage-toolbar">
+        <select id="storage-filter" class="prod-input prod-input-sm">
+          <option value="">전체</option>
+          <option value="photo">사진</option>
+          <option value="video">영상</option>
+          <option value="audio">음성</option>
+        </select>
+        <button id="storage-refresh-btn" class="prod-btn ghost mini" type="button">새로고침</button>
+      </div>
+      <div id="storage-list" class="storage-list"></div>
+    </section>
+
+    <!-- 파일 미리보기 모달 -->
+    <div id="storage-preview-modal" class="storage-modal-overlay" hidden>
+      <div class="storage-modal" role="dialog" aria-modal="true" aria-labelledby="storage-preview-title">
+        <header class="storage-modal-head">
+          <span id="storage-preview-title" class="storage-modal-title"></span>
+          <button id="storage-preview-close" class="storage-modal-close" type="button" aria-label="닫기">&times;</button>
+        </header>
+        <div id="storage-preview-body" class="storage-modal-body"></div>
+        <footer class="storage-modal-foot">
+          <span id="storage-preview-meta" class="storage-modal-meta"></span>
+          <div class="storage-modal-actions">
+            <a id="storage-preview-dl" class="prod-btn ghost mini" href="#" download target="_blank">다운로드</a>
+            <button id="storage-preview-del" class="prod-btn ghost mini storage-del-btn" type="button">삭제</button>
+          </div>
+        </footer>
+      </div>
+    </div>
 
     <!-- 사이클 #22 — My Sarvis (HARN-05 미니) -->
     <section class="prod-card" id="my-sarvis-card">

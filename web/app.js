@@ -487,7 +487,7 @@
         break;
       case 'recording_saved':
         handleRecordingSaved(m);
-        if (document.querySelector('.mypage-tab[data-tab="storage-tab"].active')) refreshStorage();
+        refreshStorage();
         break;
     }
   }
@@ -2454,8 +2454,8 @@
     panels.hidden = open;
     fab.setAttribute("aria-expanded", String(!open));
     if (open === false) {
-      // 열 때 todo 자동 새로고침.
       try { window.__sendWS && window.__sendWS({ type: "todo_list" }); } catch (_) {}
+      try { refreshStorage(); } catch (_) {}
     }
   });
 
@@ -2800,10 +2800,11 @@
           break;
       }
     });
-    // 초기 todo 목록 + My Sarvis + 프로필 로드.
+    // 초기 todo 목록 + My Sarvis + 프로필 + 저장 공간 로드.
     setTimeout(() => sendMsg({ type: "todo_list" }), 1000);
     setTimeout(refreshMySarvis, 1500);
     setTimeout(() => sendMsg({ type: "profile_get" }), 800);
+    setTimeout(refreshStorage, 1200);
   }
 
   // ── 마이페이지 탭 전환 ────────────────────────
@@ -2814,7 +2815,7 @@
       tab.classList.add('active');
       const target = $(tab.dataset.tab);
       if (target) target.classList.add('active');
-      if (tab.dataset.tab === 'storage-tab') refreshStorage();
+      
     });
   });
 
@@ -2853,11 +2854,20 @@
     });
   }
 
-  // ── 저장 공간 ────────────────────────
+  // ── 저장 공간 (독립 카드 + 미리보기 모달) ────────────────────────
   const storageListEl = $("storage-list");
   const storageFilterEl = $("storage-filter");
   const storageRefreshBtn = $("storage-refresh-btn");
   const storageCountEl = $("storage-count");
+  const previewModal = $("storage-preview-modal");
+  const previewTitle = $("storage-preview-title");
+  const previewBody = $("storage-preview-body");
+  const previewMeta = $("storage-preview-meta");
+  const previewClose = $("storage-preview-close");
+  const previewDl = $("storage-preview-dl");
+  const previewDelBtn = $("storage-preview-del");
+  let _storageItems = [];
+  let _previewCurrentId = null;
 
   function refreshStorage() {
     const kind = storageFilterEl ? storageFilterEl.value : "";
@@ -2880,11 +2890,20 @@
   function formatStorageDate(ts) {
     if (!ts) return '';
     const d = new Date(ts * 1000);
+    const yy = d.getFullYear();
     const mm = String(d.getMonth() + 1).padStart(2, '0');
     const dd = String(d.getDate()).padStart(2, '0');
     const hh = String(d.getHours()).padStart(2, '0');
     const mi = String(d.getMinutes()).padStart(2, '0');
-    return `${mm}/${dd} ${hh}:${mi}`;
+    return `${yy}.${mm}.${dd} ${hh}:${mi}`;
+  }
+  function formatDuration(ms) {
+    if (!ms) return '';
+    const sec = Math.floor(ms / 1000);
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    if (m > 0) return `${m}분 ${s}초`;
+    return `${s}초`;
   }
   function formatFileSize(bytes) {
     if (!bytes) return '';
@@ -2893,14 +2912,10 @@
     return (bytes / (1024 * 1024)).toFixed(1) + 'MB';
   }
 
-  function escapeStorageText(s) {
-    if (!s) return '';
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  }
-
   function renderStorageList(msg) {
     if (!storageListEl) return;
     const items = msg.items || [];
+    _storageItems = items;
     if (storageCountEl) storageCountEl.textContent = `${items.length}건`;
     storageListEl.innerHTML = '';
     if (!items.length) {
@@ -2914,6 +2929,10 @@
       const row = document.createElement('div');
       row.className = 'storage-item';
       row.dataset.id = item.id;
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('.storage-actions')) return;
+        openStoragePreview(item);
+      });
 
       if (item.kind === 'photo') {
         const thumb = document.createElement('img');
@@ -2938,24 +2957,25 @@
       const metaEl = document.createElement('div');
       metaEl.className = 'storage-meta';
       const dur = (item.kind !== 'photo' && item.duration_ms)
-        ? (item.duration_ms / 1000).toFixed(1) + '초 · ' : '';
+        ? formatDuration(item.duration_ms) + ' · ' : '';
       metaEl.textContent = formatStorageDate(item.created_at) + ' · ' + dur + formatFileSize(item.size_bytes);
       info.appendChild(metaEl);
       row.appendChild(info);
 
       const actions = document.createElement('div');
       actions.className = 'storage-actions';
-      const openBtn = document.createElement('button');
-      openBtn.className = 'storage-open';
-      openBtn.textContent = '열기';
-      openBtn.title = '열기/다운로드';
-      openBtn.addEventListener('click', () => window.open('/api/recordings/' + item.id, '_blank'));
-      actions.appendChild(openBtn);
+      const viewBtn = document.createElement('button');
+      viewBtn.className = 'storage-open';
+      viewBtn.textContent = '보기';
+      viewBtn.title = '미리보기';
+      viewBtn.addEventListener('click', (e) => { e.stopPropagation(); openStoragePreview(item); });
+      actions.appendChild(viewBtn);
       const delBtn = document.createElement('button');
       delBtn.className = 'storage-del';
       delBtn.textContent = '삭제';
       delBtn.title = '삭제';
-      delBtn.addEventListener('click', () => {
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
         if (confirm('이 파일을 삭제하시겠습니까?')) sendMsg({ type: "storage_delete", id: item.id });
       });
       actions.appendChild(delBtn);
@@ -2964,6 +2984,97 @@
       storageListEl.appendChild(row);
     });
   }
+
+  let _previewFocusReturn = null;
+
+  function openStoragePreview(item) {
+    if (!previewModal || !previewBody) return;
+    _previewCurrentId = item.id;
+    _previewFocusReturn = document.activeElement;
+    const url = '/api/recordings/' + item.id;
+    const title = storageKindLabel(item.kind) + (item.label ? ' — ' + item.label : '');
+    if (previewTitle) previewTitle.textContent = title;
+
+    _cleanupPreviewMedia();
+    if (item.kind === 'photo') {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = title;
+      previewBody.appendChild(img);
+    } else if (item.kind === 'video') {
+      const video = document.createElement('video');
+      video.src = url;
+      video.controls = true;
+      video.autoplay = false;
+      video.preload = 'metadata';
+      previewBody.appendChild(video);
+    } else if (item.kind === 'audio') {
+      const wrap = document.createElement('div');
+      wrap.className = 'preview-audio-wrap';
+      const iconEl = document.createElement('div');
+      iconEl.className = 'preview-audio-icon';
+      iconEl.textContent = '🎙️';
+      wrap.appendChild(iconEl);
+      const audio = document.createElement('audio');
+      audio.src = url;
+      audio.controls = true;
+      audio.preload = 'metadata';
+      wrap.appendChild(audio);
+      previewBody.appendChild(wrap);
+    }
+
+    const dur = (item.kind !== 'photo' && item.duration_ms)
+      ? formatDuration(item.duration_ms) + ' · ' : '';
+    if (previewMeta) previewMeta.textContent = formatStorageDate(item.created_at) + ' · ' + dur + formatFileSize(item.size_bytes);
+    if (previewDl) previewDl.href = url;
+    previewModal.hidden = false;
+    if (previewClose) previewClose.focus();
+  }
+
+  function _cleanupPreviewMedia() {
+    previewBody.querySelectorAll('video, audio').forEach(el => {
+      try { el.pause(); } catch (_) {}
+      el.removeAttribute('src');
+      try { el.load(); } catch (_) {}
+    });
+    previewBody.innerHTML = '';
+  }
+
+  function closeStoragePreview() {
+    if (!previewModal) return;
+    _cleanupPreviewMedia();
+    previewModal.hidden = true;
+    _previewCurrentId = null;
+    if (_previewFocusReturn && _previewFocusReturn.focus) {
+      try { _previewFocusReturn.focus(); } catch (_) {}
+    }
+    _previewFocusReturn = null;
+  }
+
+  if (previewClose) previewClose.addEventListener('click', closeStoragePreview);
+  if (previewModal) previewModal.addEventListener('click', (e) => {
+    if (e.target === previewModal) closeStoragePreview();
+  });
+  if (previewDelBtn) previewDelBtn.addEventListener('click', () => {
+    if (_previewCurrentId && confirm('이 파일을 삭제하시겠습니까?')) {
+      sendMsg({ type: "storage_delete", id: _previewCurrentId });
+      closeStoragePreview();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && previewModal && !previewModal.hidden) closeStoragePreview();
+    if (e.key === 'Tab' && previewModal && !previewModal.hidden) {
+      const focusable = previewModal.querySelectorAll('button, a, video, audio, [tabindex]:not([tabindex="-1"])');
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault(); first.focus();
+      }
+    }
+  });
 
   function handleStorageDeleted(msg) {
     if (msg.ok && msg.id) {
@@ -2974,6 +3085,7 @@
         el.style.transition = 'all 0.25s';
         setTimeout(() => { el.remove(); updateStorageCount(); }, 260);
       }
+      if (_previewCurrentId === msg.id) closeStoragePreview();
       flash('파일이 삭제되었습니다.', 'ok');
     } else {
       flash(msg.message || '삭제 실패', 'error');
