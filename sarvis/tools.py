@@ -55,7 +55,10 @@ TOOL_DEFINITIONS = [
             "Read and extract text visible on screen/camera. Use when the user asks "
             "'읽어줘', '뭐라고 써있어', '글자 읽어', '텍스트 읽어', 'read this', "
             "'화면 읽어', '여기 뭐라고 써있어', '간판 읽어', '문서 읽어', '메뉴판 읽어'. "
-            "Captures the camera frame and extracts all visible text using vision AI."
+            "Captures the camera frame and extracts all visible text using vision AI. "
+            "Set translate=true when the text is in a foreign language and the user "
+            "wants Korean translation ('번역해줘', '한국어로', '이거 무슨 뜻이야', "
+            "'영어 읽어줘', '일본어 번역')."
         ),
         "input_schema": {
             "type": "object",
@@ -63,7 +66,11 @@ TOOL_DEFINITIONS = [
                 "focus": {
                     "type": "string",
                     "description": "What kind of text to focus on (e.g. '간판', '메뉴', '문서', '화면', '라벨'). Leave empty to read all visible text.",
-                }
+                },
+                "translate": {
+                    "type": "boolean",
+                    "description": "If true, also translate the extracted text into Korean. Use when the text is in a foreign language.",
+                },
             },
             "required": [],
         },
@@ -455,7 +462,7 @@ class ToolExecutor:
         except Exception as e:
             return f"비전 분석 실패: {e}"
 
-    def _t_read_text(self, focus: str = "") -> str:
+    def _t_read_text(self, focus: str = "", translate: bool = False) -> str:
         """카메라 프레임에서 텍스트 추출 (OCR via Claude Vision)"""
         frame = self.vision.read()
         if frame is None:
@@ -466,6 +473,14 @@ class ToolExecutor:
             return "카메라 기능을 사용할 수 없습니다 (cv2 미설치)."
 
         focus_hint = f" 특히 '{focus}' 부분에 집중해서" if focus else ""
+
+        translate_rule = ""
+        if translate:
+            translate_rule = (
+                "\n- 추출한 텍스트가 한국어가 아닌 외국어라면, "
+                "원문 아래에 '번역:' 이라고 쓰고 한국어 번역을 붙여줘.\n"
+                "- 이미 한국어인 텍스트는 번역하지 마."
+            )
 
         prompt = (
             "이 이미지에 보이는 모든 텍스트를 정확하게 읽어서 그대로 옮겨줘."
@@ -478,6 +493,7 @@ class ToolExecutor:
             "- 글자가 흐리거나 잘려서 불확실한 부분은 [?]로 표시해.\n"
             "- 텍스트가 전혀 보이지 않으면 '텍스트가 보이지 않습니다'라고만 답해.\n"
             "- 불필요한 설명 없이 추출된 텍스트만 간결하게."
+            f"{translate_rule}"
         )
 
         try:
