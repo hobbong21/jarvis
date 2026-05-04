@@ -1394,7 +1394,9 @@ async def websocket_endpoint(ws: WebSocket):
                         await emit(type="error", message="명령 미디어를 저장하지 못했습니다.")
                     continue
                 elif kind == 0x09:
-                    if not payload or len(payload) < 10:
+                    if OWNER_AUTH.is_enrolled() and not _is_authed():
+                        continue
+                    if not payload or len(payload) < 6:
                         continue
                     try:
                         dur_bytes = payload[:4]
@@ -1405,8 +1407,9 @@ async def websocket_endpoint(ws: WebSocket):
                         if not blob:
                             continue
                         ts = time.strftime("%Y%m%d_%H%M%S")
+                        ms = int(time.time() * 1000) % 1000
                         safe_label = re.sub(r'[^\w가-힣-]', '_', label)[:30] if label else ""
-                        fname = f"{ts}_{safe_label}.webm" if safe_label else f"{ts}.webm"
+                        fname = f"{ts}_{ms:03d}_{safe_label}.webm" if safe_label else f"{ts}_{ms:03d}.webm"
                         user_dir = os.path.join(RECORDINGS_DIR, session.memory_user_id)
                         os.makedirs(user_dir, exist_ok=True)
                         fpath = os.path.join(user_dir, fname)

@@ -1436,6 +1436,7 @@
   }
 
   function stopCamera(silent = false) {
+    if (videoRecording) stopVideoRecording();
     if (camStream) camStream.getTracks().forEach((t) => t.stop());
     camStream = null;
     camVideo.srcObject = null;
@@ -2903,6 +2904,8 @@
     videoRecorder.onstop = () => {
       const blob = new Blob(videoChunks, { type: 'video/webm' });
       videoChunks = [];
+      videoRecording = false;
+      videoRecorder = null;
       sendRecordingBlob(blob);
       updateRecordingUI(false);
     };

@@ -68,6 +68,22 @@ Validator).
 
 테스트 +22 (S3 단위 17 + WS round-trip 5). 회귀 **696/696 통과**.
 
+## Cycle #30 — 카메라 녹화 기능
+
+음성 명령("녹화해"/"녹화 중지")으로 카메라 영상 녹화 시작/중지.
+녹화 파일은 `data/recordings/{user_id}/` 에 WebM 형식으로 저장.
+
+**아키텍처**:
+- `sarvis/tools.py`: `start_recording`/`stop_recording` 도구 + `on_recording` 콜백
+- `sarvis/server.py`: UserSession 녹화 상태, `recording_cmd` WS emit, 0x09 바이너리 수신→파일 저장
+- `sarvis/memory.py`: `recordings` 테이블 + `save_recording`/`list_recordings`/`delete_recording` CRUD
+- `sarvis/config.py`: `recordings_dir` 설정, system_prompt 녹화 도구 안내
+- `web/app.js`: MediaRecorder API, `recording_cmd`/`recording_saved` 이벤트 핸들링, 0x09 바이너리 전송
+- `web/index.html` + `web/style.css`: REC 인디케이터 (빨간 점 + 경과 시간)
+
+**바이너리 프로토콜 0x09**: `[4B duration_ms BE][2B label_len BE][label UTF-8][WebM blob]`
+**보안**: 인증 게이트 적용 (미인증 시 0x09 무시). 파일명 밀리초 타임스탬프로 충돌 방지.
+
 ## Cycle #24 — HA Stage S2 (Diagnostician, L1 — 진단까지)
 
 사이클 #23 의 Observer 가 만든 `ha_issues(status='open')` 를 입력으로,
