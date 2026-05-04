@@ -426,23 +426,18 @@ async def index():
 @app.get("/api/recordings/{rec_id}")
 async def download_recording(rec_id: int):
     from .memory import Memory
+    from fastapi.responses import JSONResponse
     mem = Memory(cfg.db_path)
-    rows = mem.list_recordings("__all__", limit=9999)
-    row = None
-    all_recs = []
-    with mem._conn_ctx_cls(mem.path) as conn:
-        r = conn.execute(
-            "SELECT * FROM recordings WHERE id=?", (rec_id,)
-        ).fetchone()
-        if r:
-            row = dict(r)
+    row = mem.get_recording_by_id(rec_id)
     if not row:
-        from fastapi.responses import JSONResponse
         return JSONResponse({"error": "not found"}, status_code=404)
     fp = row.get("file_path", "")
     if not fp or not os.path.isfile(fp):
-        from fastapi.responses import JSONResponse
         return JSONResponse({"error": "file missing"}, status_code=404)
+    rec_root = os.path.realpath(RECORDINGS_DIR)
+    real_fp = os.path.realpath(fp)
+    if not real_fp.startswith(rec_root + os.sep) and real_fp != rec_root:
+        return JSONResponse({"error": "access denied"}, status_code=403)
     fname = row.get("filename", os.path.basename(fp))
     kind = row.get("kind", "")
     if kind == "photo":
@@ -451,7 +446,7 @@ async def download_recording(rec_id: int):
         media_type = "audio/webm"
     else:
         media_type = "video/webm"
-    return FileResponse(fp, filename=fname, media_type=media_type)
+    return FileResponse(real_fp, filename=fname, media_type=media_type)
 
 
 # ============================================================
@@ -2357,14 +2352,14 @@ async def websocket_endpoint(ws: WebSocket):
 
             elif mtype == "storage_list":
                 try:
-                    kind_filter = str(data.get("kind", "")).strip() or None
+                    kind_filter = str(data.get("kind", "")).strip()
+                    _VALID_KINDS = {"photo", "video", "audio"}
+                    kind_filter = kind_filter if kind_filter in _VALID_KINDS else ""
                     lim = min(int(data.get("limit", 100)), 500)
                     recs = await asyncio.to_thread(
-                        session.memory.list_recordings,
-                        session.memory_user_id, lim,
+                        session.memory.list_recordings_by_kind,
+                        session.memory_user_id, kind_filter, lim,
                     )
-                    if kind_filter:
-                        recs = [r for r in recs if r.get("kind") == kind_filter]
                     for r in recs:
                         r.pop("file_path", None)
                     await emit(type="storage_list", ok=True, items=recs)
@@ -2379,7 +2374,11 @@ async def websocket_endpoint(ws: WebSocket):
                         await emit(type="storage_deleted", ok=False, message="id 필요")
                         continue
                     ok = await asyncio.to_thread(
-                        session.memory.delete_recording, rec_id,
+                        functools.partial(
+                            session.memory.delete_recording,
+                            rec_id,
+                            user_id=session.memory_user_id,
+                        )
                     )
                     await emit(type="storage_deleted", ok=ok, id=rec_id)
                 except Exception as ex:

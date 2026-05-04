@@ -1198,14 +1198,26 @@ class Memory:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def delete_recording(self, rec_id: int) -> bool:
+    def delete_recording(self, rec_id: int, user_id: str = "") -> bool:
         with _conn_ctx(self.path) as conn:
-            row = conn.execute(
-                "SELECT file_path FROM recordings WHERE id=?", (int(rec_id),)
-            ).fetchone()
+            if user_id:
+                row = conn.execute(
+                    "SELECT file_path FROM recordings WHERE id=? AND user_id=?",
+                    (int(rec_id), user_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT file_path FROM recordings WHERE id=?", (int(rec_id),)
+                ).fetchone()
             if not row:
                 return False
-            conn.execute("DELETE FROM recordings WHERE id=?", (int(rec_id),))
+            if user_id:
+                conn.execute(
+                    "DELETE FROM recordings WHERE id=? AND user_id=?",
+                    (int(rec_id), user_id),
+                )
+            else:
+                conn.execute("DELETE FROM recordings WHERE id=?", (int(rec_id),))
         fp = row["file_path"]
         if fp and os.path.isfile(fp):
             try:
@@ -1213,6 +1225,39 @@ class Memory:
             except OSError:
                 pass
         return True
+
+    def list_recordings_by_kind(
+        self,
+        user_id: str,
+        kind: str = "",
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with _conn_ctx(self.path) as conn:
+            if kind:
+                rows = conn.execute(
+                    "SELECT * FROM recordings WHERE user_id=? AND kind=? ORDER BY id DESC LIMIT ?",
+                    (user_id, kind, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM recordings WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                    (user_id, limit),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recording_by_id(self, rec_id: int, user_id: str = "") -> Optional[Dict[str, Any]]:
+        with _conn_ctx(self.path) as conn:
+            if user_id:
+                row = conn.execute(
+                    "SELECT * FROM recordings WHERE id=? AND user_id=?",
+                    (int(rec_id), user_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM recordings WHERE id=?", (int(rec_id),)
+                ).fetchone()
+        return dict(row) if row else None
 
     # ── 사이클 #22 (HARN-12 + HARN-05): 사용자 피드백 + My Sarvis 요약 ──
     def set_feedback(

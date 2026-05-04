@@ -487,6 +487,7 @@
         break;
       case 'recording_saved':
         handleRecordingSaved(m);
+        if (document.querySelector('.mypage-tab[data-tab="storage-tab"].active')) refreshStorage();
         break;
     }
   }
@@ -2733,6 +2734,10 @@
             setTimeout(() => { pfMsg.textContent = ""; }, 3000);
           }
           break;
+        case "storage_list":
+          renderStorageList(msg); break;
+        case "storage_deleted":
+          handleStorageDeleted(msg); break;
         case "error":
           if (pfSaveBtn) pfSaveBtn.disabled = false;
           if (pfMsg) pfMsg.textContent = "";
@@ -2801,7 +2806,19 @@
     setTimeout(() => sendMsg({ type: "profile_get" }), 800);
   }
 
-  // ── 사이클 #30 — 개인화 프로필 카드 ────────────────────────
+  // ── 마이페이지 탭 전환 ────────────────────────
+  document.querySelectorAll('.mypage-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.mypage-tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.mypage-tab-content').forEach(c => c.classList.remove('active'));
+      tab.classList.add('active');
+      const target = $(tab.dataset.tab);
+      if (target) target.classList.add('active');
+      if (tab.dataset.tab === 'storage-tab') refreshStorage();
+    });
+  });
+
+  // ── 프로필 카드 ────────────────────────
   const pfNickname = $("profile-nickname");
   const pfEmail = $("profile-email");
   const pfTone = $("profile-tone");
@@ -2834,6 +2851,142 @@
       pfSaveBtn.disabled = true;
       pfMsg.textContent = "저장 중…";
     });
+  }
+
+  // ── 저장 공간 ────────────────────────
+  const storageListEl = $("storage-list");
+  const storageFilterEl = $("storage-filter");
+  const storageRefreshBtn = $("storage-refresh-btn");
+  const storageCountEl = $("storage-count");
+
+  function refreshStorage() {
+    const kind = storageFilterEl ? storageFilterEl.value : "";
+    sendMsg({ type: "storage_list", kind, limit: 100 });
+  }
+
+  if (storageRefreshBtn) storageRefreshBtn.addEventListener("click", refreshStorage);
+  if (storageFilterEl) storageFilterEl.addEventListener("change", refreshStorage);
+
+  function storageKindIcon(kind) {
+    if (kind === 'photo') return '📷';
+    if (kind === 'audio') return '🎙️';
+    return '🎬';
+  }
+  function storageKindLabel(kind) {
+    if (kind === 'photo') return '사진';
+    if (kind === 'audio') return '음성';
+    return '영상';
+  }
+  function formatStorageDate(ts) {
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${mm}/${dd} ${hh}:${mi}`;
+  }
+  function formatFileSize(bytes) {
+    if (!bytes) return '';
+    if (bytes < 1024) return bytes + 'B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + 'KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + 'MB';
+  }
+
+  function escapeStorageText(s) {
+    if (!s) return '';
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function renderStorageList(msg) {
+    if (!storageListEl) return;
+    const items = msg.items || [];
+    if (storageCountEl) storageCountEl.textContent = `${items.length}건`;
+    storageListEl.innerHTML = '';
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'storage-empty';
+      empty.textContent = '저장된 파일이 없습니다.';
+      storageListEl.appendChild(empty);
+      return;
+    }
+    items.forEach(item => {
+      const row = document.createElement('div');
+      row.className = 'storage-item';
+      row.dataset.id = item.id;
+
+      if (item.kind === 'photo') {
+        const thumb = document.createElement('img');
+        thumb.className = 'storage-thumb';
+        thumb.src = '/api/recordings/' + item.id;
+        thumb.alt = '';
+        thumb.loading = 'lazy';
+        row.appendChild(thumb);
+      } else {
+        const icon = document.createElement('span');
+        icon.className = 'storage-icon';
+        icon.textContent = storageKindIcon(item.kind);
+        row.appendChild(icon);
+      }
+
+      const info = document.createElement('div');
+      info.className = 'storage-info';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'storage-name';
+      nameEl.textContent = storageKindLabel(item.kind) + (item.label ? ' — ' + item.label : '');
+      info.appendChild(nameEl);
+      const metaEl = document.createElement('div');
+      metaEl.className = 'storage-meta';
+      const dur = (item.kind !== 'photo' && item.duration_ms)
+        ? (item.duration_ms / 1000).toFixed(1) + '초 · ' : '';
+      metaEl.textContent = formatStorageDate(item.created_at) + ' · ' + dur + formatFileSize(item.size_bytes);
+      info.appendChild(metaEl);
+      row.appendChild(info);
+
+      const actions = document.createElement('div');
+      actions.className = 'storage-actions';
+      const openBtn = document.createElement('button');
+      openBtn.className = 'storage-open';
+      openBtn.textContent = '열기';
+      openBtn.title = '열기/다운로드';
+      openBtn.addEventListener('click', () => window.open('/api/recordings/' + item.id, '_blank'));
+      actions.appendChild(openBtn);
+      const delBtn = document.createElement('button');
+      delBtn.className = 'storage-del';
+      delBtn.textContent = '삭제';
+      delBtn.title = '삭제';
+      delBtn.addEventListener('click', () => {
+        if (confirm('이 파일을 삭제하시겠습니까?')) sendMsg({ type: "storage_delete", id: item.id });
+      });
+      actions.appendChild(delBtn);
+      row.appendChild(actions);
+
+      storageListEl.appendChild(row);
+    });
+  }
+
+  function handleStorageDeleted(msg) {
+    if (msg.ok && msg.id) {
+      const el = storageListEl ? storageListEl.querySelector(`[data-id="${msg.id}"]`) : null;
+      if (el) {
+        el.style.opacity = '0';
+        el.style.transform = 'translateX(20px)';
+        el.style.transition = 'all 0.25s';
+        setTimeout(() => { el.remove(); updateStorageCount(); }, 260);
+      }
+      flash('파일이 삭제되었습니다.', 'ok');
+    } else {
+      flash(msg.message || '삭제 실패', 'error');
+    }
+  }
+
+  function updateStorageCount() {
+    if (!storageListEl || !storageCountEl) return;
+    const count = storageListEl.querySelectorAll('.storage-item').length;
+    storageCountEl.textContent = `${count}건`;
+    if (count === 0) {
+      storageListEl.innerHTML = '<div class="storage-empty">저장된 파일이 없습니다.</div>';
+    }
   }
 
   // ── 사이클 #23 — HA 성장 일기 카드 ────────────────────────

@@ -2189,6 +2189,23 @@ input, select { outline: none; }
   to { opacity: 1; transform: scale(1); }
 }
 
+/* ===== 마이페이지 탭 ===== */
+.mypage-tabs {
+  display: flex; gap: 2px; margin-bottom: 10px;
+  border-bottom: 1px solid var(--border-soft); padding-bottom: 0;
+}
+.mypage-tab {
+  padding: 6px 14px; font-size: 12px; font-weight: 600;
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--text-mid); cursor: pointer; transition: all .15s;
+}
+.mypage-tab:hover { color: var(--text); }
+.mypage-tab.active {
+  color: var(--accent); border-bottom-color: var(--accent);
+}
+.mypage-tab-content { display: none; }
+.mypage-tab-content.active { display: block; }
+
 /* ===== 개인화 프로필 ===== */
 .profile-form { display: flex; flex-direction: column; gap: 8px; }
 .profile-row { display: flex; align-items: center; gap: 8px; }
@@ -2203,4 +2220,57 @@ input, select { outline: none; }
 .profile-actions { justify-content: flex-end; gap: 10px; margin-top: 2px; }
 .profile-save-msg {
   font-size: 11px; color: var(--accent); transition: opacity 0.3s;
+}
+
+/* ===== 저장 공간 ===== */
+.storage-toolbar {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
+}
+.storage-count {
+  font-size: 11px; color: var(--text-mid); margin-left: auto;
+}
+.storage-list {
+  max-height: 320px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.storage-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 8px;
+  background: var(--bg-soft); border: 1px solid var(--border-soft);
+  transition: background .12s;
+}
+.storage-item:hover { background: var(--accent-soft); }
+.storage-icon {
+  font-size: 18px; flex-shrink: 0; width: 28px; text-align: center;
+}
+.storage-thumb {
+  width: 48px; height: 36px; object-fit: cover; border-radius: 4px;
+  flex-shrink: 0; background: var(--bg-panel); border: 1px solid var(--border-soft);
+}
+.storage-info { flex: 1; min-width: 0; }
+.storage-name {
+  font-size: 12px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.storage-meta {
+  font-size: 10px; color: var(--text-mid); margin-top: 1px;
+}
+.storage-actions {
+  display: flex; gap: 4px; flex-shrink: 0;
+}
+.storage-actions button {
+  padding: 3px 8px; font-size: 11px; cursor: pointer;
+  border-radius: 4px; border: 1px solid var(--accent-d);
+  background: var(--bg-panel); color: var(--text-mid);
+  transition: all .12s;
+}
+.storage-actions button:hover {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+}
+.storage-actions .storage-del:hover {
+  background: #dc2626; border-color: #dc2626;
+}
+.storage-empty {
+  text-align: center; padding: 20px 10px; color: var(--text-mid);
+  font-size: 12px;
 }
