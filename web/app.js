@@ -175,6 +175,7 @@
     // 사이클 #21 — 생산성 패널이 추가 메시지 리스너를 부착할 수 있게 노출.
     window.__ws = ws;
     window.__sendWS = send;
+    if (window.__reattachProdDockListener) window.__reattachProdDockListener();
 
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {
@@ -487,7 +488,7 @@
         break;
       case 'recording_saved':
         handleRecordingSaved(m);
-        refreshStorage();
+        if (window.__refreshStorage) window.__refreshStorage();
         break;
     }
   }
@@ -2671,6 +2672,8 @@
     if (!w || w.readyState === undefined) {
       setTimeout(attachWSListener, 500); return;
     }
+    if (w.__prodDockListenerAttached) return;
+    w.__prodDockListenerAttached = true;
     w.addEventListener("message", (ev) => {
       let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
       if (!msg || !msg.type) return;
@@ -2873,6 +2876,7 @@
     const kind = storageFilterEl ? storageFilterEl.value : "";
     sendMsg({ type: "storage_list", kind, limit: 100 });
   }
+  window.__refreshStorage = refreshStorage;
 
   if (storageRefreshBtn) storageRefreshBtn.addEventListener("click", refreshStorage);
   if (storageFilterEl) storageFilterEl.addEventListener("change", refreshStorage);
@@ -3479,5 +3483,6 @@
     }
   }
 
+  window.__reattachProdDockListener = attachWSListener;
   attachWSListener();
 })();
