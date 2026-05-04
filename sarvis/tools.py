@@ -50,6 +50,25 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "read_text",
+        "description": (
+            "Read and extract text visible on screen/camera. Use when the user asks "
+            "'읽어줘', '뭐라고 써있어', '글자 읽어', '텍스트 읽어', 'read this', "
+            "'화면 읽어', '여기 뭐라고 써있어', '간판 읽어', '문서 읽어', '메뉴판 읽어'. "
+            "Captures the camera frame and extracts all visible text using vision AI."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "focus": {
+                    "type": "string",
+                    "description": "What kind of text to focus on (e.g. '간판', '메뉴', '문서', '화면', '라벨'). Leave empty to read all visible text.",
+                }
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "web_search",
         "description": (
             "Quick fact check via web search snippets (top 6). Use for short, "
@@ -287,18 +306,13 @@ class ToolExecutor:
         if frame is None:
             return "카메라 프레임을 가져올 수 없습니다."
 
-        # JPEG 압축 (속도/대역폭)
-        cv2 = _get_cv2()
-        if cv2 is None:
+        b64 = self._frame_to_b64(frame)
+        if b64 is None:
             return "카메라 기능을 사용할 수 없습니다 (cv2 미설치)."
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if not ok:
-            return "이미지 인코딩 실패"
-        b64 = base64.standard_b64encode(buf.tobytes()).decode("utf-8")
 
         try:
             msg = self.client.messages.create(
-                model=cfg.vision_model,  # 비전은 Haiku로 빠르게
+                model=cfg.vision_model,
                 max_tokens=300,
                 messages=[
                     {
@@ -326,6 +340,66 @@ class ToolExecutor:
             return msg.content[0].text.strip()
         except Exception as e:
             return f"비전 분석 실패: {e}"
+
+    def _t_read_text(self, focus: str = "") -> str:
+        """카메라 프레임에서 텍스트 추출 (OCR via Claude Vision)"""
+        frame = self.vision.read()
+        if frame is None:
+            return "카메라 프레임을 가져올 수 없습니다."
+
+        b64 = self._frame_to_b64(frame, quality=92)
+        if b64 is None:
+            return "카메라 기능을 사용할 수 없습니다 (cv2 미설치)."
+
+        focus_hint = f" 특히 '{focus}' 부분에 집중해서" if focus else ""
+
+        prompt = (
+            "이 이미지에 보이는 모든 텍스트를 정확하게 읽어서 그대로 옮겨줘."
+            f"{focus_hint}\n\n"
+            "규칙:\n"
+            "- 보이는 글자를 최대한 정확히, 원문 그대로 추출해.\n"
+            "- 한국어, 영어, 숫자, 특수문자 모두 포함.\n"
+            "- 텍스트 영역이 여러 개면 위치별로 구분해서 알려줘 "
+            "(예: [상단], [중앙], [하단], [왼쪽], [오른쪽]).\n"
+            "- 글자가 흐리거나 잘려서 불확실한 부분은 [?]로 표시해.\n"
+            "- 텍스트가 전혀 보이지 않으면 '텍스트가 보이지 않습니다'라고만 답해.\n"
+            "- 불필요한 설명 없이 추출된 텍스트만 간결하게."
+        )
+
+        try:
+            msg = self.client.messages.create(
+                model=cfg.vision_model,
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": b64,
+                                },
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            return f"텍스트 읽기 실패: {e}"
+
+    def _frame_to_b64(self, frame, quality: int = 85) -> Optional[str]:
+        """카메라 프레임을 JPEG base64로 변환."""
+        cv2 = _get_cv2()
+        if cv2 is None:
+            return None
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            return None
+        return base64.standard_b64encode(buf.tobytes()).decode("utf-8")
 
     # ---- 웹 검색 헬퍼들 (사이클 #29) ------------------------------------
     # 시간 민감 질의 패턴 — 매칭되면 오늘 날짜를 query 에 자동 부착해 검색 신선도↑
