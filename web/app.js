@@ -3207,6 +3207,7 @@
       videoChunks = [];
       videoRecording = false;
       videoRecorder = null;
+      flash('녹화 중지. 서버로 전송 중...', 'ok');
       sendRecordingBlob(blob);
       updateRecordingUI(false);
     };
@@ -3214,6 +3215,7 @@
     videoRecording = true;
     videoRecordingStart = Date.now();
     updateRecordingUI(true);
+    flash('🔴 영상 녹화를 시작했습니다.' + (label ? ` (${label})` : ''), 'ok');
   }
 
   function stopVideoRecording() {
@@ -3301,6 +3303,7 @@
         audioStream.getTracks().forEach(t => t.stop());
         audioStream = null;
       }
+      flash('녹음 중지. 서버로 전송 중...', 'ok');
       sendAudioRecordingBlob(blob);
       updateAudioRecordingUI(false);
     };
@@ -3308,6 +3311,7 @@
     audioRecording = true;
     audioRecordingStart = Date.now();
     updateAudioRecordingUI(true);
+    flash('🎙️ 음성 녹음을 시작했습니다.' + (label ? ` (${label})` : ''), 'ok');
   }
 
   function stopAudioRecording() {

@@ -442,13 +442,9 @@ class ToolExecutor:
 
     def _t_see(self, question: str) -> str:
         """카메라 프레임 → Claude Vision"""
-        frame = self.vision.read()
-        if frame is None:
-            return "카메라 프레임을 가져올 수 없습니다."
-
-        b64 = self._frame_to_b64(frame)
+        b64 = self._get_vision_b64()
         if b64 is None:
-            return "카메라 기능을 사용할 수 없습니다 (cv2 미설치)."
+            return "카메라 프레임을 가져올 수 없습니다. 카메라가 켜져 있는지 확인해주세요."
 
         try:
             msg = self.client.messages.create(
@@ -483,13 +479,9 @@ class ToolExecutor:
 
     def _t_read_text(self, focus: str = "", translate: bool = False) -> str:
         """카메라 프레임에서 텍스트 추출 (OCR via Claude Vision)"""
-        frame = self.vision.read()
-        if frame is None:
-            return "카메라 프레임을 가져올 수 없습니다."
-
-        b64 = self._frame_to_b64(frame, quality=92)
+        b64 = self._get_vision_b64()
         if b64 is None:
-            return "카메라 기능을 사용할 수 없습니다 (cv2 미설치)."
+            return "카메라 프레임을 가져올 수 없습니다. 카메라가 켜져 있는지 확인해주세요."
 
         focus_hint = f" 특히 '{focus}' 부분에 집중해서" if focus else ""
 
@@ -549,6 +541,20 @@ class ToolExecutor:
         if not ok:
             return None
         return base64.standard_b64encode(buf.tobytes()).decode("utf-8")
+
+    def _get_vision_b64(self) -> Optional[str]:
+        """카메라 프레임을 base64로 가져오기. cv2 프레임 우선, 없으면 raw JPEG 사용."""
+        frame = self.vision.read()
+        if frame is not None:
+            b64 = self._frame_to_b64(frame)
+            if b64:
+                return b64
+        raw = getattr(self.vision, 'read_raw_jpeg', None)
+        if raw:
+            jpeg = raw()
+            if jpeg:
+                return base64.standard_b64encode(jpeg).decode("utf-8")
+        return None
 
     # ---- 웹 검색 헬퍼들 (사이클 #29) ------------------------------------
     # 시간 민감 질의 패턴 — 매칭되면 오늘 날짜를 query 에 자동 부착해 검색 신선도↑
@@ -1167,17 +1173,9 @@ class ToolExecutor:
 
     def _t_observe_action(self, focus: str = "activity") -> str:
         """카메라에서 사람의 행동/자세/제스처를 인식 (Claude Vision)."""
-        frame = self.vision.read()
-        if frame is None:
+        b64 = self._get_vision_b64()
+        if b64 is None:
             return "카메라에 사람이 보이지 않거나 프레임을 가져올 수 없습니다."
-
-        cv2 = _get_cv2()
-        if cv2 is None:
-            return "카메라 기능을 사용할 수 없습니다 (cv2 미설치)."
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        if not ok:
-            return "이미지 인코딩 실패"
-        b64 = base64.standard_b64encode(buf.tobytes()).decode("utf-8")
 
         try:
             msg = self.client.messages.create(
@@ -1226,15 +1224,18 @@ class ToolExecutor:
         if hasattr(self.vision, "crop_largest_face_jpeg"):
             crop_jpeg = self.vision.crop_largest_face_jpeg()
         if crop_jpeg is None:
-            # 폴백: 전체 프레임
             frame = self.vision.read()
             cv2 = _get_cv2()
-            if frame is None or cv2 is None:
+            if frame is not None and cv2 is not None:
+                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ok:
+                    crop_jpeg = buf.tobytes()
+            if crop_jpeg is None:
+                raw = getattr(self.vision, 'read_raw_jpeg', None)
+                if raw:
+                    crop_jpeg = raw()
+            if crop_jpeg is None:
                 return "카메라에 사람이 보이지 않거나 프레임을 가져올 수 없습니다."
-            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if not ok:
-                return "이미지 인코딩 실패"
-            crop_jpeg = buf.tobytes()
 
         current_b64 = base64.standard_b64encode(crop_jpeg).decode("utf-8")
 
@@ -1309,9 +1310,10 @@ class ToolExecutor:
     def _t_start_recording(self, label: str = "") -> str:
         if self.is_recording:
             return "이미 영상 녹화 중입니다. 먼저 녹화를 중지해주세요."
-        frame = self.vision.read()
-        if frame is None:
-            return "카메라가 켜져 있지 않습니다. 먼저 카메라를 시작해주세요."
+        cam_active = getattr(self.vision, 'is_browser_cam_active', None)
+        if cam_active and not cam_active():
+            if self.vision.read() is None:
+                return "카메라가 켜져 있지 않습니다. 먼저 카메라를 시작해주세요."
         self.is_recording = True
         self._recording_label = label or ""
         if self.on_recording:
@@ -1355,9 +1357,10 @@ class ToolExecutor:
 
     # -------- 사진 캡처 --------
     def _t_capture_photo(self, label: str = "") -> str:
-        frame = self.vision.read()
-        if frame is None:
-            return "카메라가 켜져 있지 않습니다. 먼저 카메라를 시작해주세요."
+        cam_active = getattr(self.vision, 'is_browser_cam_active', None)
+        if cam_active and not cam_active():
+            if self.vision.read() is None:
+                return "카메라가 켜져 있지 않습니다. 먼저 카메라를 시작해주세요."
         if self.on_system_cmd:
             self.on_system_cmd({"type": "sys_capture_photo", "label": label or ""})
         msg = "사진을 찍었습니다."

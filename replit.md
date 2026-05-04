@@ -73,12 +73,21 @@ Validator).
 음성 명령("녹화해"/"녹화 중지")으로 카메라 영상 녹화 시작/중지.
 녹화 파일은 `data/recordings/{user_id}/` 에 WebM 형식으로 저장.
 
+**cv2 미설치 환경 대응** (중요):
+- `sarvis/vision.py` `WebVision`: cv2 없이도 브라우저 카메라 상태를 추적하는 `_browser_cam_active` 플래그 추가.
+  - `push_jpeg()`: cv2 디코드 전에 raw JPEG 바이트와 타임스탬프를 먼저 저장.
+  - `is_browser_cam_active()`: 최근 10초 내 프레임 수신 여부로 카메라 활성 판단.
+  - `read_raw_jpeg()`: cv2 없이도 raw JPEG 바이트를 직접 반환 (Vision API 호출용).
+- `sarvis/tools.py`: 모든 비전 도구(see, read_text, observe_action, identify_person, capture_photo, start_recording)가
+  cv2 프레임 실패 시 raw JPEG 폴백 경로 사용. `_get_vision_b64()` 헬퍼 추가.
+- 녹화/사진 도구: `vision.read()` 대신 `is_browser_cam_active()` 우선 체크 → 브라우저 카메라가 켜져 있으면 통과.
+
 **아키텍처**:
 - `sarvis/tools.py`: `start_recording`/`stop_recording` 도구 + `on_recording` 콜백
 - `sarvis/server.py`: UserSession 녹화 상태, `recording_cmd` WS emit, 0x09 바이너리 수신→파일 저장
-- `sarvis/memory.py`: `recordings` 테이블 + `save_recording`/`list_recordings`/`delete_recording` CRUD
+- `sarvis/memory.py`: `recordings` 테이블 + `save_recording`/`list_recordings`/`delete_recording`/`list_recordings_by_kind`/`get_recording_by_id` CRUD
 - `sarvis/config.py`: `recordings_dir` 설정, system_prompt 녹화 도구 안내
-- `web/app.js`: MediaRecorder API, `recording_cmd`/`recording_saved` 이벤트 핸들링, 0x09 바이너리 전송
+- `web/app.js`: MediaRecorder API, `recording_cmd`/`recording_saved` 이벤트 핸들링, 0x09 바이너리 전송. 녹화 시작/중지 시 flash 알림 추가.
 - `web/index.html` + `web/style.css`: REC 인디케이터 (빨간 점 + 경과 시간)
 
 **음성 녹음** (같은 사이클): `start_audio_recording`/`stop_audio_recording` 도구 추가.

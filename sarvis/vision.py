@@ -311,10 +311,12 @@ class WebVision:
         self._frame_ts: float = 0.0
         self._frame_w: int = 0
         self._frame_h: int = 0
+        self._browser_cam_active: bool = False
+        self._browser_cam_ts: float = 0.0
+        self._raw_jpeg: Optional[bytes] = None
         self.current_user: Optional[str] = None
         self.face_boxes: List[Tuple[int, int, int, int]] = []
         self._last_face_check: float = 0.0
-        # 사이클 #28 — 제스처 인식 (MediaPipe). 콜백이 부착됐을 때만 동작.
         self._gesture_detector = None  # type: ignore[assignment]
         self._gesture_callback = None  # type: Optional[callable]
 
@@ -340,6 +342,11 @@ class WebVision:
 
     def push_jpeg(self, data: bytes) -> bool:
         """브라우저가 WebSocket으로 보낸 JPEG 바이트를 디코드해 저장."""
+        now = time.time()
+        with self._lock:
+            self._browser_cam_active = True
+            self._browser_cam_ts = now
+            self._raw_jpeg = data
         if not _ensure_cv2():
             return False
         arr = np.frombuffer(data, dtype=np.uint8)
@@ -349,7 +356,7 @@ class WebVision:
         h, w = frame.shape[:2]
         with self._lock:
             self._frame = frame
-            self._frame_ts = time.time()
+            self._frame_ts = now
             self._frame_w = w
             self._frame_h = h
 
@@ -394,6 +401,20 @@ class WebVision:
         with self._lock:
             return self._frame_w, self._frame_h
 
+    def is_browser_cam_active(self) -> bool:
+        with self._lock:
+            if not self._browser_cam_active:
+                return False
+            return (time.time() - self._browser_cam_ts) < 10.0
+
+    def read_raw_jpeg(self) -> Optional[bytes]:
+        with self._lock:
+            if self._raw_jpeg is None:
+                return None
+            if time.time() - self._browser_cam_ts > 10.0:
+                return None
+            return self._raw_jpeg
+
     def read(self):
         """가장 최근 프레임 반환. 너무 오래된 건 무효 처리."""
         with self._lock:
@@ -406,6 +427,8 @@ class WebVision:
     def release(self):
         with self._lock:
             self._frame = None
+            self._browser_cam_active = False
+            self._raw_jpeg = None
         self.face_boxes = []
         # 사이클 #28 — 제스처 워커 스레드/모델 자원 해제.
         try:
