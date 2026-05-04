@@ -219,7 +219,12 @@ class Config:
 - get_time: 시간/날짜
 - remember: 사용자가 기억하라고 한 것, 또는 중요한 사용자 정보
 - recall: 이전에 기억한 내용 찾을 때
-- set_timer: 타이머/알람 요청
+- set_timer: 타이머 요청 (몇 분/몇 초 뒤). 지속 시간 기반.
+- set_alarm: 특정 시각에 알람 설정 ("3시에 알려줘", "오후 5시 30분 알람"). 시계 시간 기반. set_timer와 구분해서 사용.
+- open_url: 브라우저에서 사이트/URL 열기 ("유튜브 열어", "네이버 켜줘", "구글 열어줘"). 사이트 이름이면 URL로 변환해서 넣어.
+- send_notification: 브라우저 알림 보내기 ("알려줘", "알림 보내줘", "리마인드해줘").
+- set_volume: 사비스 음량 조절 ("소리 크게", "볼륨 줄여", "소리 50%로"). 0~100 사이 값.
+- change_setting: 사비스 설정 변경. setting='backend' (claude/openai/gemini), setting='voice' (음성 프리셋 이름), setting='model' (모델 이름). 예: "GPT로 바꿔줘" → change_setting(setting='backend', value='openai'), "클로드로 전환" → change_setting(setting='backend', value='claude').
 - start_recording: 카메라 영상 녹화 시작 ("녹화해", "녹화 시작", "영상 찍어")
 - stop_recording: 현재 영상 녹화 중지 및 저장 ("녹화 중지", "녹화 끝", "그만 찍어")
 - start_audio_recording: 음성 녹음 시작 ("녹음해", "녹음 시작", "음성 녹음", "목소리 녹음")

@@ -228,6 +228,118 @@ TOOL_DEFINITIONS = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "open_url",
+        "description": (
+            "Open a URL/website in the user's browser. Use when the user asks "
+            "'유튜브 열어', '네이버 켜줘', '구글 열어줘', '이 사이트 열어', "
+            "'브라우저에서 열어줘', 'open youtube', '검색창 열어'. "
+            "Opens in a new browser tab."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Full URL to open (e.g. 'https://youtube.com'). If user gives a site name, convert to URL.",
+                }
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "send_notification",
+        "description": (
+            "Send a browser notification to the user. Use when the user asks "
+            "'알려줘', '알림 보내줘', '리마인드해줘', 'notify me', "
+            "or when a timer/alarm fires and user needs to be notified."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Notification title (short, in Korean)",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Notification body text",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "set_alarm",
+        "description": (
+            "Set an alarm at a specific time. Use when the user asks "
+            "'알람 맞춰줘', '몇 시에 알려줘', '알람 설정', '깨워줘', "
+            "'오후 3시에 알려줘', 'set alarm'. Different from set_timer: "
+            "set_timer is for duration (e.g. 5 minutes), set_alarm is for "
+            "a specific clock time (e.g. 15:00)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hour": {
+                    "type": "integer",
+                    "description": "Hour in 24h format (0-23)",
+                },
+                "minute": {
+                    "type": "integer",
+                    "description": "Minute (0-59)",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "What the alarm is for",
+                },
+            },
+            "required": ["hour", "minute"],
+        },
+    },
+    {
+        "name": "set_volume",
+        "description": (
+            "Adjust the assistant's voice/TTS volume. Use when the user asks "
+            "'볼륨 올려', '소리 줄여', '볼륨 50', '소리 크게', '소리 작게', "
+            "'음량 조절', 'volume up', 'louder', 'quieter'. "
+            "Value 0-100 (0=mute, 100=max)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "integer",
+                    "description": "Volume level 0-100",
+                }
+            },
+            "required": ["level"],
+        },
+    },
+    {
+        "name": "change_setting",
+        "description": (
+            "Change a Sarvis system setting. Use when the user asks to switch AI model, "
+            "change voice, or adjust system configuration. "
+            "'모델 바꿔', 'GPT로 바꿔줘', '클로드로 전환', '음성 바꿔줘', "
+            "'목소리 변경', '여자 목소리로', '남자 목소리로'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "setting": {
+                    "type": "string",
+                    "description": "Setting to change: 'backend' (claude/openai/gemini), 'voice' (preset name), 'model' (model name)",
+                    "enum": ["backend", "voice", "model"],
+                },
+                "value": {
+                    "type": "string",
+                    "description": "New value for the setting",
+                },
+            },
+            "required": ["setting", "value"],
+        },
+    },
+    {
         "name": "observe_action",
         "description": (
             "Analyze the user's recent action/behavior visible on camera. "
@@ -261,6 +373,7 @@ class ToolExecutor:
         on_timer: Optional[Callable[[str], None]] = None,
         face_registry=None,
         on_recording: Optional[Callable[[str, str], None]] = None,
+        on_system_cmd: Optional[Callable[[dict], None]] = None,
     ):
         self.vision = vision_system
         self.client = anthropic_client  # Claude Vision 호출용
@@ -268,6 +381,7 @@ class ToolExecutor:
         self.on_timer = on_timer       # callback(label) — 타이머 만료 시 호출
         self.face_registry = face_registry  # FaceRegistry (선택)
         self.on_recording = on_recording   # callback(action, label, kind) — "start"|"stop"
+        self.on_system_cmd = on_system_cmd  # callback(cmd_dict) — 시스템 제어 명령
         self.is_recording = False
         self._recording_label = ""
         self.is_audio_recording = False
@@ -1203,6 +1317,61 @@ class ToolExecutor:
         if self.on_recording:
             self.on_recording("stop", label, "audio")
         return "음성 녹음을 중지했습니다. 파일을 저장하고 있습니다."
+
+    # -------- 시스템 제어 도구 --------
+    def _t_open_url(self, url: str) -> str:
+        url = url.strip()
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        if self.on_system_cmd:
+            self.on_system_cmd({"type": "sys_open_url", "url": url})
+        return f"브라우저에서 {url} 을 열었습니다."
+
+    def _t_send_notification(self, title: str, body: str = "") -> str:
+        if self.on_system_cmd:
+            self.on_system_cmd({"type": "sys_notification", "title": title, "body": body})
+        return f"알림을 보냈습니다: {title}"
+
+    def _t_set_alarm(self, hour: int, minute: int = 0, label: str = "알람") -> str:
+        hour = max(0, min(23, hour))
+        minute = max(0, min(59, minute))
+        now = datetime.now()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            from datetime import timedelta
+            target += timedelta(days=1)
+        diff = (target - now).total_seconds()
+
+        def trigger():
+            time.sleep(diff)
+            print(f"\n⏰ 알람: {label} ({hour:02d}:{minute:02d})")
+            if self.on_timer:
+                self.on_timer(f"🔔 {label}")
+            if self.on_system_cmd:
+                self.on_system_cmd({
+                    "type": "sys_notification",
+                    "title": f"⏰ 알람: {label}",
+                    "body": f"{hour:02d}:{minute:02d} 알람이 울렸습니다.",
+                })
+
+        threading.Thread(target=trigger, daemon=True).start()
+        return f"{hour:02d}:{minute:02d} 알람 '{label}' 설정됨 (약 {int(diff//60)}분 후)"
+
+    def _t_set_volume(self, level: int) -> str:
+        level = max(0, min(100, level))
+        if self.on_system_cmd:
+            self.on_system_cmd({"type": "sys_set_volume", "level": level})
+        return f"음량을 {level}%로 설정했습니다."
+
+    def _t_change_setting(self, setting: str, value: str) -> str:
+        setting = setting.strip().lower()
+        value = value.strip()
+        if setting not in ("backend", "voice", "model"):
+            return f"알 수 없는 설정: {setting}. backend, voice, model 중 선택해주세요."
+        if self.on_system_cmd:
+            self.on_system_cmd({"type": "sys_change_setting", "setting": setting, "value": value})
+        labels = {"backend": "AI 백엔드", "voice": "음성", "model": "모델"}
+        return f"{labels.get(setting, setting)}을(를) '{value}'(으)로 변경 요청했습니다."
 
     # -------- 메모리 입출력 --------
     def _load_memory(self) -> dict:

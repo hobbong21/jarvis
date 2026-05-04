@@ -98,6 +98,15 @@ Validator).
 - `web/style.css`: 프로필 폼 스타일 (.profile-form, .profile-row, .profile-label, .prod-textarea)
 - 말투 성향 옵션: friendly(친근한), formal(정중한), casual(편한), cute(귀여운), professional(전문적인)
 
+**시스템 제어 도구** (음성 명령으로 시스템 제어):
+- `open_url`: 브라우저에서 URL/사이트 열기 ("유튜브 열어", "네이버 켜줘"). WS `sys_open_url` → 클라이언트 `window.open()`.
+- `send_notification`: 브라우저 알림 보내기. Web Notification API 활용 (페이지 로드 시 권한 요청).
+- `set_alarm`: 특정 시각에 알람 설정 ("3시에 알려줘"). set_timer(지속 시간)와 구분. 만료 시 timer_expired + 브라우저 알림.
+- `set_volume`: TTS 음량 조절 (0-100). WS `sys_set_volume` → 클라이언트 `ttsAudio.volume` + `window.__sarvisVolume`.
+- `change_setting`: 사비스 설정 변경 (backend/voice/model). WS `sys_change_setting` → 클라이언트가 기존 switch_backend/switch_model/switch_voice 호출.
+- 모든 시스템 제어 도구는 `on_system_cmd` 콜백 → `_on_system_cmd` → `_emit()` → 클라이언트 WS 메시지 패턴.
+- 기존 timer_expired에도 브라우저 Notification 추가.
+
 **텍스트 읽기 (OCR)**: `read_text` 도구 추가.
 - "읽어줘", "뭐라고 써있어", "글자 읽어", "간판 읽어", "메뉴판 읽어" 등의 음성 명령.
 - Claude Vision을 OCR 전용 프롬프트로 호출, 위치별 텍스트 추출 + 불확실 부분 [?] 표시.

@@ -69,6 +69,9 @@
   const faceCount = $('face-count');
   const faceMsg = $('face-msg');
   const ttsAudio = $('tts-audio');
+  if (Notification.permission === 'default') {
+    Notification.requestPermission().catch(() => {});
+  }
   const continuousToggle = $('continuous-toggle');
 
   const mobileMicBtn = $('mobile-mic-btn');
@@ -414,6 +417,40 @@
         break;
       case 'timer_expired':
         flash(`⏰ 타이머: ${m.label}`);
+        if (Notification.permission === 'granted') {
+          new Notification('⏰ ' + (m.label || '타이머'), { body: '타이머가 만료되었습니다.' });
+        }
+        break;
+      case 'sys_open_url':
+        if (m.url) { window.open(m.url, '_blank', 'noopener,noreferrer'); }
+        flash(`🌐 ${m.url} 열기`);
+        break;
+      case 'sys_notification':
+        flash(`🔔 ${m.title || '알림'}`);
+        if (Notification.permission === 'granted') {
+          new Notification(m.title || '사비스', { body: m.body || '' });
+        } else if (Notification.permission !== 'denied') {
+          Notification.requestPermission().then(p => {
+            if (p === 'granted') new Notification(m.title || '사비스', { body: m.body || '' });
+          });
+        }
+        break;
+      case 'sys_set_volume':
+        if (typeof m.level === 'number') {
+          window.__sarvisVolume = m.level / 100;
+          document.querySelectorAll('audio').forEach(a => { a.volume = window.__sarvisVolume; });
+        }
+        flash(`🔊 음량: ${m.level}%`);
+        break;
+      case 'sys_change_setting':
+        if (m.setting === 'backend') {
+          send({ type: 'switch_backend', backend: m.value });
+        } else if (m.setting === 'model') {
+          send({ type: 'switch_model', backend: '', model: m.value });
+        } else if (m.setting === 'voice') {
+          send({ type: 'switch_voice', preset: m.value });
+        }
+        flash(`⚙ 설정 변경: ${m.setting} → ${m.value}`);
         break;
       case 'error':
         flash(`⚠ ${m.message}`, 'error');
@@ -1913,6 +1950,7 @@
     let revoked = false;
     const revokeOnce = () => { if (!revoked) { revoked = true; URL.revokeObjectURL(url); } };
     ttsAudio.src = url;
+    if (typeof window.__sarvisVolume === 'number') ttsAudio.volume = window.__sarvisVolume;
     ttsAudio.play().then(() => {
       if (_analyser) _startAmpLoop();
     }).catch(() => {

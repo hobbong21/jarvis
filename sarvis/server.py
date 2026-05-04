@@ -275,6 +275,7 @@ class UserSession:
                 on_timer=self._on_timer,
                 face_registry=FACE_REGISTRY,
                 on_recording=self._on_recording,
+                on_system_cmd=self._on_system_cmd,
             )
         self.brain.tools = self.tools
 
@@ -317,6 +318,9 @@ class UserSession:
 
     def _on_timer(self, label: str):
         self._emit({"type": "timer_expired", "label": label})
+
+    def _on_system_cmd(self, cmd: dict):
+        self._emit(cmd)
 
     # -------- 행동 모니터링 --------
     def start_observing(self, interval: float = 6.0):
