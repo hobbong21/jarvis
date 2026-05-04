@@ -12,6 +12,7 @@ import asyncio
 import functools
 import base64
 import json
+import mimetypes as _mimetypes
 import os
 import re
 import secrets
@@ -21,6 +22,39 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+_STATIC_MIME_FALLBACKS = {
+    ".css": "text/css",
+    ".js": "text/javascript",
+    ".html": "text/html",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".mp3": "audio/mpeg",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".wav": "audio/wav",
+}
+try:
+    _mimetypes.init()
+except Exception:
+    pass
+if not _mimetypes.inited:
+    _mimetypes.inited = True
+    _mimetypes._db = _mimetypes.MimeTypes()
+for _ext, _mt in _STATIC_MIME_FALLBACKS.items():
+    try:
+        _mimetypes.add_type(_mt, _ext)
+    except Exception:
+        _mimetypes._db.types_map[0][_ext] = _mt
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
