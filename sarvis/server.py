@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .audio_io import EdgeTTS, make_stt
@@ -417,6 +418,40 @@ async def index():
             "Expires": "0",
         },
     )
+
+
+# ============================================================
+# 파일 다운로드 API — 저장된 녹화/사진 파일 서빙
+# ============================================================
+@app.get("/api/recordings/{rec_id}")
+async def download_recording(rec_id: int):
+    from .memory import Memory
+    mem = Memory(cfg.db_path)
+    rows = mem.list_recordings("__all__", limit=9999)
+    row = None
+    all_recs = []
+    with mem._conn_ctx_cls(mem.path) as conn:
+        r = conn.execute(
+            "SELECT * FROM recordings WHERE id=?", (rec_id,)
+        ).fetchone()
+        if r:
+            row = dict(r)
+    if not row:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "not found"}, status_code=404)
+    fp = row.get("file_path", "")
+    if not fp or not os.path.isfile(fp):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "file missing"}, status_code=404)
+    fname = row.get("filename", os.path.basename(fp))
+    kind = row.get("kind", "")
+    if kind == "photo":
+        media_type = "image/jpeg"
+    elif kind == "audio":
+        media_type = "audio/webm"
+    else:
+        media_type = "video/webm"
+    return FileResponse(fp, filename=fname, media_type=media_type)
 
 
 # ============================================================
@@ -2247,6 +2282,7 @@ async def websocket_endpoint(ws: WebSocket):
                 "todo_list", "todo_add", "todo_done", "todo_remove", "todo_extract",
                 "feedback_submit", "my_sarvis_summary",  # 사이클 #22
                 "profile_get", "profile_save",  # 사이클 #30 개인화
+                "storage_list", "storage_delete",  # 저장 공간
                 "ha_run_observer", "ha_issues_list", "ha_kill_switch",
                 "ha_optout", "ha_growth_diary",          # 사이클 #23
                 "ha_run_diagnostician", "ha_diagnoses_for_issue",  # 사이클 #24
@@ -2318,6 +2354,37 @@ async def websocket_endpoint(ws: WebSocket):
                 except Exception as ex:
                     print(f"[profile_save] 실패: {ex!r}")
                     await emit(type="error", message="프로필 저장 실패")
+
+            elif mtype == "storage_list":
+                try:
+                    kind_filter = str(data.get("kind", "")).strip() or None
+                    lim = min(int(data.get("limit", 100)), 500)
+                    recs = await asyncio.to_thread(
+                        session.memory.list_recordings,
+                        session.memory_user_id, lim,
+                    )
+                    if kind_filter:
+                        recs = [r for r in recs if r.get("kind") == kind_filter]
+                    for r in recs:
+                        r.pop("file_path", None)
+                    await emit(type="storage_list", ok=True, items=recs)
+                except Exception as ex:
+                    print(f"[storage_list] 실패: {ex!r}")
+                    await emit(type="storage_list", ok=False, items=[], message="목록 로드 실패")
+
+            elif mtype == "storage_delete":
+                try:
+                    rec_id = int(data.get("id") or 0)
+                    if rec_id <= 0:
+                        await emit(type="storage_deleted", ok=False, message="id 필요")
+                        continue
+                    ok = await asyncio.to_thread(
+                        session.memory.delete_recording, rec_id,
+                    )
+                    await emit(type="storage_deleted", ok=ok, id=rec_id)
+                except Exception as ex:
+                    print(f"[storage_delete] 실패: {ex!r}")
+                    await emit(type="storage_deleted", ok=False, message="삭제 실패")
 
             elif mtype == "my_sarvis_summary":
                 # body: {window_days?: float, default 7}
