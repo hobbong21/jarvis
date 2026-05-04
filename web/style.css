@@ -2176,6 +2176,14 @@ input, select { outline: none; }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.25; }
 }
+.recording-indicator.audio-rec {
+  background: rgba(37, 99, 235, 0.12);
+  color: #2563eb;
+}
+.recording-indicator.audio-rec .rec-dot {
+  background: #2563eb;
+}
+.recording-indicator.audio-rec .rec-time { color: #1d4ed8; }
 @keyframes rec-fade-in {
   from { opacity: 0; transform: scale(0.9); }
   to { opacity: 1; transform: scale(1); }

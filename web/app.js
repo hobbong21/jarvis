@@ -93,6 +93,12 @@
   let videoRecording = false;
   let videoRecordingStart = 0;
   let videoRecordingLabel = '';
+  let audioRecorder = null;
+  let audioChunks = [];
+  let audioRecording = false;
+  let audioRecordingStart = 0;
+  let audioRecordingLabel = '';
+  let audioStream = null;
   let mainOrb = null;
   let secondOrb = null;
   let compareMode = false;
@@ -2871,6 +2877,11 @@
 
   // -------- 녹화 기능 --------
   function handleRecordingCmd(m) {
+    const kind = m.kind || 'video';
+    if (kind === 'audio') {
+      handleAudioRecordingCmd(m);
+      return;
+    }
     if (m.action === 'start') {
       startVideoRecording(m.label || '');
     } else if (m.action === 'stop') {
@@ -2878,11 +2889,20 @@
     }
   }
 
+  function handleAudioRecordingCmd(m) {
+    if (m.action === 'start') {
+      startAudioRecording(m.label || '');
+    } else if (m.action === 'stop') {
+      stopAudioRecording();
+    }
+  }
+
   function handleRecordingSaved(m) {
     const dur = m.duration_s ? `${m.duration_s}초` : '';
     const size = m.size_mb ? `${m.size_mb}MB` : '';
     const label = m.label ? ` (${m.label})` : '';
-    flash(`녹화 저장 완료${label} — ${dur}, ${size}`, 'ok');
+    const kindLabel = (m.kind === 'audio') ? '녹음' : '녹화';
+    flash(`${kindLabel} 저장 완료${label} — ${dur}, ${size}`, 'ok');
   }
 
   function startVideoRecording(label) {
@@ -2916,9 +2936,13 @@
   }
 
   function stopVideoRecording() {
-    if (!videoRecording || !videoRecorder) return;
+    if (!videoRecorder) return;
+    if (!videoRecording) return;
     videoRecording = false;
-    try { videoRecorder.stop(); } catch (_) {}
+    try { videoRecorder.stop(); } catch (_) {
+      videoRecorder = null;
+      updateRecordingUI(false);
+    }
   }
 
   function sendRecordingBlob(blob) {
@@ -2959,6 +2983,101 @@
     } else {
       indicator.classList.remove('active');
       if (recTimerInterval) { clearInterval(recTimerInterval); recTimerInterval = null; }
+      if (timeEl) timeEl.textContent = '00:00';
+    }
+  }
+
+  // -------- 음성 녹음 기능 --------
+  async function startAudioRecording(label) {
+    if (audioRecording) return;
+    audioChunks = [];
+    audioRecordingLabel = label;
+    try {
+      audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      flash('마이크 권한이 필요합니다.', 'error');
+      return;
+    }
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus' : 'audio/webm';
+    try {
+      audioRecorder = new MediaRecorder(audioStream, { mimeType });
+    } catch (e) {
+      flash('녹음을 시작할 수 없습니다: ' + e.message, 'error');
+      audioStream.getTracks().forEach(t => t.stop());
+      audioStream = null;
+      return;
+    }
+    audioRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) audioChunks.push(e.data);
+    };
+    audioRecorder.onstop = () => {
+      const blob = new Blob(audioChunks, { type: 'audio/webm' });
+      audioChunks = [];
+      audioRecording = false;
+      audioRecorder = null;
+      if (audioStream) {
+        audioStream.getTracks().forEach(t => t.stop());
+        audioStream = null;
+      }
+      sendAudioRecordingBlob(blob);
+      updateAudioRecordingUI(false);
+    };
+    audioRecorder.start(1000);
+    audioRecording = true;
+    audioRecordingStart = Date.now();
+    updateAudioRecordingUI(true);
+  }
+
+  function stopAudioRecording() {
+    if (!audioRecorder) return;
+    if (!audioRecording) return;
+    audioRecording = false;
+    try { audioRecorder.stop(); } catch (_) {
+      audioRecorder = null;
+      if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
+      updateAudioRecordingUI(false);
+    }
+  }
+
+  function sendAudioRecordingBlob(blob) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    blob.arrayBuffer().then(buf => {
+      const durationMs = Date.now() - audioRecordingStart;
+      const labelBytes = new TextEncoder().encode(audioRecordingLabel);
+      const header = new Uint8Array(1 + 4 + 2 + labelBytes.length);
+      header[0] = 0x0A;
+      header[1] = (durationMs >> 24) & 0xFF;
+      header[2] = (durationMs >> 16) & 0xFF;
+      header[3] = (durationMs >> 8) & 0xFF;
+      header[4] = durationMs & 0xFF;
+      header[5] = (labelBytes.length >> 8) & 0xFF;
+      header[6] = labelBytes.length & 0xFF;
+      header.set(labelBytes, 7);
+      const payload = new Uint8Array(header.length + buf.byteLength);
+      payload.set(header, 0);
+      payload.set(new Uint8Array(buf), header.length);
+      ws.send(payload.buffer);
+    });
+  }
+
+  let audioRecTimerInterval = null;
+  function updateAudioRecordingUI(active) {
+    const indicator = document.getElementById('audio-recording-indicator');
+    const timeEl = document.getElementById('audio-recording-time');
+    if (!indicator) return;
+    if (active) {
+      indicator.classList.add('active');
+      const start = Date.now();
+      audioRecTimerInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - start) / 1000);
+        const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+        const ss = String(elapsed % 60).padStart(2, '0');
+        if (timeEl) timeEl.textContent = `${mm}:${ss}`;
+      }, 500);
+    } else {
+      indicator.classList.remove('active');
+      if (audioRecTimerInterval) { clearInterval(audioRecTimerInterval); audioRecTimerInterval = null; }
       if (timeEl) timeEl.textContent = '00:00';
     }
   }

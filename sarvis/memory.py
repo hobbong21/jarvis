@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS recordings (
     user_id       TEXT    NOT NULL,
     filename      TEXT    NOT NULL,
     file_path     TEXT    NOT NULL,
+    kind          TEXT    NOT NULL DEFAULT 'video',
     label         TEXT    NOT NULL DEFAULT '',
     duration_ms   INTEGER NOT NULL DEFAULT 0,
     size_bytes    INTEGER NOT NULL DEFAULT 0,
@@ -382,6 +383,7 @@ def _ensure_schema(path: str) -> None:
             # 기존 DB (사이클 #14 만 적용된 상태) 는 여기서 채워진다.
             _migrate_add_column_if_missing(conn, "commands", "audio_path", "TEXT")
             _migrate_add_column_if_missing(conn, "commands", "video_path", "TEXT")
+            _migrate_add_column_if_missing(conn, "recordings", "kind", "TEXT NOT NULL DEFAULT 'video'")
             # 사이클 #22 (HARN-12): 레거시 DB 에 command_feedback 테이블 보장.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS command_feedback (
@@ -1118,6 +1120,7 @@ class Memory:
         user_id: str,
         filename: str,
         file_path: str,
+        kind: str = "video",
         label: str = "",
         duration_ms: int = 0,
         size_bytes: int = 0,
@@ -1125,9 +1128,9 @@ class Memory:
         now = time.time()
         with _conn_ctx(self.path) as conn:
             cur = conn.execute(
-                "INSERT INTO recordings (user_id, filename, file_path, label, "
-                "duration_ms, size_bytes, created_at) VALUES (?,?,?,?,?,?,?)",
-                (user_id, filename, file_path, label, duration_ms, size_bytes, now),
+                "INSERT INTO recordings (user_id, filename, file_path, kind, label, "
+                "duration_ms, size_bytes, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (user_id, filename, file_path, kind, label, duration_ms, size_bytes, now),
             )
             return int(cur.lastrowid)
 

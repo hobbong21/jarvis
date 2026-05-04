@@ -278,15 +278,17 @@ class UserSession:
             )
         self.brain.tools = self.tools
 
-    def _on_recording(self, action: str, label: str):
+    def _on_recording(self, action: str, label: str, kind: str = "video"):
         if action == "start":
-            self.is_recording = True
-            self._recording_label = label
-            self._recording_start_ts = time.time()
-            self._emit({"type": "recording_cmd", "action": "start", "label": label})
+            if kind == "video":
+                self.is_recording = True
+                self._recording_label = label
+                self._recording_start_ts = time.time()
+            self._emit({"type": "recording_cmd", "action": "start", "label": label, "kind": kind})
         elif action == "stop":
-            self.is_recording = False
-            self._emit({"type": "recording_cmd", "action": "stop", "label": label})
+            if kind == "video":
+                self.is_recording = False
+            self._emit({"type": "recording_cmd", "action": "stop", "label": label, "kind": kind})
 
     def detach_tools(self):
         self.brain.tools = None
@@ -1420,6 +1422,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 user_id=session.memory_user_id,
                                 filename=fname,
                                 file_path=fpath,
+                                kind="video",
                                 label=label,
                                 duration_ms=duration_ms,
                                 size_bytes=len(blob),
@@ -1432,6 +1435,7 @@ async def websocket_endpoint(ws: WebSocket):
                             id=rec_id,
                             filename=fname,
                             label=label,
+                            kind="video",
                             duration_s=round(dur_s, 1),
                             size_mb=round(size_mb, 2),
                         )
@@ -1439,6 +1443,54 @@ async def websocket_endpoint(ws: WebSocket):
                     except Exception as e:
                         print(f"[WS 0x09 recording save] {e}")
                         await emit(type="error", message="녹화 파일을 저장하지 못했습니다.")
+                    continue
+                elif kind == 0x0A:
+                    if OWNER_AUTH.is_enrolled() and not _is_authed():
+                        continue
+                    if not payload or len(payload) < 6:
+                        continue
+                    try:
+                        duration_ms = int.from_bytes(payload[:4], "big")
+                        label_len = int.from_bytes(payload[4:6], "big")
+                        label = payload[6:6 + label_len].decode("utf-8", errors="replace") if label_len else ""
+                        blob = payload[6 + label_len:]
+                        if not blob:
+                            continue
+                        ts = time.strftime("%Y%m%d_%H%M%S")
+                        ms = int(time.time() * 1000) % 1000
+                        safe_label = re.sub(r'[^\w가-힣-]', '_', label)[:30] if label else ""
+                        fname = f"audio_{ts}_{ms:03d}_{safe_label}.webm" if safe_label else f"audio_{ts}_{ms:03d}.webm"
+                        user_dir = os.path.join(RECORDINGS_DIR, session.memory_user_id)
+                        os.makedirs(user_dir, exist_ok=True)
+                        fpath = os.path.join(user_dir, fname)
+                        await asyncio.to_thread(_write_bytes, fpath, blob)
+                        rec_id = await asyncio.to_thread(
+                            functools.partial(
+                                session.memory.save_recording,
+                                user_id=session.memory_user_id,
+                                filename=fname,
+                                file_path=fpath,
+                                kind="audio",
+                                label=label,
+                                duration_ms=duration_ms,
+                                size_bytes=len(blob),
+                            )
+                        )
+                        size_mb = len(blob) / (1024 * 1024)
+                        dur_s = duration_ms / 1000
+                        await emit(
+                            type="recording_saved",
+                            id=rec_id,
+                            filename=fname,
+                            label=label,
+                            kind="audio",
+                            duration_s=round(dur_s, 1),
+                            size_mb=round(size_mb, 2),
+                        )
+                        print(f"[녹음 저장] {fname} ({size_mb:.1f}MB, {dur_s:.1f}s)")
+                    except Exception as e:
+                        print(f"[WS 0x0A audio recording save] {e}")
+                        await emit(type="error", message="녹음 파일을 저장하지 못했습니다.")
                     continue
                 continue
 

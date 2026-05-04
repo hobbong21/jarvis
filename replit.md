@@ -81,8 +81,12 @@ Validator).
 - `web/app.js`: MediaRecorder API, `recording_cmd`/`recording_saved` 이벤트 핸들링, 0x09 바이너리 전송
 - `web/index.html` + `web/style.css`: REC 인디케이터 (빨간 점 + 경과 시간)
 
-**바이너리 프로토콜 0x09**: `[4B duration_ms BE][2B label_len BE][label UTF-8][WebM blob]`
-**보안**: 인증 게이트 적용 (미인증 시 0x09 무시). 파일명 밀리초 타임스탬프로 충돌 방지.
+**음성 녹음** (같은 사이클): `start_audio_recording`/`stop_audio_recording` 도구 추가.
+- 카메라 없이 마이크만으로 녹음 가능. 영상 녹화와 동시 사용 가능.
+- 바이너리 프로토콜 0x0A (음성), 0x09 (영상). 동일 payload 구조: `[4B duration_ms BE][2B label_len BE][label UTF-8][WebM blob]`
+- recordings 테이블 `kind` 컬럼으로 video/audio 구분 (기존 DB 자동 마이그레이션).
+- UI: 영상=빨간 REC, 음성=파란 MIC 인디케이터 (동시 표시 가능).
+- **보안**: 인증 게이트 적용 (미인증 시 0x09/0x0A 무시). 파일명 밀리초 타임스탬프로 충돌 방지.
 
 ## Cycle #24 — HA Stage S2 (Diagnostician, L1 — 진단까지)
 

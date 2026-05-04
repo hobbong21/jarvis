@@ -182,6 +182,33 @@ TOOL_DEFINITIONS = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "start_audio_recording",
+        "description": (
+            "Start recording audio from the user's microphone. Use when the user asks "
+            "'녹음해', '녹음 시작', '음성 녹음', '소리 녹음', 'record audio', "
+            "'목소리 녹음해', '말 녹음해'. Returns confirmation that audio recording has started."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Optional label for this audio recording (e.g. '회의 녹음', '메모')",
+                }
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "stop_audio_recording",
+        "description": (
+            "Stop the current audio recording and save the file. Use when the user asks "
+            "'녹음 중지', '녹음 끝', '녹음 멈춰', 'stop audio recording', '녹음 그만'. "
+            "Returns the saved file info."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "observe_action",
         "description": (
             "Analyze the user's recent action/behavior visible on camera. "
@@ -221,9 +248,11 @@ class ToolExecutor:
         self.on_event = on_event       # callback(tool_name, status: "start"|"end")
         self.on_timer = on_timer       # callback(label) — 타이머 만료 시 호출
         self.face_registry = face_registry  # FaceRegistry (선택)
-        self.on_recording = on_recording   # callback(action, label) — "start"|"stop"
+        self.on_recording = on_recording   # callback(action, label, kind) — "start"|"stop"
         self.is_recording = False
         self._recording_label = ""
+        self.is_audio_recording = False
+        self._audio_recording_label = ""
 
         # 사이클 #9 정비: 도구의 영속 메모리도 data/ 아래로 통일.
         self.memory_path = Path(os.environ.get("SARVIS_TOOL_MEMORY", "data/memory.json"))
@@ -1053,31 +1082,53 @@ class ToolExecutor:
             human = f"{seconds}초"
         return f"{human} 타이머 '{label}' 설정됨"
 
-    # -------- 녹화 --------
+    # -------- 녹화 / 녹음 --------
     def _t_start_recording(self, label: str = "") -> str:
         if self.is_recording:
-            return "이미 녹화 중입니다. 먼저 녹화를 중지해주세요."
+            return "이미 영상 녹화 중입니다. 먼저 녹화를 중지해주세요."
         frame = self.vision.read()
         if frame is None:
             return "카메라가 켜져 있지 않습니다. 먼저 카메라를 시작해주세요."
         self.is_recording = True
         self._recording_label = label or ""
         if self.on_recording:
-            self.on_recording("start", self._recording_label)
-        msg = "녹화를 시작했습니다."
+            self.on_recording("start", self._recording_label, "video")
+        msg = "영상 녹화를 시작했습니다."
         if label:
             msg += f" (라벨: {label})"
         return msg
 
     def _t_stop_recording(self) -> str:
         if not self.is_recording:
-            return "현재 녹화 중이 아닙니다."
+            return "현재 영상 녹화 중이 아닙니다."
         self.is_recording = False
         label = self._recording_label
         self._recording_label = ""
         if self.on_recording:
-            self.on_recording("stop", label)
-        return "녹화를 중지했습니다. 파일을 저장하고 있습니다."
+            self.on_recording("stop", label, "video")
+        return "영상 녹화를 중지했습니다. 파일을 저장하고 있습니다."
+
+    def _t_start_audio_recording(self, label: str = "") -> str:
+        if self.is_audio_recording:
+            return "이미 음성 녹음 중입니다. 먼저 녹음을 중지해주세요."
+        self.is_audio_recording = True
+        self._audio_recording_label = label or ""
+        if self.on_recording:
+            self.on_recording("start", self._audio_recording_label, "audio")
+        msg = "음성 녹음을 시작했습니다."
+        if label:
+            msg += f" (라벨: {label})"
+        return msg
+
+    def _t_stop_audio_recording(self) -> str:
+        if not self.is_audio_recording:
+            return "현재 음성 녹음 중이 아닙니다."
+        self.is_audio_recording = False
+        label = self._audio_recording_label
+        self._audio_recording_label = ""
+        if self.on_recording:
+            self.on_recording("stop", label, "audio")
+        return "음성 녹음을 중지했습니다. 파일을 저장하고 있습니다."
 
     # -------- 메모리 입출력 --------
     def _load_memory(self) -> dict:
